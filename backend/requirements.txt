@@ -1,0 +1,40 @@
+# 基金情绪分析系统 V3.5 - 后端依赖
+# Python 3.11+
+
+# --- Web 框架 ---
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# --- 数据库 ---
+sqlalchemy[asyncio]==2.0.25
+asyncpg==0.29.0
+aiosqlite==0.19.0
+alembic==1.13.1
+
+# --- 缓存与任务队列 ---
+redis==5.0.1
+celery[redis]==5.3.6
+
+# --- 数据源 ---
+akshare==1.12.0
+tushare==1.4.0
+pandas==2.1.5
+numpy==1.26.3
+
+# --- 配置与工具 ---
+python-dotenv==1.0.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+httpx==0.26.0
+
+# --- 定时任务 ---
+apscheduler==3.10.4
+
+# --- 日志与监控 ---
+loguru==0.7.2
+
+# --- 测试 ---
+pytest==7.4.4
+pytest-asyncio==0.23.3
+httpx==0.26.0
