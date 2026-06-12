@@ -2,7 +2,7 @@ import axios from 'axios';
 import type { ApiResponse } from '../types';
 
 const client = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || '/api/v1',
+  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://47.103.67.106:8000/api/v1',
   timeout: 15000,
   headers: {
     'Content-Type': 'application/json',
