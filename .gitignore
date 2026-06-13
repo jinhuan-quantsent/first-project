@@ -1,35 +1,28 @@
+# 备份文件
+*.bak_*
+*.bak_scorev4_*
+
+# SQLite 数据库
+*.db
+data/*.db
+
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-.eggs/
-*.egg
-.pytest_cache/
+*.py[cod]
+*.class
+*.so
+.Python
 venv/
-.venv/
+env/
 
-# Node
-node_modules/
-dist/
-.cache/
+# 环境变量
+.env
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Environment
-.env
-!.env.example
-
-# Database
-*.db
-*.sqlite3
-data/
-
-# Docker
+# 日志
 *.log
