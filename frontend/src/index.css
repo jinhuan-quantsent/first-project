@@ -8,7 +8,9 @@
 :root {
   --sentiment-extreme-fear: #00A86B;
   --sentiment-fear: #4CAF50;
+  --sentiment-cautious: #2196F3;
   --sentiment-neutral: #9E9E9E;
+  --sentiment-optimistic: #FFC107;
   --sentiment-greed: #FF9800;
   --sentiment-extreme-greed: #F44336;
 
@@ -57,13 +59,17 @@ body {
    ============================================================ */
 .sentiment-bg-extreme_fear { background-color: var(--sentiment-extreme-fear); }
 .sentiment-bg-fear { background-color: var(--sentiment-fear); }
+.sentiment-bg-cautious { background-color: var(--sentiment-cautious); }
 .sentiment-bg-neutral { background-color: var(--sentiment-neutral); }
+.sentiment-bg-optimistic { background-color: var(--sentiment-optimistic); }
 .sentiment-bg-greed { background-color: var(--sentiment-greed); }
 .sentiment-bg-extreme_greed { background-color: var(--sentiment-extreme-greed); }
 
 .sentiment-text-extreme_fear { color: var(--sentiment-extreme-fear); }
 .sentiment-text-fear { color: var(--sentiment-fear); }
+.sentiment-text-cautious { color: var(--sentiment-cautious); }
 .sentiment-text-neutral { color: var(--sentiment-neutral); }
+.sentiment-text-optimistic { color: var(--sentiment-optimistic); }
 .sentiment-text-greed { color: var(--sentiment-greed); }
 .sentiment-text-extreme_greed { color: var(--sentiment-extreme-greed); }
 

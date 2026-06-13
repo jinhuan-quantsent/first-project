@@ -12,7 +12,7 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
-from app.engine.scoring import FactorScore
+from app.engine.scoring import FactorScore, calculate_dynamic_weights, calculate_sentiment_velocity
 
 
 # ============================================================
@@ -50,6 +50,8 @@ class CompositeResult:
     conclusion: str = ""
     operation_advice: str = ""
     divergence_index: float = 0.0
+    sentiment_velocity: float = 0.0
+    sentiment_velocity_label: str = "stable"
     trend_direction: str = "stable"
     trend_strength: float = 0.0
     is_extreme: bool = False
@@ -126,32 +128,31 @@ def select_top3_factors(factor_scores: dict[str, FactorScore]) -> list[FactorSco
 # ============================================================
 def get_sentiment_label(score: float) -> str:
     """
-    根据综合评分映射情绪标签
+    根据综合评分映射情绪标签（7档）
 
     Args:
         score: 0-100 综合评分
 
     Returns:
-        str: extreme_fear / fear / neutral / greed / extreme_greed
+        str: extreme_fear / fear / cautious / neutral / optimistic / greed / extreme_greed
     """
-    if score < 20:
-        return "extreme_fear"
-    elif score < 40:
-        return "fear"
-    elif score < 60:
-        return "neutral"
-    elif score < 80:
-        return "greed"
-    else:
-        return "extreme_greed"
+    if score < 15: return "extreme_fear"
+    elif score < 30: return "fear"
+    elif score < 45: return "cautious"
+    elif score < 56: return "neutral"
+    elif score < 71: return "optimistic"
+    elif score < 86: return "greed"
+    else: return "extreme_greed"
 
 
 SENTIMENT_LABEL_CN: dict[str, str] = {
     "extreme_fear": "极度恐慌",
     "fear": "恐慌",
+    "cautious": "谨慎",
     "neutral": "中性",
-    "greed": "乐观",
-    "extreme_greed": "极度乐观",
+    "optimistic": "乐观",
+    "greed": "贪婪",
+    "extreme_greed": "极度贪婪",
 }
 
 
@@ -160,7 +161,7 @@ SENTIMENT_LABEL_CN: dict[str, str] = {
 # ============================================================
 def get_operation_advice(score: float) -> str:
     """
-    根据综合评分生成操作建议
+    根据综合评分生成操作建议（7档）
 
     Args:
         score: 0-100 综合评分
@@ -169,23 +170,19 @@ def get_operation_advice(score: float) -> str:
         str: 操作建议文字
     """
     if score < 15:
-        return "【极度恐慌】市场处于恐慌底部区域，建议分批建仓，左侧布局优质标的。仓位可提升至70-80%。"
-    elif score < 25:
-        return "【恐慌】市场情绪低迷，可能是阶段性底部。建议小仓位试探性买入，仓位控制在50-60%。"
-    elif score < 35:
-        return "【偏恐慌】市场信心不足，建议观望为主，逢低可小幅加仓。仓位控制在40-50%。"
+        return "【极度恐慌】市场处于恐慌底部区域，建议大幅加仓，左侧布局优质标的。仓位可提升至70-80%。"
+    elif score < 30:
+        return "【恐慌】市场情绪低迷，可能是阶段性底部。建议适度加仓，仓位控制在50-60%。"
     elif score < 45:
-        return "【偏弱】市场略偏谨慎，建议持有现有仓位，等待更明确信号。仓位控制在40-50%。"
-    elif score < 55:
-        return "【中性】市场情绪均衡，建议维持中性仓位，关注结构机会。仓位控制在40-60%。"
-    elif score < 65:
-        return "【偏乐观】市场情绪偏暖，可适度参与，注意控制风险。仓位控制在50-65%。"
-    elif score < 75:
-        return "【乐观】市场情绪积极，趋势向好，可积极参与但注意不要追高。仓位控制在60-70%。"
-    elif score < 85:
-        return "【偏热】市场情绪较高，短期可能超买。建议逐步减仓锁定利润。仓位控制在40-50%。"
+        return "【谨慎】市场信心不足，建议小幅加仓或观望，仓位控制在40-50%。"
+    elif score < 56:
+        return "【中性】市场情绪均衡，建议维持当前仓位，关注结构机会。仓位控制在40-60%。"
+    elif score < 71:
+        return "【乐观】市场情绪偏暖，建议小幅减仓，注意控制风险。仓位控制在50-65%。"
+    elif score < 86:
+        return "【贪婪】市场情绪积极，趋势向好，建议适度减仓，耐心等待回调。仓位控制在40-50%。"
     else:
-        return "【极度乐观】市场情绪过热，警惕回调风险。建议大幅减仓至30%以下，等待调整。"
+        return "【极度贪婪】市场情绪过热，警惕回调风险。建议大幅减仓至30%以下，等待调整。"
 
 
 # ============================================================
@@ -209,12 +206,19 @@ def calculate_index_sentiment(
     Returns:
         CompositeResult: 完整情绪分析结果
     """
-    # 综合评分
-    composite_score = calculate_composite_score(factor_scores)
+    # 动态权重
+    dynamic_weights = calculate_dynamic_weights(list(factor_scores.values()))
+
+    # 综合评分（使用动态权重）
+    composite_score = calculate_composite_score(factor_scores, weights=dynamic_weights)
     sentiment_label = get_sentiment_label(composite_score)
 
     # Top3 因子
     top3 = select_top3_factors(factor_scores)
+
+    # 情绪速度
+    prev_scores_list = [previous_score] if previous_score is not None else []
+    sentiment_velocity, sentiment_velocity_label = calculate_sentiment_velocity(composite_score, prev_scores_list)
 
     # 趋势判断
     if previous_score is not None:
@@ -256,6 +260,8 @@ def calculate_index_sentiment(
         conclusion=conclusion,
         operation_advice=operation_advice,
         divergence_index=0.0,
+        sentiment_velocity=round(sentiment_velocity, 1),
+        sentiment_velocity_label=sentiment_velocity_label,
         trend_direction=trend_direction,
         trend_strength=round(trend_strength, 1),
         is_extreme=is_extreme,
@@ -299,6 +305,23 @@ def calculate_composite_sentiment(
     sentiment_label = get_sentiment_label(composite_score)
     divergence = calculate_divergence(index_results)
 
+    # 综合情绪速度（加权平均各指数的 velocity）
+    sentiment_velocity = 0.0
+    velocity_weight = 0.0
+    for code, result in index_results.items():
+        w = weights.get(code, 0.25)
+        sentiment_velocity += result.sentiment_velocity * w
+        velocity_weight += w
+    if velocity_weight > 0:
+        sentiment_velocity = round(sentiment_velocity / velocity_weight, 1)
+
+    if sentiment_velocity > 3:
+        sentiment_velocity_label = "rising"
+    elif sentiment_velocity < -3:
+        sentiment_velocity_label = "falling"
+    else:
+        sentiment_velocity_label = "stable"
+
     # 收集所有因子
     all_factors: dict[str, FactorScore] = {}
     for result in index_results.values():
@@ -316,6 +339,8 @@ def calculate_composite_sentiment(
         conclusion=generate_conclusion(composite_score, sentiment_label, "stable"),
         operation_advice=get_operation_advice(composite_score),
         divergence_index=divergence,
+        sentiment_velocity=round(sentiment_velocity, 1),
+        sentiment_velocity_label=sentiment_velocity_label,
     )
 
 
@@ -378,9 +403,13 @@ def generate_conclusion(score: float, label: str, trend: str) -> str:
         return f"{trend_text}市场处于{cn_label}状态（{score}分），恐慌情绪蔓延，或是中长期布局良机"
     elif label == "fear":
         return f"{trend_text}市场{cn_label}（{score}分），信心不足，建议谨慎观望"
+    elif label == "cautious":
+        return f"{trend_text}市场{cn_label}（{score}分），方向不明，建议控制仓位等待信号"
     elif label == "neutral":
         return f"{trend_text}市场情绪{cn_label}（{score}分），多空均衡，关注结构性机会"
+    elif label == "optimistic":
+        return f"{trend_text}市场{cn_label}（{score}分），情绪回暖，可适度参与但注意风险"
     elif label == "greed":
-        return f"{trend_text}市场{cn_label}（{score}分），情绪积极，趋势向好但需注意风险"
+        return f"{trend_text}市场{cn_label}（{score}分），情绪高涨，趋势向好但需警惕过热"
     else:
         return f"{trend_text}市场{cn_label}（{score}分），短期可能超买，警惕回调风险"

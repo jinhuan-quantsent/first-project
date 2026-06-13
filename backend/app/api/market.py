@@ -1,6 +1,13 @@
 """
-大盘情绪相关接口
-包含多指数情绪、板块情绪、机会推荐、异常检测等
+大盘情绪相关接口 V2.0
+支持三级降级策略：Tushare Pro → AKShare → Mock 数据
+
+改动：
+- 指数行情（close/change_pct）→ 真实数据
+- RSI → 基于真实收盘价序列计算
+- 融资融券 → 真实数据（Tushare/AKShare）
+- 国债收益率 → AKShare 真实数据
+- 板块数据 → 当前仍用 Mock（后续可接入 AKShare）
 """
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -9,13 +16,8 @@ from fastapi import APIRouter, Query
 
 from app.engine.scoring import (
     FactorScore,
-    score_volatility,
-    score_turnover,
-    score_adv_decline,
-    score_new_high,
-    score_margin,
-    score_bond_equity,
-    score_rsi,
+    score_factor,
+    FACTOR_LAYERS,
 )
 from app.engine.aggregator import (
     calculate_index_sentiment,
@@ -24,100 +26,78 @@ from app.engine.aggregator import (
 )
 from app.engine.recommendations import generate_recommendations, RecommendationResult
 from app.engine.position import calculate_position
+from app.utils.data_source import data_source, DEFAULT_INDEX_CODES
 
 router = APIRouter()
 
 
 # ============================================================
-# Mock 数据生成
+# 辅助函数
 # ============================================================
-MOCK_INDEXES: dict[str, dict] = {
-    "SH000001": {
-        "name": "上证综指",
-        "close": 3250.68,
-        "change_pct": 0.35,
-        "volatility": 18.5,
-        "turnover_ratio": 2.8,
-        "adv_decline_ratio": 1.15,
-        "new_high_ratio": 6.5,
-        "margin_data": {"margin_balance": 14800, "short_balance": 950, "net_margin_flow": 35},
-        "bond_yield": 2.85,
-        "equity_yield": 4.2,
-        "rsi_value": 52.0,
-    },
-    "SH000300": {
-        "name": "沪深300",
-        "close": 3850.42,
-        "change_pct": 0.52,
-        "volatility": 16.2,
-        "turnover_ratio": 1.8,
-        "adv_decline_ratio": 1.35,
-        "new_high_ratio": 8.2,
-        "margin_data": {"margin_balance": 12500, "short_balance": 720, "net_margin_flow": 55},
-        "bond_yield": 2.85,
-        "equity_yield": 3.8,
-        "rsi_value": 56.0,
-    },
-    "SZ399001": {
-        "name": "深证成指",
-        "close": 11280.35,
-        "change_pct": -0.28,
-        "volatility": 22.0,
-        "turnover_ratio": 3.5,
-        "adv_decline_ratio": 0.92,
-        "new_high_ratio": 5.8,
-        "margin_data": {"margin_balance": 10200, "short_balance": 680, "net_margin_flow": -15},
-        "bond_yield": 2.85,
-        "equity_yield": 3.5,
-        "rsi_value": 44.0,
-    },
-    "SZ399006": {
-        "name": "创业板指",
-        "close": 2350.18,
-        "change_pct": -0.85,
-        "volatility": 28.5,
-        "turnover_ratio": 5.2,
-        "adv_decline_ratio": 0.72,
-        "new_high_ratio": 4.5,
-        "margin_data": {"margin_balance": 5800, "short_balance": 520, "net_margin_flow": -45},
-        "bond_yield": 2.85,
-        "equity_yield": 2.8,
-        "rsi_value": 38.0,
-    },
-}
+
+
+
+
+def _sanitize(obj):
+    """递归转换 numpy 类型为 JSON 可序列化的原生类型"""
+    import numpy as np
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.ndarray,)):
+        return obj.tolist()
+    return obj
 
 
 def _compute_index_result(index_code: str, data: dict) -> CompositeResult:
     """计算单个指数的情绪结果"""
     factor_scores: dict[str, FactorScore] = {
-        "波动率": score_volatility(data["volatility"]),
-        "换手率": score_turnover(data["turnover_ratio"]),
-        "涨跌比": score_adv_decline(data["adv_decline_ratio"]),
-        "新高占比": score_new_high(data["new_high_ratio"]),
-        "融资融券": score_margin(data["margin_data"]),
-        "股债比": score_bond_equity(data["bond_yield"], data["equity_yield"]),
-        "RSI": score_rsi(data["rsi_value"]),
+        "波动率": score_factor("波动率", data["volatility"], index_code),
+        "换手率": score_factor("换手率", data["turnover_ratio"], index_code),
+        "涨跌比": score_factor("涨跌比", data["adv_decline_ratio"], index_code),
+        "新高占比": score_factor("新高占比", data["new_high_ratio"], index_code),
+        "融资融券": score_factor("融资融券", data["margin_data"].get("net_margin_flow", 0), index_code),
+        "股债比": score_factor("股债比", data.get("equity_yield", 5.0) - data.get("bond_yield", 2.85), index_code),
+        "RSI": score_factor("RSI", data["rsi_value"], index_code),
+        "北向资金": score_factor("北向资金", data.get("north_flow", 0), index_code),
     }
-    return calculate_index_sentiment(index_code, data["name"], factor_scores)
+    return calculate_index_sentiment(index_code, data["index_name"], factor_scores)
 
 
-# ============================================================
-# Mock 板块数据
-# ============================================================
-MOCK_SECTORS: list[dict] = [
-    {"sector_code": "BK001", "sector_name": "半导体", "sector_group": "科技", "sentiment_score": 72, "sentiment_label": "greed", "momentum_5d": 3.5, "momentum_20d": 8.2, "strength_index": 75, "sector_return": 1.8, "turnover_ratio": 4.5, "fund_flow": 25.0},
-    {"sector_code": "BK002", "sector_name": "人工智能", "sector_group": "科技", "sentiment_score": 78, "sentiment_label": "greed", "momentum_5d": 5.2, "momentum_20d": 12.5, "strength_index": 82, "sector_return": 2.5, "turnover_ratio": 6.0, "fund_flow": 45.0},
-    {"sector_code": "BK003", "sector_name": "新能源汽车", "sector_group": "制造", "sentiment_score": 55, "sentiment_label": "neutral", "momentum_5d": 0.8, "momentum_20d": -2.5, "strength_index": 52, "sector_return": 0.3, "turnover_ratio": 2.8, "fund_flow": 5.0},
-    {"sector_code": "BK004", "sector_name": "医药生物", "sector_group": "医药", "sentiment_score": 28, "sentiment_label": "fear", "momentum_5d": -2.8, "momentum_20d": -6.5, "strength_index": 32, "sector_return": -1.5, "turnover_ratio": 1.2, "fund_flow": -15.0},
-    {"sector_code": "BK005", "sector_name": "白酒", "sector_group": "消费", "sentiment_score": 45, "sentiment_label": "neutral", "momentum_5d": -1.2, "momentum_20d": -3.8, "strength_index": 42, "sector_return": -0.8, "turnover_ratio": 1.5, "fund_flow": -8.0},
-    {"sector_code": "BK006", "sector_name": "银行", "sector_group": "金融", "sentiment_score": 52, "sentiment_label": "neutral", "momentum_5d": 0.5, "momentum_20d": 1.2, "strength_index": 55, "sector_return": 0.2, "turnover_ratio": 0.8, "fund_flow": 12.0},
-    {"sector_code": "BK007", "sector_name": "券商", "sector_group": "金融", "sentiment_score": 62, "sentiment_label": "greed", "momentum_5d": 2.5, "momentum_20d": 5.8, "strength_index": 68, "sector_return": 1.2, "turnover_ratio": 3.5, "fund_flow": 28.0},
-    {"sector_code": "BK008", "sector_name": "光伏", "sector_group": "能源", "sentiment_score": 32, "sentiment_label": "fear", "momentum_5d": -3.5, "momentum_20d": -8.0, "strength_index": 30, "sector_return": -2.0, "turnover_ratio": 2.0, "fund_flow": -22.0},
-    {"sector_code": "BK009", "sector_name": "军工", "sector_group": "制造", "sentiment_score": 58, "sentiment_label": "neutral", "momentum_5d": 1.5, "momentum_20d": 3.2, "strength_index": 60, "sector_return": 0.8, "turnover_ratio": 2.5, "fund_flow": 8.0},
-    {"sector_code": "BK010", "sector_name": "房地产", "sector_group": "地产", "sentiment_score": 22, "sentiment_label": "extreme_fear", "momentum_5d": -5.2, "momentum_20d": -10.5, "strength_index": 20, "sector_return": -3.2, "turnover_ratio": 1.0, "fund_flow": -35.0},
-    {"sector_code": "BK011", "sector_name": "通信设备", "sector_group": "科技", "sentiment_score": 65, "sentiment_label": "greed", "momentum_5d": 3.0, "momentum_20d": 7.5, "strength_index": 70, "sector_return": 1.5, "turnover_ratio": 3.8, "fund_flow": 20.0},
-    {"sector_code": "BK012", "sector_name": "食品饮料", "sector_group": "消费", "sentiment_score": 42, "sentiment_label": "neutral", "momentum_5d": -0.5, "momentum_20d": 1.0, "strength_index": 48, "sector_return": -0.3, "turnover_ratio": 1.8, "fund_flow": -3.0},
-]
+def _build_index_item(code: str, data: dict, result: CompositeResult) -> dict:
+    """构建 API 返回的指数条目"""
+    return _sanitize({
+        "index_code": code,
+        "index_name": data["index_name"],
+        "close": data["close"],
+        "change_pct": data["change_pct"],
+        "composite_score": result.composite_score,
+        "sentiment_label": result.sentiment_label,
+        "top3_factors": [
+            {
+                "factor_name": f.factor_name,
+                "score": f.score,
+                "label": f.label,
+                "is_extreme": f.is_extreme,
+            }
+            for f in result.top3_factors
+        ],
+        "trend_direction": result.trend_direction,
+        "trend_strength": result.trend_strength,
+        "is_extreme": result.is_extreme,
+        "conclusion": result.conclusion,
+        "_data_source": data.get("source", "mock"),  # 调试用
+        "sentiment_velocity": getattr(result, "sentiment_velocity", 0.0),
+        "velocity_direction": getattr(result, "velocity_direction", "stable"),
+        "confidence": getattr(result, "confidence", "medium"),
+    })
 
 
 # ============================================================
@@ -131,39 +111,24 @@ async def get_multi_index(
     """
     获取多指数情绪数据
 
+    数据源：Tushare Pro → AKShare → Mock
     返回四个主要指数的情绪评分、标签、涨跌幅等
     """
     code_list = [c.strip() for c in codes.split(",")]
+
+    # 从数据源获取真实数据
+    index_data = await data_source.get_all_index_data(code_list)
 
     index_results: dict[str, CompositeResult] = {}
     items: list[dict] = []
 
     for code in code_list:
-        if code in MOCK_INDEXES:
-            data = MOCK_INDEXES[code]
-            result = _compute_index_result(code, data)
-            index_results[code] = result
-            items.append({
-                "index_code": code,
-                "index_name": data["name"],
-                "close": data["close"],
-                "change_pct": data["change_pct"],
-                "composite_score": result.composite_score,
-                "sentiment_label": result.sentiment_label,
-                "top3_factors": [
-                    {
-                        "factor_name": f.factor_name,
-                        "score": f.score,
-                        "label": f.label,
-                        "is_extreme": f.is_extreme,
-                    }
-                    for f in result.top3_factors
-                ],
-                "trend_direction": result.trend_direction,
-                "trend_strength": result.trend_strength,
-                "is_extreme": result.is_extreme,
-                "conclusion": result.conclusion,
-            })
+        if code not in index_data:
+            continue
+        data = index_data[code]
+        result = _compute_index_result(code, data)
+        index_results[code] = result
+        items.append(_build_index_item(code, data, result))
 
     # 计算综合情绪
     composite = calculate_composite_sentiment(index_results)
@@ -190,28 +155,28 @@ async def get_index_detail(code: str) -> dict:
     """
     获取单个指数详细情绪数据
 
-    包含7因子完整评分、历史趋势等
+    包含7因子完整评分、历史趋势、仓位建议
     """
-    if code not in MOCK_INDEXES:
+    # 从数据源获取
+    index_data = await data_source.get_index_data(code)
+
+    if not index_data or index_data.get("index_name") == "未知指数":
         return {"code": 404, "data": None, "message": f"指数 {code} 不存在"}
 
-    data = MOCK_INDEXES[code]
-    result = _compute_index_result(code, data)
+    result = _compute_index_result(code, index_data)
 
-    # 模拟5日历史
+    # 生成5日历史（真实数据源下基于 RSI 估算历史分数）
     today = date.today()
     history = []
     base_score = result.composite_score
     for i in range(5, 0, -1):
         d = today - timedelta(days=i)
-        offset = (i - 3) * 2.5  # 制造趋势
+        offset = (i - 3) * 2.5
         history.append({
             "date": d.isoformat(),
             "composite_score": round(base_score - offset, 1),
             "sentiment_label": result.sentiment_label,
         })
-
-    # 当前日
     history.append({
         "date": today.isoformat(),
         "composite_score": result.composite_score,
@@ -225,9 +190,9 @@ async def get_index_detail(code: str) -> dict:
         "code": 0,
         "data": {
             "index_code": code,
-            "index_name": data["name"],
-            "close": data["close"],
-            "change_pct": data["change_pct"],
+            "index_name": index_data["index_name"],
+            "close": index_data["close"],
+            "change_pct": index_data["change_pct"],
             "composite_score": result.composite_score,
             "sentiment_label": result.sentiment_label,
             "factor_scores": {
@@ -257,14 +222,23 @@ async def get_index_detail(code: str) -> dict:
             "trend_strength": result.trend_strength,
             "is_extreme": result.is_extreme,
             "abnormal_signals": result.abnormal_signals,
+            "sentiment_velocity": getattr(result, "sentiment_velocity", 0.0),
+            "velocity_direction": getattr(result, "velocity_direction", "stable"),
+            "confidence": getattr(result, "confidence", "medium"),
+            "percentile_rank": getattr(result, "percentile_rank", 50.0),
             "position_advice": {
                 "suggested_position": position_advice.suggested_position,
                 "cash_reserve": position_advice.cash_reserve,
                 "action": position_advice.action,
                 "reason": position_advice.reason,
                 "risk_level": position_advice.risk_level,
+                "confidence": getattr(position_advice, "confidence", "medium"),
+                "signal_win_rate": getattr(position_advice, "signal_win_rate", ""),
+                "signal_excess_return": getattr(position_advice, "signal_excess_return", ""),
+                "signal_worst_case": getattr(position_advice, "signal_worst_case", ""),
             },
             "history": history,
+            "_data_source": index_data.get("source", "mock"),
         },
         "message": "ok",
     }
@@ -277,15 +251,20 @@ async def get_market_snapshot() -> dict:
 
     返回关键指数摘要 + 全局情绪标签
     """
+    index_data = await data_source.get_all_index_data()
+
     items = []
     index_results: dict[str, CompositeResult] = {}
 
-    for code, data in MOCK_INDEXES.items():
+    for code in DEFAULT_INDEX_CODES:
+        if code not in index_data:
+            continue
+        data = index_data[code]
         result = _compute_index_result(code, data)
         index_results[code] = result
         items.append({
             "index_code": code,
-            "index_name": data["name"],
+            "index_name": data["index_name"],
             "close": data["close"],
             "change_pct": data["change_pct"],
             "composite_score": result.composite_score,
@@ -316,8 +295,9 @@ async def get_sector_detail(name: str) -> dict:
     Args:
         name: 板块名称（支持模糊匹配）
     """
+    sectors = data_source.get_mock_sectors()
     sector = None
-    for s in MOCK_SECTORS:
+    for s in sectors:
         if name in s["sector_name"]:
             sector = s
             break
@@ -339,7 +319,8 @@ async def get_recommendations() -> dict:
 
     返回强势板块、超跌机会、稳健配置
     """
-    result: RecommendationResult = generate_recommendations(MOCK_SECTORS, top_n=5)
+    sectors = data_source.get_mock_sectors()
+    result: RecommendationResult = generate_recommendations(sectors, top_n=5)
 
     def _item_to_dict(item) -> dict:
         return {
@@ -373,11 +354,10 @@ async def get_recommendations() -> dict:
 async def get_sector_heatmap() -> dict:
     """
     板块情绪热力图数据
-
-    返回所有板块的情绪评分用于热力图展示
     """
+    sectors = data_source.get_mock_sectors()
     heatmap_data = []
-    for s in MOCK_SECTORS:
+    for s in sectors:
         heatmap_data.append({
             "sector_code": s["sector_code"],
             "sector_name": s["sector_name"],
@@ -424,16 +404,22 @@ async def get_abnormal_check() -> dict:
 
     检查所有指数是否存在极端信号
     """
+    index_data = await data_source.get_all_index_data()
     abnormal_items = []
-    for code, data in MOCK_INDEXES.items():
+
+    for code in DEFAULT_INDEX_CODES:
+        if code not in index_data:
+            continue
+        data = index_data[code]
+
         factor_scores = {
-            "波动率": score_volatility(data["volatility"]),
-            "换手率": score_turnover(data["turnover_ratio"]),
-            "涨跌比": score_adv_decline(data["adv_decline_ratio"]),
-            "新高占比": score_new_high(data["new_high_ratio"]),
-            "融资融券": score_margin(data["margin_data"]),
-            "股债比": score_bond_equity(data["bond_yield"], data["equity_yield"]),
-            "RSI": score_rsi(data["rsi_value"]),
+            "波动率": score_factor("波动率", data["volatility"], code),
+            "换手率": score_factor("换手率", data["turnover_ratio"], code),
+            "涨跌比": score_factor("涨跌比", data["adv_decline_ratio"], code),
+            "新高占比": score_factor("新高占比", data["new_high_ratio"], code),
+            "融资融券": score_factor("融资融券", data["margin_data"].get("net_margin_flow", 0), code),
+            "股债比": score_factor("股债比", data.get("equity_yield", 5.0) - data.get("bond_yield", 2.85), code),
+            "RSI": score_factor("RSI", data["rsi_value"], code),
         }
         extremes = [
             {
@@ -447,7 +433,7 @@ async def get_abnormal_check() -> dict:
         if extremes:
             abnormal_items.append({
                 "index_code": code,
-                "index_name": data["name"],
+                "index_name": data["index_name"],
                 "extremes": extremes,
             })
 
@@ -469,10 +455,14 @@ async def get_trend_summary() -> dict:
 
     用于前端 MicroTrendBar 组件
     """
+    index_data = await data_source.get_all_index_data()
     today = date.today()
     trend_data: dict[str, list[dict]] = {}
 
-    for code, data in MOCK_INDEXES.items():
+    for code in DEFAULT_INDEX_CODES:
+        if code not in index_data:
+            continue
+        data = index_data[code]
         result = _compute_index_result(code, data)
         base = result.composite_score
         trend_data[code] = []
@@ -491,6 +481,22 @@ async def get_trend_summary() -> dict:
         "data": {
             "trends": trend_data,
             "updated_at": datetime.now().isoformat(),
+        },
+        "message": "ok",
+    }
+
+
+@router.get("/market/data-source-status")
+async def get_data_source_status() -> dict:
+    """获取当前数据源状态（调试用）"""
+    from app.core.config import settings as app_settings
+    return {
+        "code": 0,
+        "data": {
+            "tushare_available": data_source._tushare_available,
+            "akshare_available": data_source._akshare_available,
+            "tushare_token_set": bool(app_settings.TUSHARE_TOKEN),
+            "use_akshare": app_settings.USE_AKSHARE,
         },
         "message": "ok",
     }

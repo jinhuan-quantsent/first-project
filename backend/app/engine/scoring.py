@@ -1,532 +1,264 @@
 """
-7大因子评分函数
-每个因子返回 0-100 分，50 分为中性
-
-因子列表：
-1. 波动率评分 (Volatility) — 倒U型，极端波动触发反转标记
-2. 换手率评分 (Turnover) — 倒U型，适度活跃最佳
-3. 涨跌家数比评分 (Adv/Decline) — 倒U型，过偏=过热/恐慌
-4. 新高新低评分 (New High) — 单调递增但有天花板
-5. 融资融券评分 (Margin) — 融资占优=看多，融券占优=看空
-6. 债券权益比评分 (Bond/Equity) — 股债跷跷板
-7. RSI评分 (RSI) — 单调递减，超买=低分，超卖=高分
+V5.0 评分引擎 — 分位数映射 + 因子分层 + 动态权重
+核心改进：
+1. 因子分层：估值层(股债比+新高占比) / 动量层(涨跌比+换手率+RSI) / 资金层(波动率+融资融券+北向资金)
+2. 分位数映射替代固定阈值
+3. 情绪变化速度
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
+from app.engine.factor_history import factor_history, REVERSE_FACTORS, INVERTED_U_FACTORS
 
 @dataclass
 class FactorScore:
-    """因子评分结果"""
     factor_name: str
     raw_value: float
-    score: float  # 0-100
-    label: str  # extreme_fear/fear/neutral/greed/extreme_greed
+    score: float
+    label: str
+    layer: str = "momentum"
     is_extreme: bool = False
-    extreme_type: str = ""  # oversold/overbought
+    extreme_type: str = ""
+    confidence: str = "low"
+
+# ── 分位数参考表（基于A股近3年统计特征，运行时可由实际历史数据覆盖）──
+# 格式: {因子名: {"p10": val, "p25": val, "p50": val, "p75": val, "p90": val}}
+PERCENTILE_REFS = {
+    "波动率":    {"p10": 8,   "p25": 12,  "p50": 18,  "p75": 25,  "p90": 35},
+    "换手率":    {"p10": 0.4, "p25": 0.7, "p50": 1.2, "p75": 2.0, "p90": 3.5},
+    "涨跌比":    {"p10": 0.3, "p25": 0.6, "p50": 1.0, "p75": 1.5, "p90": 2.5},
+    "新高占比":  {"p10": 1.5, "p25": 3.0, "p50": 5.5, "p75": 9.0, "p90": 14.0},
+    "融资融券":  {"p10": 5,   "p25": 15,  "p50": 30,  "p75": 50,  "p90": 70},
+    "股债比":    {"p10": -1.0,"p25": 0.0, "p50": 1.2, "p75": 2.5, "p90": 4.0},
+    "RSI":       {"p10": 25,  "p25": 35,  "p50": 50,  "p75": 65,  "p90": 75},
+    "北向资金":  {"p10": -80, "p25": -30, "p50": 10,  "p75": 50,  "p90": 100},
+}
+
+# ── 因子分层 ──
+FACTOR_LAYERS = {
+    "valuation": ["股债比", "新高占比"],
+    "momentum":  ["涨跌比", "换手率", "RSI"],
+    "capital":   ["波动率", "融资融券", "北向资金"],
+}
+
+# 基础层权重
+BASE_LAYER_WEIGHTS = {"valuation": 0.35, "momentum": 0.35, "capital": 0.30}
+
+# 层内因子均等权重
+def _layer_factor_weights(layer):
+    return {f: 1.0/len(FACTOR_LAYERS[layer]) for f in FACTOR_LAYERS[layer]}
 
 
-# ============================================================
-# 因子1: 波动率评分
-# 逻辑：倒U型。适度波动(15-25%)最佳，过低=死水(恐慌)，过高=恐慌/狂热
-# ============================================================
-def score_volatility(volatility: float) -> FactorScore:
-    """
-    波动率评分（含极端反转标记）
+def _percentile_score(raw_value, factor_name):
+    """将原始值映射到0-100分（基于分位数线性插值）"""
+    ref = PERCENTILE_REFS.get(factor_name)
+    if not ref:
+        return 50.0
+    if raw_value <= ref["p10"]:
+        return max(5, raw_value / ref["p10"] * 10)
+    if raw_value <= ref["p25"]:
+        pct = (raw_value - ref["p10"]) / (ref["p25"] - ref["p10"])
+        return 10 + pct * 15
+    if raw_value <= ref["p50"]:
+        pct = (raw_value - ref["p25"]) / (ref["p50"] - ref["p25"])
+        return 25 + pct * 25
+    if raw_value <= ref["p75"]:
+        pct = (raw_value - ref["p50"]) / (ref["p75"] - ref["p50"])
+        return 50 + pct * 25
+    if raw_value <= ref["p90"]:
+        pct = (raw_value - ref["p75"]) / (ref["p90"] - ref["p75"])
+        return 75 + pct * 15
+    return min(95, 90 + (raw_value - ref["p90"]) / ref["p90"] * 5)
 
-    Args:
-        volatility: 年化波动率(%)
 
-    Returns:
-        FactorScore: 评分结果
-
-    评分逻辑:
-        - <5%:  死水一潭，可能是恐慌底部 → 20分 (extreme_fear)
-        - 5-10%: 低波动 → 35分
-        - 10-15%: 温和波动 → 45分
-        - 15-25%: 适度波动，最佳区间 → 55-65分
-        - 25-35%: 较高波动 → 45分
-        - 35-50%: 高波动 → 30分 (extreme_greed/panic)
-        - >50%:  极端波动 → 15分，标记 is_extreme
-    """
-    if volatility < 5:
-        score = 20.0
-        label = "extreme_fear"
-        is_extreme = True
-        extreme_type = "oversold"
-    elif volatility < 10:
-        score = 35.0
-        label = "fear"
-        is_extreme = False
-        extreme_type = ""
-    elif volatility < 15:
-        score = 45.0
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif volatility < 25:
-        score = 55.0 + (volatility - 15) * 1.0  # 55-65
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif volatility < 35:
-        score = 45.0
-        label = "greed"
-        is_extreme = False
-        extreme_type = ""
-    elif volatility < 50:
-        score = 30.0
-        label = "extreme_greed"
-        is_extreme = True
-        extreme_type = "overbought"
+def _get_label(score: float) -> str:
+    if score < 15:
+        return "extreme_fear"
+    elif score < 30:
+        return "fear"
+    elif score < 45:
+        return "cautious"
+    elif score < 56:
+        return "neutral"
+    elif score < 71:
+        return "optimistic"
+    elif score < 86:
+        return "greed"
     else:
-        score = 15.0
-        label = "extreme_greed"
-        is_extreme = True
-        extreme_type = "overbought"
+        return "extreme_greed"
+
+
+def _get_factor_layer(factor_name: str) -> str:
+    """根据因子名查找所属层"""
+    for layer, factors in FACTOR_LAYERS.items():
+        if factor_name in factors:
+            return layer
+    return "momentum"
+
+
+def score_factor_percentile(factor_name: str, raw_value: float, index_code: str = None) -> Optional[float]:
+    """
+    V4.0 动态分位数评分
+    正向因子: score = percentile (值越大越好 → 分位数越高越好)
+    反向因子: score = 100 - percentile (值越大越恐慌 → 分位数越高越恐慌)
+    返回 None 表示历史数据不足，需降级
+    """
+    if index_code is None:
+        return None
+
+    pct = factor_history.get_percentile(index_code, factor_name, raw_value)
+    if pct is None:
+        return None  # 数据不足，降级
+
+    if factor_name in REVERSE_FACTORS:
+        return round(100 - pct, 1)
+    return round(pct, 1)
+
+
+def score_inverted_u(factor_name: str, raw_value: float, index_code: str = None) -> Optional[float]:
+    """
+    V4.0 倒U型因子评分
+    换手率、融资融券：适中最好，偏离中位数越远得分越低
+    返回 None 表示历史数据不足，需降级
+    """
+    if index_code is None:
+        return None
+
+    series = factor_history.get_series(index_code, factor_name)
+    if len(series) < 60:
+        return None
+
+    import numpy as np
+    median = np.median(series)
+    p90 = np.percentile(series, 90)
+    p10 = np.percentile(series, 10)
+    iqr_like = p90 - p10 + 1e-8  # 防止除零
+
+    deviation = abs(raw_value - median) / iqr_like
+    # deviation 0 -> 100分, deviation > 2 -> 0分
+    score = max(0, 100 - deviation * 50)
+    return round(min(100, score), 1)
+
+
+def score_factor(factor_name: str, raw_value: float, index_code: str = None) -> FactorScore:
+    """
+    V4.0 动态分位数评分（降级兼容）
+
+    优先使用750天历史动态分位数
+    降级：数据不足时回退到 PERCENTILE_REFS 硬编码
+    """
+    score = None
+    confidence = "medium"
+
+    # 尝试动态分位数
+    if index_code and factor_name in {"换手率", "融资融券"}:
+        score = score_inverted_u(factor_name, raw_value, index_code)
+    elif index_code:
+        score = score_factor_percentile(factor_name, raw_value, index_code)
+
+    if score is not None:
+        # 动态分位数成功
+        days = factor_history.get_series_count(index_code, factor_name)
+        if days >= 250:
+            confidence = "high"
+        elif days >= 60:
+            confidence = "medium"
+        else:
+            confidence = "low"
+    else:
+        # 降级：使用旧版 PERCENTILE_REFS
+        score = _percentile_score(raw_value, factor_name)
+        confidence = "low"
+
+    # 极端值检测
+    is_extreme = bool(score <= 15 or score >= 85)
+    extreme_type = None
+    if score <= 5:
+        extreme_type = "极度恐慌信号"
+    elif score <= 15:
+        extreme_type = "恐慌信号"
+    elif score >= 95:
+        extreme_type = "极度贪婪信号"
+    elif score >= 85:
+        extreme_type = "贪婪信号"
+
+    label = _get_label(score)
 
     return FactorScore(
-        factor_name="波动率",
-        raw_value=volatility,
-        score=round(score, 1),
+        factor_name=factor_name,
+        raw_value=raw_value,
+        score=score,
         label=label,
         is_extreme=is_extreme,
         extreme_type=extreme_type,
+        layer=_get_factor_layer(factor_name),
+        confidence=confidence,
     )
 
 
-# ============================================================
-# 因子2: 换手率评分
-# 逻辑：倒U型。2-5% 最佳，过低=无人参与，过高=投机过热
-# ============================================================
-def score_turnover(turnover_ratio: float) -> FactorScore:
-    """
-    换手率评分
+# ── V5.0 动态权重 ──
+def calculate_dynamic_weights(factor_scores, north_flow_5d=None):
+    """根据市场状态动态调整层权重"""
+    weights = {l: BASE_LAYER_WEIGHTS[l] for l in BASE_LAYER_WEIGHTS}
+    factor_weights = {}
+    for layer, factors in FACTOR_LAYERS.items():
+        for f in factors:
+            factor_weights[f] = _layer_factor_weights(layer)[f]
 
-    Args:
-        turnover_ratio: 换手率(%)
+    # 规则1: 极端波动 → 降资金层
+    vol_score = None
+    for fs in factor_scores.values():
+        if fs.factor_name == "波动率":
+            vol_score = fs.score
+            break
+    if vol_score is not None and vol_score < 25:  # 波动率处于高分位=极端波动
+        weights["capital"] *= 0.7
+        weights["momentum"] += BASE_LAYER_WEIGHTS["capital"] * 0.15
+        weights["valuation"] += BASE_LAYER_WEIGHTS["capital"] * 0.15
 
-    Returns:
-        FactorScore: 评分结果
+    # 规则2: 融资融券与涨跌比背离
+    margin_s = None
+    adv_s = None
+    for fs in factor_scores.values():
+        if fs.factor_name == "融资融券": margin_s = fs.score
+        if fs.factor_name == "涨跌比": adv_s = fs.score
+    if margin_s is not None and adv_s is not None and abs(margin_s - adv_s) > 25:
+        factor_weights["融资融券"] *= 0.5
+        factor_weights["涨跌比"] += _layer_factor_weights("momentum")["涨跌比"] * 0.25
 
-    评分逻辑:
-        - <0.5%: 极度低迷 → 25分
-        - 0.5-1%: 低迷 → 40分
-        - 1-2%: 温和活跃 → 50分
-        - 2-5%: 活跃，最佳 → 60-70分
-        - 5-8%: 较热 → 50分
-        - 8-12%: 过热 → 35分
-        - >12%: 极度投机 → 20分
-    """
-    if turnover_ratio < 0.5:
-        score = 25.0
-        label = "extreme_fear"
-        is_extreme = True
-        extreme_type = "oversold"
-    elif turnover_ratio < 1.0:
-        score = 40.0
-        label = "fear"
-        is_extreme = False
-        extreme_type = ""
-    elif turnover_ratio < 2.0:
-        score = 50.0
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif turnover_ratio < 5.0:
-        score = 60.0 + (turnover_ratio - 2.0) * 3.33  # 60-70
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif turnover_ratio < 8.0:
-        score = 50.0
-        label = "greed"
-        is_extreme = False
-        extreme_type = ""
-    elif turnover_ratio < 12.0:
-        score = 35.0
-        label = "extreme_greed"
-        is_extreme = True
-        extreme_type = "overbought"
-    else:
-        score = 20.0
-        label = "extreme_greed"
-        is_extreme = True
-        extreme_type = "overbought"
+    # 规则3: 北向资金持续流出 → 提升权重
+    if north_flow_5d is not None and north_flow_5d < -50:
+        factor_weights["北向资金"] *= 1.3
 
-    return FactorScore(
-        factor_name="换手率",
-        raw_value=turnover_ratio,
-        score=round(score, 1),
-        label=label,
-        is_extreme=is_extreme,
-        extreme_type=extreme_type,
-    )
+    # 归一化层权重
+    total_layer = sum(weights.values())
+    for l in weights:
+        weights[l] /= total_layer
+
+    # 归一化因子权重（保持层内比例）
+    for layer, factors in FACTOR_LAYERS.items():
+        layer_total = sum(factor_weights[f] for f in factors)
+        if layer_total > 0:
+            for f in factors:
+                factor_weights[f] = factor_weights[f] / layer_total * weights[layer] * len(factors)
+
+    return weights, factor_weights
 
 
-# ============================================================
-# 因子3: 涨跌家数比评分
-# 逻辑：倒U型。1:1附近最佳，一边倒=极端
-# ============================================================
-def score_adv_decline(adv_ratio: float) -> FactorScore:
-    """
-    涨跌家数比评分（倒U型）
-
-    Args:
-        adv_ratio: 上涨家数/下跌家数
-
-    Returns:
-        FactorScore: 评分结果
-
-    评分逻辑:
-        - <0.3: 极度恐慌 → 10分
-        - 0.3-0.6: 恐慌 → 30分
-        - 0.6-0.8: 偏弱 → 45分
-        - 0.8-1.2: 均衡，最佳 → 65-75分
-        - 1.2-1.5: 偏强 → 55分
-        - 1.5-2.5: 过热 → 40分
-        - >2.5: 极度狂热 → 15分
-    """
-    if adv_ratio < 0.3:
-        score = 10.0
-        label = "extreme_fear"
-        is_extreme = True
-        extreme_type = "oversold"
-    elif adv_ratio < 0.6:
-        score = 30.0
-        label = "fear"
-        is_extreme = False
-        extreme_type = ""
-    elif adv_ratio < 0.8:
-        score = 45.0
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif adv_ratio < 1.2:
-        score = 65.0 + (adv_ratio - 0.8) * 25.0  # 65-75
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif adv_ratio < 1.5:
-        score = 55.0
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif adv_ratio < 2.5:
-        score = 40.0
-        label = "greed"
-        is_extreme = False
-        extreme_type = ""
-    else:
-        score = 15.0
-        label = "extreme_greed"
-        is_extreme = True
-        extreme_type = "overbought"
-
-    return FactorScore(
-        factor_name="涨跌比",
-        raw_value=adv_ratio,
-        score=round(score, 1),
-        label=label,
-        is_extreme=is_extreme,
-        extreme_type=extreme_type,
-    )
-
-
-# ============================================================
-# 因子4: 新高新低评分
-# 逻辑：单调递增但有天花板
-# ============================================================
-def score_new_high(new_high_ratio: float) -> FactorScore:
-    """
-    新高新低评分
-
-    Args:
-        new_high_ratio: 创N日新高股票占比(%)
-
-    Returns:
-        FactorScore: 评分结果
-
-    评分逻辑:
-        - <1%: 极度弱势 → 15分
-        - 1-3%: 弱势 → 30分
-        - 3-5%: 偏弱 → 45分
-        - 5-8%: 正常 → 55分
-        - 8-12%: 偏强 → 65分
-        - 12-20%: 强势 → 75分
-        - >20%: 过强（可能是顶部信号）→ 60分
-    """
-    if new_high_ratio < 1.0:
-        score = 15.0
-        label = "extreme_fear"
-        is_extreme = True
-        extreme_type = "oversold"
-    elif new_high_ratio < 3.0:
-        score = 30.0
-        label = "fear"
-        is_extreme = False
-        extreme_type = ""
-    elif new_high_ratio < 5.0:
-        score = 45.0
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif new_high_ratio < 8.0:
-        score = 55.0
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif new_high_ratio < 12.0:
-        score = 65.0
-        label = "greed"
-        is_extreme = False
-        extreme_type = ""
-    elif new_high_ratio < 20.0:
-        score = 75.0
-        label = "extreme_greed"
-        is_extreme = True
-        extreme_type = "overbought"
-    else:
-        score = 60.0
-        label = "extreme_greed"
-        is_extreme = True
-        extreme_type = "overbought"
-
-    return FactorScore(
-        factor_name="新高占比",
-        raw_value=new_high_ratio,
-        score=round(score, 1),
-        label=label,
-        is_extreme=is_extreme,
-        extreme_type=extreme_type,
-    )
-
-
-# ============================================================
-# 因子5: 融资融券评分
-# ============================================================
-def score_margin(margin_data: dict) -> FactorScore:
-    """
-    融资融券评分
-
-    Args:
-        margin_data: 包含以下字段:
-            - margin_balance: 融资余额(亿)
-            - short_balance: 融券余额(亿)
-            - net_margin_flow: 融资净流入(亿)
-
-    Returns:
-        FactorScore: 评分结果
-
-    评分逻辑：
-        融资净流入 > 0 且融资/融券比合理 → 偏乐观
-        融资大幅流出 → 偏悲观
-        融券大幅增加 → 偏悲观（做空力量增强）
-    """
-    margin_balance = margin_data.get("margin_balance", 0)
-    short_balance = margin_data.get("short_balance", 0)
-    net_margin_flow = margin_data.get("net_margin_flow", 0)
-
-    # 融资融券比
-    if short_balance > 0:
-        ratio = margin_balance / short_balance
-    else:
-        ratio = 100.0  # 无融券=极度乐观
-
-    # 综合评分
-    score = 50.0
-
-    # 融资净流入影响 (±20分)
-    if net_margin_flow > 50:
-        score += 15.0
-    elif net_margin_flow > 10:
-        score += 8.0
-    elif net_margin_flow > -10:
-        score += 0.0
-    elif net_margin_flow > -50:
-        score -= 8.0
-    else:
-        score -= 15.0
-
-    # 融资融券比影响 (±15分)
-    if ratio > 50:
-        score += 10.0
-    elif ratio > 20:
-        score += 5.0
-    elif ratio > 10:
-        score += 0.0
-    elif ratio > 5:
-        score -= 5.0
-    else:
-        score -= 10.0
-
-    score = max(5.0, min(95.0, score))
-
-    if score < 25:
-        label = "extreme_fear"
-        is_extreme = True
-        extreme_type = "oversold"
-    elif score < 40:
-        label = "fear"
-        is_extreme = False
-        extreme_type = ""
-    elif score < 60:
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif score < 75:
-        label = "greed"
-        is_extreme = False
-        extreme_type = ""
-    else:
-        label = "extreme_greed"
-        is_extreme = True
-        extreme_type = "overbought"
-
-    return FactorScore(
-        factor_name="融资融券",
-        raw_value=net_margin_flow,
-        score=round(score, 1),
-        label=label,
-        is_extreme=is_extreme,
-        extreme_type=extreme_type,
-    )
-
-
-# ============================================================
-# 因子6: 债券权益比评分（股债跷跷板）
-# ============================================================
-def score_bond_equity(bond_yield: float, equity_yield: float) -> FactorScore:
-    """
-    债券权益比评分
-
-    Args:
-        bond_yield: 10年期国债收益率(%)
-        equity_yield: 股票市场盈利收益率(1/PE, %)
-
-    Returns:
-        FactorScore: 评分结果
-
-    评分逻辑：
-        股债收益差 = equity_yield - bond_yield
-        >2%: 股票极具吸引力 → 高分
-        1-2%: 股票有吸引力 → 偏高分
-        0-1%: 中性 → 50分
-        -1-0%: 债券更有吸引力 → 偏低分
-        <-1%: 债券极具吸引力 → 低分
-    """
-    spread = equity_yield - bond_yield
-
-    if spread > 3.0:
-        score = 85.0
-        label = "extreme_greed"  # 股票极度便宜
-        is_extreme = True
-        extreme_type = "oversold"  # 股市可能超跌
-    elif spread > 2.0:
-        score = 70.0
-        label = "greed"
-        is_extreme = False
-        extreme_type = ""
-    elif spread > 1.0:
-        score = 58.0
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif spread > 0.0:
-        score = 50.0
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif spread > -1.0:
-        score = 42.0
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif spread > -2.0:
-        score = 30.0
-        label = "fear"
-        is_extreme = False
-        extreme_type = ""
-    else:
-        score = 15.0
-        label = "extreme_fear"
-        is_extreme = True
-        extreme_type = "overbought"
-
-    return FactorScore(
-        factor_name="股债比",
-        raw_value=spread,
-        score=round(score, 1),
-        label=label,
-        is_extreme=is_extreme,
-        extreme_type=extreme_type,
-    )
-
-
-# ============================================================
-# 因子7: RSI评分
-# 逻辑：单调递减。RSI越高(超买)分越低，RSI越低(超卖)分越高
-# ============================================================
-def score_rsi(rsi_value: float) -> FactorScore:
-    """
-    RSI评分（单调递减）
-
-    Args:
-        rsi_value: RSI(14) 值
-
-    Returns:
-        FactorScore: 评分结果
-
-    评分逻辑:
-        - <20: 极度超卖，绝佳买点 → 90分
-        - 20-30: 超卖，好买点 → 75分
-        - 30-40: 偏弱 → 60分
-        - 40-60: 正常区间 → 50-55分
-        - 60-70: 偏强 → 40分
-        - 70-80: 超买 → 25分
-        - >80: 极度超买 → 10分
-    """
-    if rsi_value < 20:
-        score = 90.0
-        label = "extreme_fear"
-        is_extreme = True
-        extreme_type = "oversold"
-    elif rsi_value < 30:
-        score = 75.0
-        label = "fear"
-        is_extreme = False
-        extreme_type = ""
-    elif rsi_value < 40:
-        score = 60.0
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif rsi_value < 60:
-        score = 55.0 - (rsi_value - 40) * 0.25  # 55 -> 50
-        label = "neutral"
-        is_extreme = False
-        extreme_type = ""
-    elif rsi_value < 70:
-        score = 40.0
-        label = "greed"
-        is_extreme = False
-        extreme_type = ""
-    elif rsi_value < 80:
-        score = 25.0
-        label = "extreme_greed"
-        is_extreme = True
-        extreme_type = "overbought"
-    else:
-        score = 10.0
-        label = "extreme_greed"
-        is_extreme = True
-        extreme_type = "overbought"
-
-    return FactorScore(
-        factor_name="RSI",
-        raw_value=rsi_value,
-        score=round(score, 1),
-        label=label,
-        is_extreme=is_extreme,
-        extreme_type=extreme_type,
-    )
+# ── 情绪变化速度 ──
+def calculate_sentiment_velocity(current_score, previous_scores_5d):
+    """计算情绪变化速度（标准化）"""
+    if not previous_scores_5d or len(previous_scores_5d) < 3:
+        return 0.0, "stable"
+    mean_5d = sum(previous_scores_5d) / len(previous_scores_5d)
+    diffs = [(s - mean_5d)**2 for s in previous_scores_5d]
+    std_5d = (sum(diffs) / len(diffs))**0.5
+    if std_5d < 0.5:
+        return 0.0, "stable"
+    velocity = round((current_score - mean_5d) / std_5d, 2)
+    if velocity > 1.5: direction = "surging"
+    elif velocity > 0.5: direction = "warming"
+    elif velocity < -1.5: direction = "plunging"
+    elif velocity < -0.5: direction = "cooling"
+    else: direction = "stable"
+    return velocity, direction
