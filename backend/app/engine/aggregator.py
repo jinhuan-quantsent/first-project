@@ -207,10 +207,10 @@ def calculate_index_sentiment(
         CompositeResult: 完整情绪分析结果
     """
     # 动态权重
-    dynamic_weights = calculate_dynamic_weights(list(factor_scores.values()))
+    layer_weights, dynamic_factor_weights = calculate_dynamic_weights(factor_scores)
 
     # 综合评分（使用动态权重）
-    composite_score = calculate_composite_score(factor_scores, weights=dynamic_weights)
+    composite_score = calculate_composite_score(factor_scores, weights=dynamic_factor_weights)
     sentiment_label = get_sentiment_label(composite_score)
 
     # Top3 因子
