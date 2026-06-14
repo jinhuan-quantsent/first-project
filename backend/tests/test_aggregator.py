@@ -10,8 +10,13 @@ Tests:
 - Single index sentiment calculation
 - Multi-index composite sentiment
 - Conclusion generation
+
+⚠️ V5.0: aggregator.py was deleted in T4, replaced by confidence.py + signal_mapper.py.
+These tests are preserved for reference but skipped.
 """
 import pytest
+pytest.importorskip("app.engine.aggregator", reason="V5.0: aggregator.py deleted in T4, replaced by confidence.py + signal_mapper.py")
+
 from app.engine.scoring import FactorScore, score_rsi, score_volatility
 from app.engine.aggregator import (
     DEFAULT_WEIGHTS,

@@ -1,15 +1,55 @@
 /* ============================================================
    全局类型定义
-   基金情绪分析系统 V3.5
+   基金情绪分析系统 V5.0
    ============================================================ */
 
-// --- 情绪标签 ---
+// --- V5.0 7级信号 ---
+export type SignalLevel = 'S+' | 'S' | 'A' | 'B' | 'C' | 'D' | 'E';
+
+// 信号颜色映射（CSS 变量）
+export const SIGNAL_COLORS: Record<SignalLevel, string> = {
+  'S+': 'var(--signal-sp)',
+  'S':  'var(--signal-s)',
+  'A':  'var(--signal-a)',
+  'B':  'var(--signal-b)',
+  'C':  'var(--signal-c)',
+  'D':  'var(--signal-d)',
+  'E':  'var(--signal-e)',
+};
+
+// 信号描述文案
+export const SIGNAL_LABELS: Record<SignalLevel, string> = {
+  'S+': '极度恐惧',
+  'S':  '恐惧',
+  'A':  '偏恐惧',
+  'B':  '中性',
+  'C':  '偏贪婪',
+  'D':  '贪婪',
+  'E':  '极度贪婪',
+};
+
+// --- 置信度星级 ---
+export type ConfidenceStars = 1 | 2 | 3 | 4;
+
+// --- 旧版情绪标签（向后兼容）---
 export type SentimentLabel =
   | 'extreme_fear'
   | 'fear'
   | 'neutral'
   | 'greed'
   | 'extreme_greed';
+
+// 旧→新 映射
+export function mapOldToNew(old: SentimentLabel): SignalLevel {
+  const m: Record<SentimentLabel, SignalLevel> = {
+    'extreme_fear': 'S+',
+    'fear': 'S',
+    'neutral': 'B',
+    'greed': 'D',
+    'extreme_greed': 'E',
+  };
+  return m[old] || 'B';
+}
 
 // --- 趋势方向 ---
 export type TrendDirection = 'up' | 'down' | 'stable';

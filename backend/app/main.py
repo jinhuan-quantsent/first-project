@@ -70,6 +70,8 @@ from app.api.review import router as review_router
 from app.api.config import router as config_router
 from app.api.advice import router as advice_router
 from app.api.auth import router as auth_router
+from app.api.v5 import router as v5_router
+from app.api.review_v5 import router as review_v5_router
 
 app.include_router(health_router, prefix=settings.API_PREFIX, tags=["健康检查"])
 app.include_router(auth_router, prefix=settings.API_PREFIX, tags=["认证"])
@@ -80,6 +82,8 @@ app.include_router(watchlist_router, prefix=settings.API_PREFIX, tags=["自选�
 app.include_router(review_router, prefix=settings.API_PREFIX, tags=["复盘分析"])
 app.include_router(config_router, prefix=settings.API_PREFIX, tags=["配置管理"])
 app.include_router(advice_router, prefix=settings.API_PREFIX, tags=["操作建议"])
+app.include_router(v5_router, prefix=settings.API_V5_PREFIX, tags=["V5.0情绪引擎"])
+app.include_router(review_v5_router, prefix=settings.API_PREFIX, tags=["V5.0回测引擎"])
 
 
 @app.get("/")

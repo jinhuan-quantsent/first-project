@@ -3,33 +3,50 @@
 @tailwind utilities;
 
 /* ============================================================
-   情绪色阶 CSS Token
+   V5.0 浅色主题 CSS Token
    ============================================================ */
 :root {
-  --sentiment-extreme-fear: #00A86B;
-  --sentiment-fear: #4CAF50;
-  --sentiment-cautious: #2196F3;
-  --sentiment-neutral: #9E9E9E;
-  --sentiment-optimistic: #FFC107;
-  --sentiment-greed: #FF9800;
-  --sentiment-extreme-greed: #F44336;
+  /* --- 背景色系 --- */
+  --bg-primary: #F8FAFC;
+  --bg-card: #FFFFFF;
+  --bg-hover: #F1F5F9;
+  --bg-active: #E2E8F0;
+  --bg-selected: #E0F2FE;
 
-  --market-up: #F44336;
-  --market-down: #4CAF50;
-  --market-flat: #9E9E9E;
+  /* --- 品牌色 --- */
+  --brand-cyan: #14B8A6;
+  --brand-cyan-light: #CCFBF1;
+  --brand-cyan-dark: #0D9488;
 
-  --bg-primary: #FFFFFF;
-  --bg-secondary: #F5F5F5;
-  --bg-tertiary: #FAFAFA;
-  --text-primary: #212121;
-  --text-secondary: #757575;
-  --text-hint: #BDBDBD;
-  --border-color: #E0E0E0;
-  --divider: #EEEEEE;
+  /* --- 7级信号色 --- */
+  --signal-sp: #059669;
+  --signal-s: #10B981;
+  --signal-a: #6EE7B7;
+  --signal-b: #FBBF24;
+  --signal-c: #FCA5A5;
+  --signal-d: #EF4444;
+  --signal-e: #DC2626;
 
-  --snapshot-bar-height: 40px;
-  --sidebar-width: 200px;
+  /* --- 功能色（A股习惯：红涨绿跌）--- */
+  --market-up: #EF4444;
+  --market-down: #22C55E;
+  --market-flat: #94A3B8;
+
+  /* --- 文字 --- */
+  --text-primary: #0F172A;
+  --text-secondary: #475569;
+  --text-muted: #94A3B8;
+
+  /* --- 边框/分割 --- */
+  --border-color: #E2E8F0;
+  --divider: #F1F5F9;
+
+  /* --- 布局 --- */
+  --sidebar-width: 240px;
   --sidebar-collapsed-width: 64px;
+  --ribbon-height: 8px;
+  --topbar-height: 48px;
+  --panel-slide-width: 420px;
 }
 
 /* ============================================================
@@ -44,6 +61,8 @@
 html, body, #root {
   height: 100%;
   width: 100%;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
 }
 
 body {
@@ -55,23 +74,33 @@ body {
 }
 
 /* ============================================================
-   情绪方块背景色
+   7级信号色工具类
    ============================================================ */
-.sentiment-bg-extreme_fear { background-color: var(--sentiment-extreme-fear); }
-.sentiment-bg-fear { background-color: var(--sentiment-fear); }
-.sentiment-bg-cautious { background-color: var(--sentiment-cautious); }
-.sentiment-bg-neutral { background-color: var(--sentiment-neutral); }
-.sentiment-bg-optimistic { background-color: var(--sentiment-optimistic); }
-.sentiment-bg-greed { background-color: var(--sentiment-greed); }
-.sentiment-bg-extreme_greed { background-color: var(--sentiment-extreme-greed); }
+.signal-sp { color: var(--signal-sp); background-color: var(--signal-sp); }
+.signal-s  { color: var(--signal-s);  background-color: var(--signal-s);  }
+.signal-a  { color: var(--signal-a);  background-color: var(--signal-a);  }
+.signal-b  { color: var(--signal-b);  background-color: var(--signal-b);  }
+.signal-c  { color: var(--signal-c);  background-color: var(--signal-c);  }
+.signal-d  { color: var(--signal-d);  background-color: var(--signal-d);  }
+.signal-e  { color: var(--signal-e);  background-color: var(--signal-e);  }
 
-.sentiment-text-extreme_fear { color: var(--sentiment-extreme-fear); }
-.sentiment-text-fear { color: var(--sentiment-fear); }
-.sentiment-text-cautious { color: var(--sentiment-cautious); }
-.sentiment-text-neutral { color: var(--sentiment-neutral); }
-.sentiment-text-optimistic { color: var(--sentiment-optimistic); }
-.sentiment-text-greed { color: var(--sentiment-greed); }
-.sentiment-text-extreme_greed { color: var(--sentiment-extreme-greed); }
+/* 文字颜色 */
+.signal-text-sp { color: var(--signal-sp); }
+.signal-text-s  { color: var(--signal-s);  }
+.signal-text-a  { color: var(--signal-a);  }
+.signal-text-b  { color: var(--signal-b);  }
+.signal-text-c  { color: var(--signal-c);  }
+.signal-text-d  { color: var(--signal-d);  }
+.signal-text-e  { color: var(--signal-e);  }
+
+/* 背景颜色 */
+.signal-bg-sp { background-color: var(--signal-sp); }
+.signal-bg-s  { background-color: var(--signal-s);  }
+.signal-bg-a  { background-color: var(--signal-a);  }
+.signal-bg-b  { background-color: var(--signal-b);  }
+.signal-bg-c  { background-color: var(--signal-c);  }
+.signal-bg-d  { background-color: var(--signal-d);  }
+.signal-bg-e  { background-color: var(--signal-e);  }
 
 /* ============================================================
    滚动条美化
@@ -82,11 +111,11 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--bg-secondary);
+  background: var(--bg-hover);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--text-hint);
+  background: var(--text-muted);
   border-radius: 3px;
 }
 
@@ -126,11 +155,20 @@ body {
     @apply card hover:shadow-md hover:border-gray-300 transition-shadow duration-200;
   }
 
-  .sentiment-dot {
+  .signal-dot {
     @apply inline-block w-3 h-3 rounded-full;
   }
 
-  .sentiment-bar {
+  .signal-bar {
     @apply h-2 rounded-full transition-all duration-500;
+  }
+
+  /* 按钮基础 */
+  .btn-primary {
+    @apply bg-[var(--brand-cyan)] text-white px-4 py-2 rounded-lg hover:bg-[var(--brand-cyan-dark)] transition-colors;
+  }
+
+  .btn-secondary {
+    @apply bg-white text-gray-700 px-4 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors;
   }
 }

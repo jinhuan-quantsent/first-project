@@ -35,5 +35,10 @@ class AdviceLog(Base):
     actual_result: Mapped[float] = mapped_column(Float, default=0.0, comment="实际结果(%)")
     accuracy_score: Mapped[float] = mapped_column(Float, default=0.0, comment="准确度评分")
 
+    # --- V5.0 新增字段 ---
+    signal_level: Mapped[str | None] = mapped_column(String(2), default=None, comment="V5.0信号等级: S+/S/A/B/C/D/E")
+    confidence_stars: Mapped[int | None] = mapped_column(Integer, default=None, comment="V5.0置信度星级: 1-4")
+    is_executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="V5.0执行时间(替代is_executed)")
+
     def __repr__(self) -> str:
         return f"<AdviceLog(user={self.user_id}, date={self.trade_date})>"

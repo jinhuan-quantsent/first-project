@@ -14,12 +14,10 @@ from typing import Optional
 
 from fastapi import APIRouter, Query
 
-from app.engine.scoring import (
+from app.engine.compatibility import (
     FactorScore,
     score_factor,
     FACTOR_LAYERS,
-)
-from app.engine.aggregator import (
     calculate_index_sentiment,
     calculate_composite_sentiment,
     CompositeResult,

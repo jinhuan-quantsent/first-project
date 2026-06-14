@@ -7,17 +7,26 @@ export default {
   theme: {
     extend: {
       colors: {
-        sentiment: {
-          extreme_fear: '#00A86B',    // 极度恐慌 - 绿
-          fear: '#4CAF50',             // 恐慌 - 浅绿
-          neutral: '#9E9E9E',          // 中性 - 灰
-          greed: '#FF9800',            // 乐观 - 橙
-          extreme_greed: '#F44336',    // 极度乐观 - 红
+        brand: {
+          50:  '#CCFBF1',
+          100: '#99F6E4',
+          500: '#14B8A6',
+          600: '#0D9488',
+          700: '#0F766E',
+        },
+        signal: {
+          'sp': '#059669',
+          's':  '#10B981',
+          'a':  '#6EE7B7',
+          'b':  '#FBBF24',
+          'c':  '#FCA5A5',
+          'd':  '#EF4444',
+          'e':  '#DC2626',
         },
         market: {
-          up: '#F44336',       // 涨 - 红（A股习惯）
-          down: '#4CAF50',     // 跌 - 绿
-          flat: '#9E9E9E',
+          up:   '#EF4444',
+          down: '#22C55E',
+          flat: '#94A3B8',
         },
       },
       animation: {

@@ -1,24 +1,17 @@
-import type { SentimentLabel } from '../../types';
+import type { SignalLevel } from '../../types';
+import { SIGNAL_COLORS } from '../../types';
 
 interface SignalLightsProps {
-  /** 三周期标签 */
-  shortTerm?: SentimentLabel;
-  midTerm?: SentimentLabel;
-  longTerm?: SentimentLabel;
+  /** 三周期信号等级 */
+  shortTerm?: SignalLevel;
+  midTerm?: SignalLevel;
+  longTerm?: SignalLevel;
   /** 背离标记 */
   hasDivergence?: boolean;
-  divergenceType?: 'bullish' | 'bearish'; // bullish=底背离 bearish=顶背离
+  divergenceType?: 'bullish' | 'bearish';
   /** 尺寸 */
   size?: 'sm' | 'md';
 }
-
-const SIGNAL_COLORS: Record<SentimentLabel, string> = {
-  extreme_fear: '#00A86B',
-  fear: '#4CAF50',
-  neutral: '#9E9E9E',
-  greed: '#FF9800',
-  extreme_greed: '#F44336',
-};
 
 export default function SignalLights({
   shortTerm,
@@ -60,7 +53,7 @@ export default function SignalLights({
       {hasDivergence && divergenceType && (
         <span
           className={`text-xs font-bold ml-1 ${
-            divergenceType === 'bullish' ? 'text-green-500' : 'text-red-500'
+            divergenceType === 'bullish' ? 'text-signal-sp' : 'text-signal-d'
           }`}
           title={divergenceType === 'bullish' ? '底背离 - 可能反弹' : '顶背离 - 注意风险'}
         >

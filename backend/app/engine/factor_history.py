@@ -23,6 +23,37 @@ INVERTED_U_FACTORS = {"换手率", "融资融券"}
 DEFAULT_LOOKBACK = 750
 
 
+# ============================================================
+# V5.0 新增：11因子元数据配置
+# ============================================================
+V5_FACTOR_META: list[dict] = [
+    {"name": "VOL",  "label": "波动率", "direction": "fear", "weight": 0.12, "source": "index_daily"},
+    {"name": "ADR",  "label": "涨跌比", "direction": "greed", "weight": 0.12, "source": "limit_list_d"},
+    {"name": "ERP",  "label": "股债性价比", "direction": "fear", "weight": 0.12, "source": "index_dailybasic+bond"},
+    {"name": "FLOW", "label": "资金流", "direction": "greed", "weight": 0.10, "source": "fund_daily"},
+    {"name": "ETF",  "label": "ETF份额", "direction": "greed", "weight": 0.08, "source": "fund_daily"},
+    {"name": "NHNL", "label": "新高占比", "direction": "greed", "weight": 0.08, "source": "index_daily"},
+    {"name": "TURN", "label": "换手率", "direction": "fear", "weight": 0.08, "source": "index_dailybasic"},
+    {"name": "POS",  "label": "基金仓位", "direction": "greed", "weight": 0.08, "source": "fund_portfolio"},
+    {"name": "NBF",  "label": "北向资金", "direction": "greed", "weight": 0.06, "source": "moneyflow_hsgt"},
+    {"name": "PCR",  "label": "认沽认购比", "direction": "fear", "weight": 0.04, "source": "opt_daily"},
+    {"name": "NEWF", "label": "新发基金热度", "direction": "greed", "weight": 0.04, "source": "fund_basic"},
+]
+
+
+def get_factor_meta(factor_name: str) -> dict | None:
+    """根据因子名获取元数据"""
+    for meta in V5_FACTOR_META:
+        if meta["name"] == factor_name:
+            return meta
+    return None
+
+
+def get_all_factor_names() -> list[str]:
+    """获取全部11因子名称"""
+    return [m["name"] for m in V5_FACTOR_META]
+
+
 def _normalize_code(code: str) -> str:
     """Convert between API format (SH000001) and tushare format (000001.SH)"""
     if code.startswith("SH") and "." not in code:

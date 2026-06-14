@@ -53,5 +53,12 @@ class MarketSentiment(Base, TimestampMixin):
     is_extreme: Mapped[int] = mapped_column(Integer, default=0, comment="是否极端: 0=否 1=是")
     abnormal_signals: Mapped[str] = mapped_column(String(500), default="", comment="异常信号(JSON)")
 
+    # --- V5.0 新增字段 ---
+    signal_level: Mapped[str | None] = mapped_column(String(2), default=None, comment="V5.0信号等级: S+/S/A/B/C/D/E")
+    confidence_stars: Mapped[int | None] = mapped_column(Integer, default=None, comment="V5.0置信度星级: 1-4")
+    confidence_detail: Mapped[str | None] = mapped_column(Text, default=None, comment="V5.0置信度明细(JSON)")
+    factor_std: Mapped[float | None] = mapped_column(Float, default=None, comment="V5.0因子得分标准差")
+    triggered_defenses: Mapped[str | None] = mapped_column(Text, default=None, comment="V5.0触发的防线(JSON数组)")
+
     def __repr__(self) -> str:
         return f"<MarketSentiment(index={self.index_code}, date={self.trade_date}, score={self.composite_score})>"

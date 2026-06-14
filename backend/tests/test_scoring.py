@@ -6,8 +6,13 @@ Tests each factor scoring function:
 - Extreme reversal markers
 - Inverted U-shape verification
 - Monotonic properties
+
+⚠️ V5.0: scoring.py was deleted in T4, replaced by factor_engine/ + sigmoid.py.
+These tests are preserved for reference but skipped.
 """
 import pytest
+pytest.importorskip("app.engine.scoring", reason="V5.0: scoring.py deleted in T4, replaced by factor_engine/ + sigmoid.py")
+
 from app.engine.scoring import (
     FactorScore,
     score_volatility,

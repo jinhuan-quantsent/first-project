@@ -1,201 +1,328 @@
 """
-模拟回溯引擎
-用于验证情绪指标的历史有效性
+回测引擎 — V5.0
+基于 V5 信号系统的策略回测框架
 
-核心功能：
-- 回测指定时间段内的情绪信号表现
-- 计算胜率、平均收益、最大回撤等指标
-- 与基准（买入持有）对比
+功能：
+- 信号驱动回测（7级信号 → 仓位变化）
+- 权益曲线计算
+- 交易记录生成
+- 绩效指标计算（年化收益、最大回撤、夏普比率等）
 """
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
+import math
 
 
 @dataclass
-class BacktestParams:
-    """回测参数"""
-    start_date: date
-    end_date: date
+class BacktestConfig:
+    """回测配置"""
     index_code: str = "SH000300"
-    initial_capital: float = 100000.0  # 初始资金
-    sentiment_threshold_buy: float = 30.0  # 买入阈值（恐慌时买入）
-    sentiment_threshold_sell: float = 70.0  # 卖出阈值（贪婪时卖出）
-    position_pct: float = 50.0  # 每次调仓比例(%)
+    start_date: str = "2024-01-01"
+    end_date: str = "2024-12-31"
+    initial_capital: float = 100000.0
+    commission_rate: float = 0.0012  # 万1.2
+    stamp_tax_rate: float = 0.001   # 千1（卖出）
+    signal_strategy: str = "v5_signal"  # v5_signal, simple_momentum, buy_hold
+
+    # V5 信号策略参数
+    buy_signals: list[str] = field(default_factory=lambda: ["S+", "S", "A"])
+    sell_signals: list[str] = field(default_factory=lambda: ["D", "E"])
+    hold_signals: list[str] = field(default_factory=lambda: ["B", "C"])
+
+    # 仓位配置
+    max_position_pct: float = 1.0
+    min_position_pct: float = 0.0
 
 
 @dataclass
 class TradeRecord:
     """交易记录"""
-    trade_date: date
-    trade_type: str  # buy / sell
+    trade_date: str
+    trade_type: str  # buy, sell
+    signal_level: str
     price: float
     shares: float
     amount: float
-    sentiment_score: float
-    reason: str
+    commission: float
+    reason: str = ""
+
+
+@dataclass
+class EquityPoint:
+    """权益曲线点"""
+    date: str
+    equity: float
+    position_pct: float
+    signal_level: str
+    daily_return: float = 0.0
+
+
+@dataclass
+class BacktestMetrics:
+    """回测绩效指标"""
+    total_return: float = 0.0
+    annual_return: float = 0.0
+    max_drawdown: float = 0.0
+    max_drawdown_duration: int = 0
+    sharpe_ratio: float = 0.0
+    win_rate: float = 0.0
+    profit_loss_ratio: float = 0.0
+    total_trades: int = 0
+    avg_hold_days: float = 0.0
+    calmar_ratio: float = 0.0
+    volatility: float = 0.0
 
 
 @dataclass
 class BacktestResult:
     """回测结果"""
-    params: BacktestParams = field(default_factory=BacktestParams)
-    total_return: float = 0.0  # 总收益率(%)
-    annual_return: float = 0.0  # 年化收益率(%)
-    max_drawdown: float = 0.0  # 最大回撤(%)
-    win_rate: float = 0.0  # 胜率(%)
-    sharpe_ratio: float = 0.0  # 夏普比率
-    benchmark_return: float = 0.0  # 基准收益率(%)
-    excess_return: float = 0.0  # 超额收益(%)
-    total_trades: int = 0  # 总交易次数
-    profit_trades: int = 0  # 盈利交易次数
-    trades: list[TradeRecord] = field(default_factory=list)
-    equity_curve: list[dict] = field(default_factory=list)  # [{date, value}]
-    signal_accuracy: float = 0.0  # 信号准确率(%)
+    config: BacktestConfig
+    metrics: BacktestMetrics
+    equity_curve: list[EquityPoint]
+    trades: list[TradeRecord]
+    benchmark_curve: list[EquityPoint] = field(default_factory=list)
 
 
-def run_backtest(
-    sentiment_history: list[dict],
-    price_history: list[dict],
-    params: BacktestParams,
-) -> BacktestResult:
-    """
-    执行模拟回溯
+class BacktestEngine:
+    """V5.0 回测引擎"""
 
-    Args:
-        sentiment_history: 历史情绪数据 [{date, composite_score, sentiment_label}, ...]
-        price_history: 历史价格数据 [{date, close}, ...]
-        params: 回测参数
+    def __init__(self, config: BacktestConfig | None = None) -> None:
+        self._config = config or BacktestConfig()
 
-    Returns:
-        BacktestResult: 回测结果
-    """
-    # 对齐数据
-    sentiment_map: dict[str, float] = {
-        str(s["date"]): s["composite_score"] for s in sentiment_history
-    }
-    price_map: dict[str, float] = {
-        str(p["date"]): p["close"] for p in price_history
-    }
+    def run(self, price_data: list[dict]) -> BacktestResult:
+        """
+        运行回测
 
-    # 找到共同日期
-    common_dates = sorted(set(sentiment_map.keys()) & set(price_map.keys()))
+        Args:
+            price_data: [{date, close, signal_level, ...}, ...]
+                        按日期升序排列的日线数据
 
-    if len(common_dates) < 10:
-        return BacktestResult(params=params)
+        Returns:
+            BacktestResult
+        """
+        config = self._config
+        if not price_data:
+            return BacktestResult(
+                config=config,
+                metrics=BacktestMetrics(),
+                equity_curve=[],
+                trades=[],
+            )
 
-    # 初始状态
-    cash = params.initial_capital
-    shares = 0.0
-    trades: list[TradeRecord] = []
+        equity_curve: list[EquityPoint] = []
+        trades: list[TradeRecord] = []
+        benchmark_curve: list[EquityPoint] = []
 
-    initial_price = price_map[common_dates[0]]
-    equity_curve: list[dict] = []
+        # 初始状态
+        cash = config.initial_capital
+        shares = 0.0
+        equity = config.initial_capital
+        position_pct = 0.0
+        prev_equity = equity
 
-    for d in common_dates:
-        price = price_map[d]
-        score = sentiment_map.get(d, 50.0)
+        # 买入持有基准
+        benchmark_shares = config.initial_capital / price_data[0]["close"]
+        benchmark_equity = config.initial_capital
 
-        # 计算当前市值
-        market_value = cash + shares * price
+        for i, bar in enumerate(price_data):
+            d = bar["date"]
+            close = float(bar["close"])
+            signal = bar.get("signal_level", "B")
 
-        # 买入信号：情绪评分低于买入阈值
-        if score <= params.sentiment_threshold_buy and cash > params.initial_capital * 0.05:
-            buy_amount = cash * (params.position_pct / 100)
-            buy_shares = buy_amount / price
-            cash -= buy_amount
-            shares += buy_shares
-            trades.append(TradeRecord(
-                trade_date=date.fromisoformat(d),
-                trade_type="buy",
-                price=price,
-                shares=buy_shares,
-                amount=buy_amount,
-                sentiment_score=score,
-                reason=f"恐慌信号(评分{score})，分批建仓",
+            # 计算当前权益
+            equity = cash + shares * close
+            daily_return = (equity - prev_equity) / prev_equity if prev_equity > 0 else 0.0
+
+            equity_curve.append(EquityPoint(
+                date=d,
+                equity=round(equity, 2),
+                position_pct=position_pct,
+                signal_level=signal,
+                daily_return=round(daily_return, 6),
             ))
 
-        # 卖出信号：情绪评分高于卖出阈值
-        elif score >= params.sentiment_threshold_sell and shares > 0:
-            sell_shares = shares * (params.position_pct / 100)
-            sell_amount = sell_shares * price
-            cash += sell_amount
-            shares -= sell_shares
-            trades.append(TradeRecord(
-                trade_date=date.fromisoformat(d),
-                trade_type="sell",
-                price=price,
-                shares=sell_shares,
-                amount=sell_amount,
-                sentiment_score=score,
-                reason=f"贪婪信号(评分{score})，分批止盈",
+            # 基准权益
+            benchmark_equity = benchmark_shares * close
+            benchmark_curve.append(EquityPoint(
+                date=d,
+                equity=round(benchmark_equity, 2),
+                position_pct=1.0,
+                signal_level="benchmark",
+                daily_return=round((benchmark_equity - (benchmark_curve[-2].equity if len(benchmark_curve) > 1 else benchmark_equity)) / benchmark_equity, 6) if len(benchmark_curve) > 1 else 0.0,
             ))
 
-        equity_curve.append({
-            "date": d,
-            "value": round(cash + shares * price, 2),
-        })
+            # 信号驱动仓位调整
+            if config.signal_strategy == "v5_signal":
+                target_pct = self._signal_to_position(signal, config)
+            elif config.signal_strategy == "buy_hold":
+                target_pct = 1.0
+            else:
+                target_pct = 0.5
 
-    # 计算最终指标
-    final_value = cash + shares * float(price_map[common_dates[-1]])
-    total_return = (final_value / params.initial_capital - 1) * 100
+            # 执行交易
+            if abs(target_pct - position_pct) > 0.01:
+                trade = self._execute_trade(
+                    d, signal, close, target_pct, position_pct,
+                    cash, shares, config,
+                )
+                if trade:
+                    trades.append(trade)
+                    cash = trade.amount  # 更新后
+                    shares = trade.shares  # 更新后
+                    position_pct = target_pct
 
-    # 基准收益（买入持有）
-    benchmark_return = (float(price_map[common_dates[-1]]) / initial_price - 1) * 100
+            prev_equity = equity
 
-    # 年化收益率
-    days = len(common_dates)
-    years = days / 252
-    if years > 0 and total_return > -100:
-        annual_return = ((1 + total_return / 100) ** (1 / years) - 1) * 100
-    else:
-        annual_return = 0.0
+        # 计算绩效指标
+        metrics = self._calc_metrics(equity_curve, trades, config)
 
-    # 最大回撤
-    peak = 0.0
-    max_dd = 0.0
-    for point in equity_curve:
-        v = point["value"]
-        if v > peak:
-            peak = v
-        if peak > 0:
-            dd = (peak - v) / peak * 100
-            max_dd = max(max_dd, dd)
+        return BacktestResult(
+            config=config,
+            metrics=metrics,
+            equity_curve=equity_curve,
+            trades=trades,
+            benchmark_curve=benchmark_curve,
+        )
 
-    # 胜率
-    profit_trades = sum(1 for t in trades if t.trade_type == "sell")
-    if trades:
-        win_rate = (profit_trades / len(trades)) * 100 if trades else 0
-    else:
-        win_rate = 0
-
-    # 夏普比率（简化）
-    if len(equity_curve) > 1:
-        daily_returns = []
-        for i in range(1, len(equity_curve)):
-            r = (equity_curve[i]["value"] / equity_curve[i - 1]["value"] - 1)
-            daily_returns.append(r)
-        mean_ret = sum(daily_returns) / len(daily_returns)
-        std_ret = (sum((r - mean_ret) ** 2 for r in daily_returns) / len(daily_returns)) ** 0.5
-        if std_ret > 0:
-            sharpe = (mean_ret / std_ret) * (252 ** 0.5)
+    def _signal_to_position(self, signal: str, config: BacktestConfig) -> float:
+        """信号等级 → 目标仓位百分比"""
+        if signal in config.buy_signals:
+            return 0.75  # 买入信号 → 75%仓位
+        elif signal in config.sell_signals:
+            return 0.25  # 卖出信号 → 25%仓位
         else:
-            sharpe = 0.0
-    else:
-        sharpe = 0.0
+            return 0.50  # 持有信号 → 50%仓位
 
-    return BacktestResult(
-        params=params,
-        total_return=round(total_return, 2),
-        annual_return=round(annual_return, 2),
-        max_drawdown=round(max_dd, 2),
-        win_rate=round(win_rate, 2),
-        sharpe_ratio=round(sharpe, 2),
-        benchmark_return=round(benchmark_return, 2),
-        excess_return=round(total_return - benchmark_return, 2),
-        total_trades=len(trades),
-        profit_trades=profit_trades,
-        trades=trades,
-        equity_curve=equity_curve,
-        signal_accuracy=round(win_rate, 2),
-    )
+    def _execute_trade(
+        self,
+        trade_date: str,
+        signal: str,
+        price: float,
+        target_pct: float,
+        current_pct: float,
+        cash: float,
+        shares: float,
+        config: BacktestConfig,
+    ) -> Optional[TradeRecord]:
+        """执行交易"""
+        equity = cash + shares * price
+        target_value = equity * target_pct
+        current_value = shares * price
+
+        if target_value > current_value:
+            # 买入
+            buy_amount = target_value - current_value
+            buy_amount = min(buy_amount, cash)
+            buy_shares = buy_amount / price
+            commission = buy_amount * config.commission_rate
+
+            return TradeRecord(
+                trade_date=trade_date,
+                trade_type="buy",
+                signal_level=signal,
+                price=round(price, 4),
+                shares=round(buy_shares, 2),
+                amount=round(buy_amount - commission, 2),
+                commission=round(commission, 2),
+                reason=f"信号{signal}，目标仓位{target_pct*100:.0f}%",
+            )
+        elif target_value < current_value:
+            # 卖出
+            sell_value = current_value - target_value
+            sell_shares = sell_value / price
+            sell_amount = sell_value * (1 - config.commission_rate - config.stamp_tax_rate)
+
+            return TradeRecord(
+                trade_date=trade_date,
+                trade_type="sell",
+                signal_level=signal,
+                price=round(price, 4),
+                shares=round(sell_shares, 2),
+                amount=round(sell_amount, 2),
+                commission=round(sell_value * (config.commission_rate + config.stamp_tax_rate), 2),
+                reason=f"信号{signal}，目标仓位{target_pct*100:.0f}%",
+            )
+
+        return None
+
+    def _calc_metrics(
+        self,
+        equity_curve: list[EquityPoint],
+        trades: list[TradeRecord],
+        config: BacktestConfig,
+    ) -> BacktestMetrics:
+        """计算绩效指标"""
+        if len(equity_curve) < 2:
+            return BacktestMetrics()
+
+        initial = config.initial_capital
+        final = equity_curve[-1].equity
+
+        # 总收益率
+        total_return = (final - initial) / initial * 100
+
+        # 年化收益率
+        days = len(equity_curve)
+        annual_return = ((final / initial) ** (252 / days) - 1) * 100 if days > 0 else 0.0
+
+        # 最大回撤
+        peak = initial
+        max_dd = 0.0
+        dd_duration = 0
+        max_dd_duration = 0
+        for pt in equity_curve:
+            if pt.equity > peak:
+                peak = pt.equity
+                dd_duration = 0
+            dd = (peak - pt.equity) / peak * 100
+            if dd > max_dd:
+                max_dd = dd
+            dd_duration += 1
+            if dd > 0:
+                max_dd_duration = max(max_dd_duration, dd_duration)
+
+        # 波动率
+        returns = [pt.daily_return for pt in equity_curve if pt.daily_return != 0]
+        avg_return = sum(returns) / len(returns) if returns else 0
+        variance = sum((r - avg_return) ** 2 for r in returns) / len(returns) if returns else 0
+        daily_vol = math.sqrt(variance)
+        annual_vol = daily_vol * math.sqrt(252) * 100
+
+        # 夏普比率
+        risk_free = 2.5  # 无风险利率 2.5%
+        sharpe = (annual_return - risk_free) / annual_vol if annual_vol > 0 else 0.0
+
+        # Calmar 比率
+        calmar = annual_return / max_dd if max_dd > 0 else 0.0
+
+        # 胜率
+        win_trades = [t for t in trades if t.trade_type == "sell" and t.amount > 0]
+        win_count = len(win_trades)
+        total_sell = sum(1 for t in trades if t.trade_type == "sell")
+        win_rate = (win_count / total_sell * 100) if total_sell > 0 else 0.0
+
+        # 盈亏比
+        if win_trades:
+            avg_win = sum(t.amount for t in win_trades) / len(win_trades) if win_trades else 0
+            lose_trades = [t for t in trades if t.trade_type == "sell" and t.amount <= 0]
+            avg_lose = abs(sum(t.amount for t in lose_trades) / len(lose_trades)) if lose_trades else 1
+            profit_loss_ratio = avg_win / avg_lose if avg_lose > 0 else 0
+        else:
+            profit_loss_ratio = 0.0
+
+        return BacktestMetrics(
+            total_return=round(total_return, 2),
+            annual_return=round(annual_return, 2),
+            max_drawdown=round(max_dd, 2),
+            max_drawdown_duration=max_dd_duration,
+            sharpe_ratio=round(sharpe, 2),
+            win_rate=round(win_rate, 2),
+            profit_loss_ratio=round(profit_loss_ratio, 2),
+            total_trades=len(trades),
+            avg_hold_days=0.0,  # TODO
+            calmar_ratio=round(calmar, 2),
+            volatility=round(annual_vol, 2),
+        )

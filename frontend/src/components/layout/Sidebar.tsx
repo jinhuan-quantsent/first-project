@@ -1,6 +1,5 @@
 import { NavLink, useLocation } from 'react-router-dom';
 import {
-  LayoutDashboard,
   Search,
   Star,
   Briefcase,
@@ -8,11 +7,10 @@ import {
 } from 'lucide-react';
 
 const NAV_ITEMS = [
-  { to: '/', icon: LayoutDashboard, label: '仪表盘' },
-  { to: '/search', icon: Search, label: '基金查询' },
+  { to: '/', icon: Search, label: '基金查询' },
   { to: '/watchlist', icon: Star, label: '自选' },
   { to: '/portfolio', icon: Briefcase, label: '持仓' },
-  { to: '/review', icon: BarChart3, label: '复盘' },
+  { to: '/review', icon: BarChart3, label: '历史回溯' },
 ];
 
 export default function Sidebar() {
@@ -25,12 +23,12 @@ export default function Sidebar() {
     >
       {/* Logo */}
       <div className="flex items-center gap-2 px-4 py-4 border-b border-gray-100">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
+        <div className="w-8 h-8 rounded-lg bg-brand-500 flex items-center justify-center">
           <BarChart3 className="w-4 h-4 text-white" />
         </div>
         <div>
-          <div className="text-sm font-bold text-gray-800">情绪分析</div>
-          <div className="text-[10px] text-gray-400">V3.5</div>
+          <div className="text-sm font-bold text-gray-800">基金情绪</div>
+          <div className="text-[10px] text-brand-500">V5.0</div>
         </div>
       </div>
 
@@ -47,7 +45,7 @@ export default function Sidebar() {
               to={item.to}
               className={`flex items-center gap-3 px-4 py-2.5 mx-2 rounded-lg text-sm transition-colors ${
                 isActive
-                  ? 'bg-blue-50 text-blue-600 font-medium'
+                  ? 'bg-brand-50 text-brand-600 font-medium'
                   : 'text-gray-600 hover:bg-gray-50 hover:text-gray-800'
               }`}
             >

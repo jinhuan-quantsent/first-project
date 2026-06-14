@@ -1,11 +1,12 @@
 """
 持仓管理接口
 V4.0：注入 get_current_user，Mock → ORM CRUD
+V5.0：新增仓位建议接口（使用 V5 引擎）
 """
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,10 @@ from app.models.user_portfolio import UserPortfolio
 
 router = APIRouter()
 
+
+# ============================================================
+# Pydantic 模型
+# ============================================================
 
 class PortfolioItem(BaseModel):
     """持仓项"""
@@ -28,6 +33,17 @@ class PortfolioItem(BaseModel):
     buy_date: Optional[str] = None
     portfolio_tag: str = "core"
     weight_pct: float = 0.0
+
+
+class PositionAdviceResponse(BaseModel):
+    """V5.0 仓位建议响应"""
+    fund_code: str
+    current_position_pct: float
+    target_position_pct: float
+    action: str  # increase/hold/decrease
+    signal_level: str
+    confidence_stars: int
+    reason: str
 
 
 @router.get("/portfolio")
@@ -228,3 +244,43 @@ async def get_portfolio_overlap(
         },
         "message": "ok",
     }
+
+
+# ============================================================
+# V5.0 仓位建议接口
+# ============================================================
+
+@router.get("/portfolio/position-v5")
+async def get_position_v5(
+    fund_code: str = Query(..., description="基金代码"),
+    current_position_pct: float = Query(..., description="当前仓位百分比 (0-1)"),
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    V5.0 仓位调整建议
+
+    使用 V5 引擎（11因子 + 7级信号 + 5×7仓位矩阵）
+    """
+    from app.api.v5 import _run_v5_pipeline
+    from app.engine.position_v5 import PositionEngineV5
+
+    # 获取市场信号（默认沪深300）
+    result = await _run_v5_pipeline("SH000300", db_session=session)
+    if "error" in result:
+        return {"code": 500, "data": None, "message": "无法获取市场信号"}
+
+    signal_level = result["signal_level"]
+    confidence_stars = result["confidence_stars"]
+
+    # 计算仓位建议
+    position_engine = PositionEngineV5(session)
+    advice = await position_engine.calculate(
+        user_id=user_id,
+        fund_code=fund_code,
+        current_position_pct=current_position_pct,
+        signal_level=signal_level,
+        confidence_stars=confidence_stars,
+    )
+
+    return {"code": 0, "data": advice, "message": "ok"}

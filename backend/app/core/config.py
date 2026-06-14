@@ -14,10 +14,11 @@ class Settings(BaseSettings):
 
     # --- 应用 ---
     APP_NAME: str = "基金情绪分析系统"
-    APP_VERSION: str = "4.0.0"
+    APP_VERSION: str = "5.0.0"
     DEBUG: bool = False
     SECRET_KEY: str = "dev-secret-key-change-in-production"
     API_PREFIX: str = "/api/v1"
+    API_V5_PREFIX: str = "/api/v5"
     ENVIRONMENT: str = "development"
 
     # --- 数据库 ---
@@ -120,6 +121,74 @@ class Settings(BaseSettings):
 
     # --- Vercel ---
     VERCEL_URL: str = ""
+
+    # ============================
+    # V5.0 新增配置项
+    # ============================
+
+    # --- V5.0 信号边界 (6个边界划分7级: S+/S/A/B/C/D/E) ---
+    V5_SIGNAL_BOUNDARIES: List[int] = Field(default_factory=lambda: [12, 25, 38, 52, 65, 80])
+
+    # --- V5.0 11因子配置 (名称/方向/权重/Sigmoid参数) ---
+    V5_FACTOR_CONFIG: dict = Field(default_factory=lambda: {
+        "VOL":  {"label": "波动率", "direction": "fear", "weight": 0.12, "sigmoid_c": 0.50, "sigmoid_k": 3.0, "source": "tushare"},
+        "ADR":  {"label": "涨跌比", "direction": "greed", "weight": 0.12, "sigmoid_c": 0.50, "sigmoid_k": 2.5, "source": "tushare"},
+        "ERP":  {"label": "股债性价比", "direction": "fear", "weight": 0.12, "sigmoid_c": 0.50, "sigmoid_k": 4.0, "source": "tushare"},
+        "FLOW": {"label": "资金流", "direction": "greed", "weight": 0.10, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "tushare"},
+        "ETF":  {"label": "ETF份额", "direction": "greed", "weight": 0.08, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "tushare"},
+        "NHNL": {"label": "新高占比", "direction": "greed", "weight": 0.08, "sigmoid_c": 0.60, "sigmoid_k": 2.5, "source": "tushare"},
+        "TURN": {"label": "换手率", "direction": "fear", "weight": 0.08, "sigmoid_c": 0.40, "sigmoid_k": 3.0, "source": "tushare"},
+        "POS":  {"label": "基金仓位", "direction": "greed", "weight": 0.08, "sigmoid_c": 0.50, "sigmoid_k": 1.8, "source": "tushare"},
+        "NBF":  {"label": "北向资金", "direction": "greed", "weight": 0.06, "sigmoid_c": 0.50, "sigmoid_k": 2.5, "source": "tushare"},
+        "PCR":  {"label": "认沽认购比", "direction": "fear", "weight": 0.04, "sigmoid_c": 0.30, "sigmoid_k": 4.0, "source": "tushare"},
+        "NEWF": {"label": "新发基金热度", "direction": "greed", "weight": 0.04, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "tushare"},
+    })
+
+    # --- V5.0 分位数标准化窗口 ---
+    V5_QUANTILE_WINDOW_DAYS: int = 1260  # 5年 × 252交易日
+    V5_QUANTILE_MIN_SAMPLES: int = 252   # 最少1年数据
+
+    # --- V5.0 分歧度动态加权 ---
+    V5_DIVERGENCE_PENALTY_MIN: float = 0.5   # 最大分歧时惩罚系数
+    V5_DIVERGENCE_PENALTY_MAX: float = 1.0   # 无分歧时惩罚系数
+    V5_DIVERGENCE_STD_THRESHOLD: float = 0.35  # 触发防线的factor_std阈值
+
+    # --- V5.0 防跳变规则 ---
+    V5_ANTI_JUMP_SMALL_DIFF: int = 10   # 分数差<10 → 最多变1级
+    V5_ANTI_JUMP_LARGE_DIFF: int = 10   # 分数差≥10 → 最多变2级
+    V5_ANTI_JUMP_CONSECUTIVE_DAYS: int = 3  # 连续N天同向 → 额外1级
+
+    # --- V5.0 仓位矩阵 (5行当前仓位 × 7列信号等级) ---
+    V5_POSITION_MATRIX: List[List[str]] = Field(default_factory=lambda: [
+        ["empty", "empty", "light", "light", "mid",   "mid",   "mid"],    # empty
+        ["empty", "light", "light", "mid",   "mid",   "heavy", "heavy"],  # light
+        ["light", "light", "mid",   "mid",   "heavy", "heavy", "full"],   # mid
+        ["light", "mid",   "mid",   "heavy", "heavy", "full",  "full"],   # heavy
+        ["mid",   "mid",   "heavy", "heavy", "full",  "full",  "full"],   # full
+    ])
+    # 仓位等级映射: empty=0%, light=25%, mid=50%, heavy=75%, full=100%
+    V5_POSITION_LEVEL_PCT: dict = Field(default_factory=lambda: {
+        "empty": 0.0, "light": 0.25, "mid": 0.50, "heavy": 0.75, "full": 1.0,
+    })
+    V5_POSITION_LEVELS: List[str] = Field(default_factory=lambda: ["empty", "light", "mid", "heavy", "full"])
+
+    # --- V5.0 置信度修正系数 ---
+    V5_CONFIDENCE_POSITION_ADJ: dict = Field(default_factory=lambda: {
+        4: 1.0,   # 4星 → 100%
+        3: 0.75,  # 3星 → 75%
+        2: 0.50,  # 2星 → 50%
+        1: 0.25,  # 1星 → 25%
+    })
+
+    # --- V5.0 交易成本校验 ---
+    V5_COST_THRESHOLD_PCT: float = 0.015  # 1.5% 低于此不操作
+    V5_FREQUENCY_LIMIT_DAYS: int = 7      # 7天内同基金只能执行一次
+
+    # --- V5.0 四道假信号防线 ---
+    V5_DEFENSE_EXTREME_VOLATILITY: bool = True  # 防线1: 市场极端波动
+    V5_DEFENSE_JUMP_GT_15: bool = True         # 防线2: 信号跳变>15分
+    V5_DEFENSE_PRICE_DIVERGENCE: bool = True    # 防线3: 价格-情绪背离
+    V5_DEFENSE_FACTOR_STD: bool = True         # 防线4: 因子分歧度>阈值
 
     model_config = {
         "env_file": ".env",

@@ -20,6 +20,8 @@ class FactorHistory(Base):
     created_at: Mapped[str] = mapped_column(
         DateTime, default=func.now(), comment="创建时间"
     )
+    # --- V5.0 新增字段 ---
+    quantile_percentile: Mapped[float | None] = mapped_column(Float, default=None, comment="V5.0分位数标准化结果(0.0-1.0)")
 
     __table_args__ = (
         UniqueConstraint("index_code", "factor_name", "trade_date", name="uq_factor_history"),
