@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
-from app.engine.backtest import run_backtest, BacktestParams, BacktestResult
+from app.engine.backtest import BacktestEngine, BacktestConfig, BacktestResult
 
 router = APIRouter()
 

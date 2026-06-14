@@ -1058,7 +1058,7 @@ async def fetch_fund_position() -> float:
                 if nav_df is None or len(nav_df) < 10:
                     continue
 
-                nav_df = nav_df.sort_values("end_date").reset_index(drop=True)
+                nav_df = nav_df.sort_values("nav_date").reset_index(drop=True)
                 fund_returns: list[float] = []
                 for i in range(1, len(nav_df)):
                     prev_nav = float(nav_df.iloc[i - 1]["unit_nav"])

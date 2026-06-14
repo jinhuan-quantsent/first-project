@@ -18,6 +18,7 @@ from app.utils.data_source import data_source, DEFAULT_INDEX_CODES
 from app.engine.factor_engine import FACTOR_NAMES, FACTOR_CLASSES
 from app.engine.quantile import QuantileNorm
 from app.engine.sigmoid import SigmoidMapper
+from app.engine.factor_engine.base import FactorSigmoidResult
 from app.engine.aggregator_v5 import AggregatorV5
 from app.engine.signal_mapper import SignalMapper
 from app.engine.confidence import ConfidenceEngine
@@ -109,34 +110,33 @@ async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_se
         if factor.direction == "fear" and name == "ERP":
             sigmoid_score = 100.0 - sigmoid_score
 
-        sigmoid_results.append({
-            "factor_name": name,
-            "percentile": percentile,
-            "sigmoid_score": sigmoid_score,
-            "raw_value": raw_value,
-            "label": factor.label,
-            "direction": factor.direction,
-            "weight": factor.weight,
-        })
+        sigmoid_results.append(FactorSigmoidResult(
+            factor_name=name,
+            percentile=percentile if percentile is not None else 0.50,
+            sigmoid_score=sigmoid_score,
+            c_param=factor.sigmoid_c,
+            k_param=factor.sigmoid_k,
+            slope_at_midpoint=0.0,
+        ))
 
     # Layer 3：加权聚合
     composite = aggregator.aggregate(sigmoid_results)
 
     # 信号映射
-    signal_level, jump_blocked = signal_mapper.map(composite.composite_score)
+    signal_level, jump_blocked = signal_mapper.map(composite.score)
 
     # 置信度计算
     confidence_stars, confidence_detail, defenses = confidence_engine.calculate(
-        sigmoid_results, signal_level, composite.regime,
+        sigmoid_results, signal_level, composite.divergence.regime,
     )
 
     return {
         "index_code": index_code,
         "index_name": index_data.get("index_name", index_code),
-        "composite_score": round(composite.composite_score, 2),
-        "score_std": round(composite.score_std, 4),
-        "divergence_penalty": round(composite.divergence_penalty, 4),
-        "regime": composite.regime,
+        "composite_score": round(composite.score, 2),
+        "score_std": round(composite.divergence.factor_std, 4),
+        "divergence_penalty": round(composite.divergence.penalty_factor, 4),
+        "regime": composite.divergence.regime,
         "signal_level": signal_level,
         "signal_jump_blocked": jump_blocked,
         "confidence_stars": confidence_stars,

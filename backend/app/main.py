@@ -82,7 +82,7 @@ app.include_router(watchlist_router, prefix=settings.API_PREFIX, tags=["自选�
 app.include_router(review_router, prefix=settings.API_PREFIX, tags=["复盘分析"])
 app.include_router(config_router, prefix=settings.API_PREFIX, tags=["配置管理"])
 app.include_router(advice_router, prefix=settings.API_PREFIX, tags=["操作建议"])
-app.include_router(v5_router, prefix=settings.API_V5_PREFIX, tags=["V5.0情绪引擎"])
+app.include_router(v5_router, prefix="", tags=["V5.0情绪引擎"])
 app.include_router(review_v5_router, prefix=settings.API_PREFIX, tags=["V5.0回测引擎"])
 
 
