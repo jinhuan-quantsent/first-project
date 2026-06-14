@@ -113,17 +113,20 @@ export default function FundSearchV5() {
       const [detail] = await Promise.all([
         fetchFundDetail(fund.fund_code).catch(() => null),
         fetchV5Sentiment(fund.fund_code).then((s) => {
-          setSentimentCache((prev) => ({ ...prev, [fund.fund_code]: {
-            score:           s.composite_score,
-            signalLevel:     s.signal_level as SignalLevel,
-            confidenceStars:  s.confidence_stars,
-            shortTerm:      s.signal_level as SignalLevel,
-            midTerm:        s.signal_level as SignalLevel,
-            longTerm:        s.signal_level as SignalLevel,
-            hasDivergence:  false,
-            divergenceType:  undefined,
-            advice:          { action: '', level: '', reason: '', targetPositionPct: 0.5 },
-          } ));
+          setSentimentCache((prev) => ({
+            ...prev,
+            [fund.fund_code]: {
+              score:           s.composite_score,
+              signalLevel:     s.signal_level as SignalLevel,
+              confidenceStars:  s.confidence_stars,
+              shortTerm:      s.signal_level as SignalLevel,
+              midTerm:        s.signal_level as SignalLevel,
+              longTerm:        s.signal_level as SignalLevel,
+              hasDivergence:  false,
+              divergenceType:  undefined,
+              advice:          { action: '', level: '', reason: '', targetPositionPct: 0.5 },
+            },
+          }));
         }).catch(() => {
           // 情绪数据获取失败时不影响详情显示
         }),

@@ -31,7 +31,7 @@ export async function runBacktestV5(params: {
 
 /** 获取回测历史列表 */
 export async function fetchBacktestHistoryV5(
-  page?: number;
+  page?: number,
 ): Promise<{ items: unknown[] }> {
   const params: Record<string, number> = {};
   if (page) params.page = page;

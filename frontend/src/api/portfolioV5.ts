@@ -35,8 +35,8 @@ export async function executePositionV5(params: {
 
 /** 获取历史建议 */
 export async function fetchAdviceHistoryV5(
-  fundCode?: string;
-  page?: number;
+  fundCode?: string,
+  page?: number,
 ): Promise<{ items: unknown[]; stats: Record<string, number> }> {
   const params: Record<string, string | number> = {};
   if (fundCode) params.fund_code = fundCode;
@@ -47,8 +47,8 @@ export async function fetchAdviceHistoryV5(
 
 /** 获取交易记录 */
 export async function fetchTradeRecordsV5(
-  fundCode?: string;
-  page?: number;
+  fundCode?: string,
+  page?: number,
 ): Promise<{ items: unknown[] }> {
   const params: Record<string, string | number> = {};
   if (fundCode) params.fund_code = fundCode;

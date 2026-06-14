@@ -6,7 +6,7 @@ import { useState, useCallback, useEffect } from 'react';
 import type { PortfolioItem, PortfolioSummary, SignalLevel } from '../../types';
 import { Plus, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { clsx } from 'clsx';
-import ExecutionButton from '../../components/fundsearch/ExecutionButton';
+import ExecutionButton from '../components/fundsearch/ExecutionButton';
 import {
   fetchPortfolioV5,
   fetchAdviceHistoryV5,
