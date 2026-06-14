@@ -1,6 +1,6 @@
 """
 FastAPI 应用入口
-基金情绪分析系统 V4.0
+基金情绪分析系统 V5.0
 """
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -60,30 +60,35 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     )
 
 
-# 注册路由
+# ============================================================
+# 注册路由 — V5.0 统一前缀 /api/v5
+# ============================================================
 from app.api.health import router as health_router
-from app.api.market import router as market_router
-from app.api.fund import router as fund_router
-from app.api.portfolio import router as portfolio_router
-from app.api.watchlist import router as watchlist_router
-from app.api.review import router as review_router
-from app.api.config import router as config_router
-from app.api.advice import router as advice_router
 from app.api.auth import router as auth_router
 from app.api.v5 import router as v5_router
+from app.api.fund import router as fund_router
 from app.api.review_v5 import router as review_v5_router
+from app.api.portfolio import router as portfolio_router
+from app.api.watchlist import router as watchlist_router
 
-app.include_router(health_router, prefix=settings.API_PREFIX, tags=["健康检查"])
-app.include_router(auth_router, prefix=settings.API_PREFIX, tags=["认证"])
-app.include_router(market_router, prefix=settings.API_PREFIX, tags=["大盘情绪"])
-app.include_router(fund_router, prefix=settings.API_PREFIX, tags=["基金查询"])
-app.include_router(portfolio_router, prefix=settings.API_PREFIX, tags=["持仓管理"])
-app.include_router(watchlist_router, prefix=settings.API_PREFIX, tags=["自选基金"])
-app.include_router(review_router, prefix=settings.API_PREFIX, tags=["复盘分析"])
-app.include_router(config_router, prefix=settings.API_PREFIX, tags=["配置管理"])
-app.include_router(advice_router, prefix=settings.API_PREFIX, tags=["操作建议"])
+# V5 核心路由（已自带 /api/v5 前缀）
+app.include_router(health_router, prefix="", tags=["健康检查"])
+app.include_router(auth_router, prefix="", tags=["认证"])
 app.include_router(v5_router, prefix="", tags=["V5.0情绪引擎"])
-app.include_router(review_v5_router, prefix=settings.API_PREFIX, tags=["V5.0回测引擎"])
+
+# 基金查询（改为 /api/v5/fund/*）
+fund_router.prefix = "/api/v5/fund"
+app.include_router(fund_router, prefix="", tags=["基金查询"])
+
+# 持仓管理（已自带 /api/v5/portfolio 前缀）
+app.include_router(portfolio_router, prefix="", tags=["持仓管理"])
+
+# 自选基金（已自带 /api/v5/watchlist 前缀）
+app.include_router(watchlist_router, prefix="", tags=["自选基金"])
+
+# 回测引擎（改为 /api/v5/review/*）
+review_v5_router.prefix = "/api/v5/review"
+app.include_router(review_v5_router, prefix="", tags=["V5.0回测引擎"])
 
 
 @app.get("/")
@@ -94,7 +99,7 @@ async def root() -> dict:
         "data": {
             "app": settings.APP_NAME,
             "version": settings.APP_VERSION,
-            "docs": f"{settings.API_PREFIX}/docs",
+            "docs": "/api/v5/docs",
         },
         "message": "ok",
     }

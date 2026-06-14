@@ -1,6 +1,8 @@
 import client from './client';
 import type { ApiResponse, WatchlistItem } from '../types';
 
+const V5 = '/api/v5';
+
 // 获取自选
 export async function fetchWatchlist(): Promise<{
   items: WatchlistItem[];
@@ -11,7 +13,7 @@ export async function fetchWatchlist(): Promise<{
     items: WatchlistItem[];
     total: number;
     updated_at: string;
-  }>>('/api/v1/watchlist');
+  }>>(`${V5}/watchlist`);
   return res.data.data;
 }
 
@@ -22,11 +24,11 @@ export async function addWatchlistItem(item: {
   notes?: string;
   alert_threshold?: number;
 }): Promise<WatchlistItem> {
-  const res = await client.post<ApiResponse<WatchlistItem>>('/api/v1/watchlist', item);
+  const res = await client.post<ApiResponse<WatchlistItem>>(`${V5}/watchlist`, item);
   return res.data.data;
 }
 
 // 删除自选
 export async function deleteWatchlistItem(id: number): Promise<void> {
-  await client.delete(`/api/v1/watchlist/${id}`);
+  await client.delete(`${V5}/watchlist/${id}`);
 }

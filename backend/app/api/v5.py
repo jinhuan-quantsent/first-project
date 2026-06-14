@@ -330,6 +330,46 @@ async def execute_v5_position(
     }
 
 
+@router.get("/market/snapshot")
+async def get_v5_market_snapshot() -> dict:
+    """
+    市场快照（顶部状态条数据）
+
+    返回关键指数摘要 + 全局情绪标签（基于 V5 pipeline）
+    """
+    index_data = await data_source.get_all_index_data()
+
+    items = []
+    for code in DEFAULT_INDEX_CODES:
+        if code not in index_data:
+            continue
+        data = index_data[code]
+        # 简化版：直接从数据源返回，不再走V1 compatibility
+        result = await _run_v5_pipeline(code)
+        items.append({
+            "index_code": code,
+            "index_name": data.get("index_name", code),
+            "close": data.get("close"),
+            "change_pct": data.get("change_pct"),
+            "composite_score": result.get("composite_score", 50.0) if "error" not in result else 50.0,
+            "sentiment_label": result.get("signal_level", "B") if "error" not in result else "B",
+        })
+
+    # 综合情绪取第一个
+    main = items[0] if items else None
+
+    return {
+        "code": 0,
+        "data": {
+            "indexes": items,
+            "global_sentiment": main.get("sentiment_label", "B") if main else "B",
+            "global_score": main.get("composite_score", 50.0) if main else 50.0,
+            "updated_at": datetime.now().isoformat(),
+        },
+        "message": "ok",
+    }
+
+
 @router.get("/market/factor-heatmap")
 async def get_v5_factor_heatmap(
     index_code: str = Query(default="SH000300", description="指数代码"),

@@ -14,7 +14,7 @@ from app.core.auth import get_current_user
 from app.core.database import get_session
 from app.models.user_watchlist import UserWatchlist
 
-router = APIRouter()
+router = APIRouter(prefix="/api/v5/watchlist")
 
 
 class WatchlistAdd(BaseModel):

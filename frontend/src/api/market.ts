@@ -1,3 +1,7 @@
+/**
+ * V5.0 统一市场 API
+ * 所有接口走 /api/v5 前缀
+ */
 import client from './client';
 import type {
   ApiResponse,
@@ -13,6 +17,8 @@ import type {
   TrendSummary,
 } from '../types';
 
+const V5 = '/api/v5';
+
 // 多指数情绪
 export async function fetchMultiIndex(codes?: string): Promise<{
   indexes: MultiIndexData[];
@@ -24,31 +30,31 @@ export async function fetchMultiIndex(codes?: string): Promise<{
     indexes: MultiIndexData[];
     composite: CompositeSentiment;
     updated_at: string;
-  }>>('/api/v1/market/multi-index', { params });
+  }>>(`${V5}/market/multi-index`, { params });
+  return res.data.data;
+}
+
+// 市场快照（V5版本，基于V5 pipeline数据）
+export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
+  const res = await client.get<ApiResponse<MarketSnapshot>>(`${V5}/market/snapshot`);
   return res.data.data;
 }
 
 // 单指数详情
 export async function fetchIndexDetail(code: string): Promise<IndexDetail> {
-  const res = await client.get<ApiResponse<IndexDetail>>(`/api/v1/market/index/${code}`);
-  return res.data.data;
-}
-
-// 市场快照
-export async function fetchMarketSnapshot(): Promise<MarketSnapshot> {
-  const res = await client.get<ApiResponse<MarketSnapshot>>('/api/v1/market/snapshot');
+  const res = await client.get<ApiResponse<IndexDetail>>(`${V5}/market/index/${code}`);
   return res.data.data;
 }
 
 // 板块详情
 export async function fetchSectorDetail(name: string): Promise<SectorData> {
-  const res = await client.get<ApiResponse<SectorData>>(`/api/v1/market/sector/${encodeURIComponent(name)}`);
+  const res = await client.get<ApiResponse<SectorData>>(`${V5}/market/sector/${encodeURIComponent(name)}`);
   return res.data.data;
 }
 
 // 机会推荐
 export async function fetchRecommendations(): Promise<RecommendationData> {
-  const res = await client.get<ApiResponse<RecommendationData>>('/api/v1/market/recommendations');
+  const res = await client.get<ApiResponse<RecommendationData>>(`${V5}/market/recommendations`);
   return res.data.data;
 }
 
@@ -60,7 +66,7 @@ export async function fetchSectorHeatmap(): Promise<{
   const res = await client.get<ApiResponse<{
     sectors: SectorHeatmapItem[];
     group_summary: GroupSummary[];
-  }>>('/api/v1/market/sector-heatmap');
+  }>>(`${V5}/market/sector-heatmap`);
   return res.data.data;
 }
 
@@ -74,12 +80,12 @@ export async function fetchAbnormalCheck(): Promise<{
     has_abnormal: boolean;
     abnormal_count: number;
     items: AbnormalItem[];
-  }>>('/api/v1/market/abnormal-check');
+  }>>(`${V5}/market/abnormal-check`);
   return res.data.data;
 }
 
 // 趋势摘要
 export async function fetchTrendSummary(): Promise<TrendSummary> {
-  const res = await client.get<ApiResponse<TrendSummary>>('/api/v1/market/trend-summary');
+  const res = await client.get<ApiResponse<TrendSummary>>(`${V5}/market/trend-summary`);
   return res.data.data;
 }

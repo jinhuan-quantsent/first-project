@@ -12,7 +12,7 @@ from pydantic import BaseModel, EmailStr, Field
 from app.core.auth import create_access_token
 from app.core.config import settings
 
-router = APIRouter(prefix="/auth", tags=["认证"])
+router = APIRouter(prefix="/api/v5/auth", tags=["认证"])
 
 
 # ============================================================
@@ -82,7 +82,7 @@ def _get_supabase_client():
 # ============================================================
 # POST /auth/register
 # ============================================================
-@router.post("/register", status_code=status.HTTP_201)
+@router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(req: RegisterRequest) -> dict:
     """用户注册（通过 Supabase Auth）"""
     # AUTH_DISABLED 模式不允许注册

@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 
-router = APIRouter()
+router = APIRouter(prefix="/api/v5")
 
 
 @router.get("/health")
