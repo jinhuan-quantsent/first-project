@@ -188,7 +188,7 @@ def calculate_index_sentiment(
     # 映射回 V4 格式
     from app.engine.signal_mapper import SignalMapper
     mapper = SignalMapper()
-    signal_level, _ = mapper.map(composite.composite_score)
+    signal_level, _ = mapper.map(composite.score)
     sentiment_label = _signal_to_v4_label(signal_level)
 
     # Top 3 因子
@@ -202,12 +202,12 @@ def calculate_index_sentiment(
     return CompositeResult(
         index_code=index_code,
         index_name=index_name,
-        composite_score=round(composite.composite_score, 2),
+        composite_score=round(composite.score, 2),
         sentiment_label=sentiment_label,
         factor_scores=factor_scores,
         top3_factors=top3,
         conclusion=mapper.get_conclusion(signal_level),
-        divergence_index=round(composite.divergence_penalty * 100, 2),
+        divergence_index=round(composite.divergence.penalty_factor * 100, 2),
     )
 
 
