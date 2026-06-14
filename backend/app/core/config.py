@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     # --- 应用 ---
     APP_NAME: str = "基金情绪分析系统"
-    APP_VERSION: str = "3.5.0"
+    APP_VERSION: str = "4.0.0"
     DEBUG: bool = False
     SECRET_KEY: str = "dev-secret-key-change-in-production"
     API_PREFIX: str = "/api/v1"
@@ -25,9 +25,36 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://user:password@localhost:5432/fund_sentiment"
     SQLITE_PATH: str = "./data/fund_sentiment.db"
 
+    # --- Supabase ---
+    SUPABASE_URL: str = ""
+    SUPABASE_KEY: str = ""
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
+    SUPABASE_DB_PASSWORD: str = ""
+    SUPABASE_JWT_SECRET: str = ""
+
+    @property
+    def supabase_url(self) -> str:
+        """获取 Supabase 项目 URL"""
+        return self.SUPABASE_URL
+
+    @property
+    def supabase_db_url(self) -> str:
+        """构建 Supabase PostgreSQL 连接 URL（含密码）"""
+        if self.SUPABASE_URL and self.SUPABASE_DB_PASSWORD:
+            from urllib.parse import urlparse
+            parsed = urlparse(self.SUPABASE_URL)
+            db_user = "postgres"
+            db_host = parsed.hostname or "localhost"
+            db_port = parsed.port or 5432
+            db_name = "postgres"
+            return f"postgresql+asyncpg://{db_user}:{self.SUPABASE_DB_PASSWORD}@{db_host}:{db_port}/{db_name}"
+        return self.DATABASE_URL
+
     @property
     def db_url(self) -> str:
         """根据环境自动选择数据库连接"""
+        if self.USE_POSTGRES and self.supabase_db_url != self.DATABASE_URL:
+            return self.supabase_db_url
         if self.USE_POSTGRES:
             return self.DATABASE_URL
         return f"sqlite+aiosqlite:///{self.SQLITE_PATH}"
@@ -36,6 +63,7 @@ class Settings(BaseSettings):
     USE_REDIS: bool = False
     REDIS_URL: str = "redis://localhost:6379/0"
     UPSTASH_REDIS_URL: str = ""
+    UPSTASH_REDIS_TOKEN: str = ""
 
     @property
     def redis_url(self) -> str:
@@ -44,7 +72,10 @@ class Settings(BaseSettings):
             return self.UPSTASH_REDIS_URL
         return self.REDIS_URL
 
-    # --- 数据源 ---
+    # --- 认证 ---
+    AUTH_DISABLED: bool = False
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_SECONDS: int = 3600  # 1h
     TUSHARE_TOKEN: str = ""
     USE_AKSHARE: bool = True
     DATA_CACHE_TTL: int = 300  # 秒
@@ -59,6 +90,8 @@ class Settings(BaseSettings):
             "http://localhost:5173",
             "http://localhost:3000",
             "http://127.0.0.1:5173",
+            "https://fsa.vercel.app",
+            "https://fundsent.top",
         ]
     )
 

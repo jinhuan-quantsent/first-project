@@ -1,11 +1,18 @@
 """
 自选基金接口
+V4.0：注入 get_current_user，Mock → ORM CRUD
 """
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy import select, delete, func
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.auth import get_current_user
+from app.core.database import get_session
+from app.models.user_watchlist import UserWatchlist
 
 router = APIRouter()
 
@@ -18,66 +25,39 @@ class WatchlistAdd(BaseModel):
     alert_threshold: float = 0.0
 
 
-# Mock 自选数据
-MOCK_WATCHLIST: list[dict] = [
-    {
-        "id": 1,
-        "user_id": "demo_user",
-        "fund_code": "320007",
-        "fund_name": "诺安成长混合",
-        "added_at": "2024-06-15T10:30:00",
-        "notes": "半导体板块，关注AI芯片机会",
-        "alert_threshold": 5.0,
-        "sort_order": 1,
-        "current_nav": 1.1250,
-        "daily_return": 2.85,
-        "week_return": 5.52,
-        "month_return": 8.25,
-    },
-    {
-        "id": 2,
-        "user_id": "demo_user",
-        "fund_code": "005827",
-        "fund_name": "易方达蓝筹精选混合",
-        "added_at": "2024-07-20T14:15:00",
-        "notes": "核心资产配置",
-        "alert_threshold": -3.0,
-        "sort_order": 2,
-        "current_nav": 2.1580,
-        "daily_return": 0.15,
-        "week_return": 0.85,
-        "month_return": -1.52,
-    },
-    {
-        "id": 3,
-        "user_id": "demo_user",
-        "fund_code": "012345",
-        "fund_name": "招商中证白酒指数(LOF)A",
-        "added_at": "2024-09-01T09:00:00",
-        "notes": "等待白酒板块反弹",
-        "alert_threshold": 0.0,
-        "sort_order": 3,
-        "current_nav": 0.9850,
-        "daily_return": -1.25,
-        "week_return": -3.52,
-        "month_return": -7.85,
-    },
-]
-
-
 @router.get("/watchlist")
 async def get_watchlist(
-    user_id: str = Query(default="demo_user", description="用户ID"),
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
 ) -> dict:
     """获取自选列表"""
-    items = [
-        {k: v for k, v in item.items() if k != "user_id"}
-        for item in MOCK_WATCHLIST
-    ]
+    stmt = (
+        select(UserWatchlist)
+        .where(UserWatchlist.user_id == user_id)
+        .order_by(UserWatchlist.sort_order.asc(), UserWatchlist.added_at.desc())
+    )
+    result = await session.execute(stmt)
+    items = result.scalars().all()
+
     return {
         "code": 0,
         "data": {
-            "items": items,
+            "items": [
+                {
+                    "id": item.id,
+                    "fund_code": item.fund_code,
+                    "fund_name": item.fund_name,
+                    "added_at": item.added_at.isoformat() if item.added_at else "",
+                    "notes": item.notes,
+                    "alert_threshold": item.alert_threshold,
+                    "sort_order": item.sort_order,
+                    "current_nav": 1.0,
+                    "daily_return": 0.0,
+                    "week_return": 0.0,
+                    "month_return": 0.0,
+                }
+                for item in items
+            ],
             "total": len(items),
             "updated_at": datetime.now().isoformat(),
         },
@@ -85,36 +65,62 @@ async def get_watchlist(
     }
 
 
-@router.post("/watchlist")
-async def add_watchlist_item(item: WatchlistAdd) -> dict:
+@router.post("/watchlist", status_code=201)
+async def add_watchlist_item(
+    item: WatchlistAdd,
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
     """添加自选"""
-    new_item = {
-        "id": len(MOCK_WATCHLIST) + 1,
-        "user_id": "demo_user",
-        "fund_code": item.fund_code,
-        "fund_name": item.fund_name or f"基金{item.fund_code}",
-        "added_at": datetime.now().isoformat(),
-        "notes": item.notes,
-        "alert_threshold": item.alert_threshold,
-        "sort_order": len(MOCK_WATCHLIST) + 1,
-        "current_nav": 1.0,
-        "daily_return": 0.0,
-        "week_return": 0.0,
-        "month_return": 0.0,
-    }
-    MOCK_WATCHLIST.append(new_item)
+    # 计算排序序号
+    count_stmt = select(func.count()).where(UserWatchlist.user_id == user_id)
+    count_result = await session.execute(count_stmt)
+    next_order = (count_result.scalar() or 0) + 1
+
+    new_item = UserWatchlist(
+        user_id=user_id,
+        fund_code=item.fund_code,
+        fund_name=item.fund_name or f"基金{item.fund_code}",
+        notes=item.notes,
+        alert_threshold=item.alert_threshold,
+        sort_order=next_order,
+    )
+    session.add(new_item)
+    await session.commit()
+    await session.refresh(new_item)
+
     return {
         "code": 0,
-        "data": {k: v for k, v in new_item.items() if k != "user_id"},
+        "data": {
+            "id": new_item.id,
+            "fund_code": new_item.fund_code,
+            "fund_name": new_item.fund_name,
+            "added_at": new_item.added_at.isoformat() if new_item.added_at else "",
+            "notes": new_item.notes,
+            "alert_threshold": new_item.alert_threshold,
+            "sort_order": new_item.sort_order,
+        },
         "message": "添加成功",
     }
 
 
 @router.delete("/watchlist/{item_id}")
-async def delete_watchlist_item(item_id: int) -> dict:
+async def delete_watchlist_item(
+    item_id: int,
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
     """删除自选"""
-    for i, existing in enumerate(MOCK_WATCHLIST):
-        if existing["id"] == item_id:
-            MOCK_WATCHLIST.pop(i)
-            return {"code": 0, "data": None, "message": "删除成功"}
-    return {"code": 404, "data": None, "message": f"自选 {item_id} 不存在"}
+    stmt = (
+        delete(UserWatchlist)
+        .where(UserWatchlist.id == item_id, UserWatchlist.user_id == user_id)
+        .returning(UserWatchlist.id)
+    )
+    result = await session.execute(stmt)
+    deleted_id = result.scalar_one_or_none()
+
+    if deleted_id is None:
+        return {"code": 404, "data": None, "message": f"自选 {item_id} 不存在"}
+
+    await session.commit()
+    return {"code": 0, "data": None, "message": "删除成功"}

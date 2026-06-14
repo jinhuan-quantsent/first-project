@@ -1,4 +1,4 @@
-# 基金情绪分析系统 V3.5 - 后端依赖
+# 基金情绪分析系统 V4.0 - 后端依赖
 # Python 3.11+
 
 # --- Web 框架 ---
@@ -26,7 +26,12 @@ numpy==1.26.3
 python-dotenv==1.0.0
 pydantic==2.5.3
 pydantic-settings==2.1.0
+email-validator==2.1.0
 httpx==0.26.0
+
+# --- 认证 ---
+PyJWT>=2.8.0
+supabase>=2.0
 
 # --- 定时任务 ---
 apscheduler==3.10.4

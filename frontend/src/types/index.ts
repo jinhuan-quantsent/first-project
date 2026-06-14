@@ -342,3 +342,28 @@ export interface MarketSnapshot {
   conclusion: string;
   updated_at: string;
 }
+
+// --- 认证相关 ---
+export interface User {
+  user_id: string;
+  email: string;
+  created_at?: string;
+}
+
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface RegisterRequest {
+  email: string;
+  password: string;
+  confirm_password: string;
+}
+
+export interface AuthResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  user: User;
+}

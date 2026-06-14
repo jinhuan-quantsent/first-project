@@ -1,6 +1,6 @@
 """
 FastAPI 应用入口
-基金情绪分析系统 V3.5
+基金情绪分析系统 V4.0
 """
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -68,8 +68,10 @@ from app.api.watchlist import router as watchlist_router
 from app.api.review import router as review_router
 from app.api.config import router as config_router
 from app.api.advice import router as advice_router
+from app.api.auth import router as auth_router
 
 app.include_router(health_router, prefix=settings.API_PREFIX, tags=["健康检查"])
+app.include_router(auth_router, prefix=settings.API_PREFIX, tags=["认证"])
 app.include_router(market_router, prefix=settings.API_PREFIX, tags=["大盘情绪"])
 app.include_router(fund_router, prefix=settings.API_PREFIX, tags=["基金查询"])
 app.include_router(portfolio_router, prefix=settings.API_PREFIX, tags=["持仓管理"])

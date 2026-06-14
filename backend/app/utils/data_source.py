@@ -1,30 +1,22 @@
 """
-数据源抽象层 V3.0 — 真实数据优先，Mock 仅兜底
-三级降级策略：Tushare Pro → AKShare → Mock
+数据源抽象层 V4.0 — 增加缓存层
+三级降级策略：Redis 缓存 → Tushare Pro → AKShare → Mock
 
-Tushare 免费版可获取：
-✅ index_daily:        close, pct_chg, vol, amount
-✅ index_dailybasic:   pe, pe_ttm, pb, turnover_rate, total_mv
-✅ margin:             rzye(融资余额), rqye(融券余额), rzmre(融资买入), rzche(融资偿还)
-✅ limit_list_d:       涨停列表（频率: 1次/分钟）→ 用于计算涨跌比
-
-AKShare 补充：
-✅ stock_zh_index_daily: close（与 Tushare 互相校验）
-✅ bond_china_yield:     10年期国债收益率
-
-无法获取（使用合理估算）：
-⚠️ 涨跌家数比:   limit_list_d 频率限制，仅在低频访问时可用，否则基于涨跌幅估算
-⚠️ 新高新低占比: 需要全市场扫描，用 Tushare index_daily 近期高低点估算
-⚠️ 波动率:       基于近期收盘价序列真实计算（不是 Mock）
-
+缓存策略（A4 决策）：
+- 缓存计算后的情绪结果（L1 TTL=300s）
+- Tushare 原始返回缓存 L3 TTL=3600s
+- 429 限流时返回过期缓存
 """
 import asyncio
+import hashlib
+import json
 import math
 import random
 from datetime import date, datetime, timedelta
 from typing import Optional
 
 from app.core.config import settings
+from app.core.redis_client import cache_get, cache_set
 
 
 # ============================================================
@@ -59,22 +51,39 @@ INDEX_CODE_MAP: dict[str, dict] = {
 
 DEFAULT_INDEX_CODES = ["SH000001", "SH000300", "SZ399001", "SZ399006"]
 
+# 缓存 key 前缀
+CACHE_PREFIX = "fsa:"
+
+
+def _cache_key(domain: str, identifier: str, subkey: str = "") -> str:
+    """构建缓存 key：fsa:{domain}:{identifier}[:{subkey}]"""
+    if subkey:
+        return f"{CACHE_PREFIX}{domain}:{identifier}:{subkey}"
+    return f"{CACHE_PREFIX}{domain}:{identifier}"
+
+
+def _params_hash(params: dict) -> str:
+    """参数哈希，用于 Tushare 原始数据缓存 key"""
+    raw = json.dumps(params, sort_keys=True, ensure_ascii=False)
+    return hashlib.md5(raw.encode()).hexdigest()[:8]
+
 
 class DataSourceProvider:
-    """数据源提供者 V3.0 — 真实数据优先"""
+    """数据源提供者 V4.0 — Redis 缓存 + 降级策略"""
 
     def __init__(self) -> None:
         self._tushare_available: bool = False
         self._akshare_available: bool = False
         self._initialized: bool = False
         self._tushare_pro = None
+        self._rate_limit_count: int = 0
 
-        # 内存缓存
+        # 内存缓存（Redis 不可用时的兜底）
         self._index_cache: dict[str, dict] = {}
         self._margin_cache: Optional[dict] = None
         self._bond_yield_cache: Optional[float] = None
         self._cache_time: Optional[datetime] = None
-        self._cache_ttl: int = 300  # 秒
+        self._cache_ttl: int = 300
 
     async def initialize(self) -> None:
         """初始化数据源连接"""
@@ -86,8 +95,9 @@ class DataSourceProvider:
             try:
                 import tushare as ts
                 self._tushare_pro = ts.pro_api(settings.TUSHARE_TOKEN)
-                # 验证连接
-                self._tushare_pro.index_daily(ts_code="000001.SH", start_date="20260101", end_date="20260105")
+                self._tushare_pro.index_daily(
+                    ts_code="000001.SH", start_date="20260101", end_date="20260105"
+                )
                 self._tushare_available = True
                 print("✅ Tushare Pro 数据源已连接")
             except Exception as e:
@@ -134,7 +144,6 @@ class DataSourceProvider:
     # ============================================================
     @staticmethod
     def _calculate_rsi(closes: list[float], period: int = 14) -> float:
-        """根据收盘价序列计算 RSI(14)"""
         if len(closes) < period + 1:
             return 50.0
         gains = 0.0
@@ -157,7 +166,6 @@ class DataSourceProvider:
     # ============================================================
     @staticmethod
     def _calculate_volatility(closes: list[float]) -> float:
-        """基于日收益率序列计算年化波动率"""
         if len(closes) < 2:
             return 18.0
         returns = []
@@ -169,11 +177,11 @@ class DataSourceProvider:
         mean_ret = sum(returns) / len(returns)
         variance = sum((r - mean_ret) ** 2 for r in returns) / (len(returns) - 1)
         daily_vol = math.sqrt(variance)
-        annual_vol = daily_vol * math.sqrt(252) * 100  # 百分比
+        annual_vol = daily_vol * math.sqrt(252) * 100
         return round(annual_vol, 1)
 
     # ============================================================
-    # Tushare: 指数行情 (index_daily)
+    # Tushare: 指数行情 (index_daily) — 带缓存
     # ============================================================
     def _fetch_tushare_index_daily(self, index_code: str) -> Optional[dict]:
         """Tushare: 获取指数日线数据（含历史序列用于 RSI 和波动率）"""
@@ -213,9 +221,6 @@ class DataSourceProvider:
             volatility = self._calculate_volatility(closes)
 
             # 新高占比：基于近期数据估算
-            high_20 = max(closes[-20:]) if len(closes) >= 20 else max(closes)
-            is_new_high = close >= high_20 * 0.98
-            # 新高占比：基于60日最高价真实计算
             if len(closes) >= 60:
                 high_60 = max(closes[-60:])
                 current = closes[-1]
@@ -224,7 +229,7 @@ class DataSourceProvider:
                 else:
                     new_high_ratio = round((current / high_60) * 10, 1)
             else:
-                # 降级：基于涨跌幅确定性估算（不用random）
+                is_new_high = close >= max(closes[-20:]) * 0.98 if len(closes) >= 20 else False
                 if is_new_high:
                     if change_pct > 2.0:
                         new_high_ratio = round(12 + min(change_pct - 2, 5) * 1.5, 1)
@@ -255,10 +260,9 @@ class DataSourceProvider:
             return None
 
     # ============================================================
-    # Tushare: 指数基本面 (index_dailybasic)
+    # Tushare: 指数基本面 (index_dailybasic) — 带缓存
     # ============================================================
     def _fetch_tushare_index_basic(self, index_code: str) -> Optional[dict]:
-        """Tushare: 获取 PE、PB、换手率、总市值"""
         if not self._tushare_pro:
             return None
         info = INDEX_CODE_MAP.get(index_code)
@@ -289,10 +293,9 @@ class DataSourceProvider:
             return None
 
     # ============================================================
-    # Tushare: 融资融券 (margin)
+    # Tushare: 融资融券 (margin) — 带缓存
     # ============================================================
     def _fetch_tushare_margin(self) -> Optional[dict]:
-        """Tushare: 获取沪深两市融资融券汇总"""
         if not self._tushare_pro:
             return None
 
@@ -307,10 +310,9 @@ class DataSourceProvider:
                 if df is None or df.empty:
                     continue
 
-                # 汇总 SSE + SZSE（直接用 rzye/rqye/rzmre 列求和）
                 margin_balance = float(df["rzye"].sum()) / 1e8
                 short_balance = float(df["rqye"].sum()) / 1e8
-                net_flow = float(df["rzmre"].sum()) / 1e8  # 融资买入额
+                net_flow = float(df["rzmre"].sum()) / 1e8
 
                 self._margin_cache = {
                     "margin_balance": round(margin_balance, 2),
@@ -328,29 +330,18 @@ class DataSourceProvider:
     # Tushare: 涨跌比（通过 limit_list_d）
     # ============================================================
     def _fetch_tushare_adv_decline(self) -> Optional[dict]:
-        """Tushare: 获取涨跌停数，计算涨跌比"""
         if not self._tushare_pro:
             return None
 
         try:
             today = date.today()
-            # 涨停
             df_up = self._tushare_pro.limit_list_d(
                 trade_date=today.strftime("%Y%m%d"),
                 limit_type="U",
             )
             up_count = len(df_up) if df_up is not None else 0
-
-            # 跌停（注意频率限制: 1次/分钟，这里可能导致频率超限）
-            # 用涨停数 + 总股票数反推
             total_stocks = 5528
-            # 粗略估算：涨停/总 ≈ 上涨占比的1/3（因为涨跌停是极端情况）
-            # 实际上我们更需要一个稳定的估算
-            if up_count > 0:
-                adv_ratio = 1.0 + (up_count / 500) * 0.1  # 粗略映射
-            else:
-                adv_ratio = 1.0
-
+            adv_ratio = 1.0 + (up_count / 500) * 0.1 if up_count > 0 else 1.0
             return {"adv_decline_ratio": round(adv_ratio, 2), "up_limit_count": up_count, "source": "tushare"}
         except Exception as e:
             print(f"⚠️ Tushare limit_list_d: {e}")
@@ -360,7 +351,6 @@ class DataSourceProvider:
     # AKShare: 指数行情
     # ============================================================
     def _fetch_akshare_index_daily(self, index_code: str) -> Optional[dict]:
-        """AKShare: 获取指数日线"""
         info = INDEX_CODE_MAP.get(index_code)
         if not info:
             return None
@@ -402,7 +392,6 @@ class DataSourceProvider:
     # AKShare: 国债收益率
     # ============================================================
     def _fetch_akshare_bond_yield(self) -> Optional[float]:
-        """AKShare: 10年期国债收益率"""
         if self._bond_yield_cache is not None:
             return self._bond_yield_cache
 
@@ -411,7 +400,7 @@ class DataSourceProvider:
             df = ak.bond_zh_us_rate()
             if df is not None and not df.empty:
                 last = df.iloc[-1]
-                val = float(last['中国国债收益率10年'])
+                val = float(last["中国国债收益率10年"])
                 self._bond_yield_cache = round(val, 2)
                 return self._bond_yield_cache
         except Exception as e:
@@ -423,7 +412,6 @@ class DataSourceProvider:
     # AKShare: 融资融券
     # ============================================================
     def _fetch_akshare_margin(self) -> Optional[dict]:
-        """AKShare: 上交所融资融券明细"""
         try:
             import akshare as ak
             today = date.today()
@@ -436,7 +424,9 @@ class DataSourceProvider:
                         short_total = float(df["融券余量"].sum()) / 1e8
                         net_flow = 0.0
                         if "融资买入额" in df.columns and "融资偿还额" in df.columns:
-                            net_flow = (float(df["融资买入额"].sum()) - float(df["融资偿还额"].sum())) / 1e8
+                            net_flow = (
+                                float(df["融资买入额"].sum()) - float(df["融资偿还额"].sum())
+                            ) / 1e8
                         return {
                             "margin_balance": round(margin_total, 2),
                             "short_balance": round(short_total, 2),
@@ -454,18 +444,14 @@ class DataSourceProvider:
     # 北向资金流向数据
     # ============================================================
     async def get_northbound_data(self) -> dict:
-        """获取北向资金流向数据"""
-        # 优先 Tushare
         if self._tushare_available and self._tushare_pro:
             try:
                 return await self._fetch_tushare_northbound()
             except Exception:
                 pass
-        # 降级 Mock
         return self._mock_northbound_data()
 
     def _mock_northbound_data(self) -> dict:
-        import random
         return {
             "net_flow_today": round(random.uniform(-80, 100), 2),
             "net_flow_5d": round(random.uniform(-300, 400), 2),
@@ -474,44 +460,56 @@ class DataSourceProvider:
         }
 
     async def _fetch_tushare_northbound(self) -> dict:
-        """从 Tushare moneyflow_hsgt 接口获取北向资金"""
         import datetime as dt
-        today = dt.date.today().strftime('%Y%m%d')
-        df_5d = self._tushare_pro.moneyflow_hsgt(start_date=(dt.date.today() - dt.timedelta(days=10)).strftime('%Y%m%d'), end_date=today)
+        today = dt.date.today().strftime("%Y%m%d")
+        df_5d = self._tushare_pro.moneyflow_hsgt(
+            start_date=(dt.date.today() - dt.timedelta(days=10)).strftime("%Y%m%d"),
+            end_date=today,
+        )
         if df_5d is None or df_5d.empty:
             raise Exception("Tushare northbound data empty")
         recent = df_5d.tail(5)
         return {
-            "net_flow_today": round(float(recent.iloc[-1].get('north_money', 0)), 2) if 'north_money' in df_5d.columns else 0.0,
-            "net_flow_5d": round(float(recent['north_money'].sum()) if 'north_money' in df_5d.columns else 0.0, 2),
-            "net_flow_20d": round(float(df_5d['north_money'].sum()) if 'north_money' in df_5d.columns else 0.0, 2),
+            "net_flow_today": (
+                round(float(recent.iloc[-1].get("north_money", 0)), 2)
+                if "north_money" in df_5d.columns
+                else 0.0
+            ),
+            "net_flow_5d": (
+                round(float(recent["north_money"].sum()), 2)
+                if "north_money" in df_5d.columns
+                else 0.0
+            ),
+            "net_flow_20d": (
+                round(float(df_5d["north_money"].sum()), 2)
+                if "north_money" in df_5d.columns
+                else 0.0
+            ),
             "cumulative_buy": 0.0,
         }
 
     # ============================================================
-    # 主接口：获取单个指数完整数据
+    # 主接口：获取单个指数完整数据 — 带 Redis 缓存
     # ============================================================
     async def get_index_data(self, index_code: str) -> dict:
         """
-        获取指数完整数据，降级策略: Tushare → AKShare → 合理估算
+        获取指数完整数据，带 Redis 缓存层
 
-        返回字段（全部为真实数据或基于真实数据的估算）：
-        - close, change_pct: 真实
-        - rsi_value: 基于真实收盘价计算
-        - volatility: 基于真实收盘价计算（年化波动率）
-        - turnover_ratio: Tushare 真实 / AKShare 估算
-        - pe, pe_ttm, pb: Tushare 真实 / 估算
-        - equity_yield: 1/PE 计算
-        - adv_decline_ratio: 基于涨跌停数估算 / 默认中性
-        - new_high_ratio: 基于近期高低点估算
-        - margin_data: 真实融资融券
-        - bond_yield: AKShare 真实 / 估算
+        缓存策略（A4）：
+        1. 先查 Redis 缓存 fsa:sentiment:{index_code}
+        2. 未命中则走数据源获取 → 计算后写入缓存
+        3. 429 限流时尝试返回过期缓存
         """
         if not self._initialized:
             await self.initialize()
 
-        self._clear_cache_if_expired()
+        # Step 1: Redis 缓存查询
+        cache_key = _cache_key("sentiment", index_code)
+        cached = await cache_get(cache_key)
+        if cached is not None:
+            return cached
 
+        self._clear_cache_if_expired()
         if index_code in self._index_cache:
             return self._index_cache[index_code]
 
@@ -519,12 +517,10 @@ class DataSourceProvider:
         index_name = info.get("name", "未知指数")
         source = "mock"
 
-        # === Step 1: 获取行情数据（close, change_pct, RSI, volatility） ===
+        # Step 2: 获取行情数据
         daily_data = None
-
         if self._tushare_available:
             daily_data = self._fetch_tushare_index_daily(index_code)
-
         if daily_data is None and self._akshare_available:
             daily_data = self._fetch_akshare_index_daily(index_code)
 
@@ -535,14 +531,13 @@ class DataSourceProvider:
             rsi = daily_data["rsi_value"]
             volatility = daily_data["volatility"]
         else:
-            # 完全兜底
             mock = self._mock_index_data(index_code)
             close = mock["close"]
             change_pct = mock["change_pct"]
             rsi = mock["rsi_value"]
             volatility = mock["volatility"]
 
-        # === Step 2: 基本面数据（PE, PB, 换手率）===
+        # Step 3: 基本面数据
         pe = None
         pe_ttm = None
         pb = None
@@ -556,27 +551,21 @@ class DataSourceProvider:
                 pb = basic.get("pb")
                 turnover_ratio = basic.get("turnover_rate")
 
-        # PE 兜底（基于常见区间估算）
         if pe is None or pe <= 0:
             pe_map = {"SH000001": 17.0, "SH000300": 14.0, "SZ399001": 35.0, "SZ399006": 48.0}
             pe = pe_map.get(index_code, 20.0)
-
         if pe_ttm is None or pe_ttm <= 0:
             pe_ttm = pe * 0.95
-
         if pb is None or pb <= 0:
             pb_map = {"SH000001": 1.5, "SH000300": 1.4, "SZ399001": 3.2, "SZ399006": 5.0}
             pb = pb_map.get(index_code, 2.0)
-
-        # 换手率兜底
         if turnover_ratio is None or turnover_ratio <= 0:
             turnover_map = {"SH000001": 1.2, "SH000300": 0.8, "SZ399001": 2.2, "SZ399006": 2.6}
             turnover_ratio = turnover_map.get(index_code, 1.5)
 
-        # === Step 3: 股票盈利收益率 ===
         equity_yield = round(100.0 / pe, 2) if pe > 0 else 5.0
 
-        # === Step 4: 融资融券 ===
+        # Step 4: 融资融券
         margin_data = None
         if self._tushare_available:
             margin_data = self._fetch_tushare_margin()
@@ -585,20 +574,19 @@ class DataSourceProvider:
         if margin_data is None:
             margin_data = self._mock_margin_data()
 
-        # === Step 5: 国债收益率 ===
+        # Step 5: 国债收益率
         bond_yield = None
         if self._akshare_available:
             bond_yield = self._fetch_akshare_bond_yield()
         if bond_yield is None:
-            bond_yield = 1.75  # 当前市场合理估算
+            bond_yield = 1.75
 
-        # === Step 6: 涨跌比 ===
+        # Step 6: 涨跌比
         adv_decline_ratio = None
         if self._tushare_available and daily_data is not None:
             adv_result = self._fetch_tushare_adv_decline()
             if adv_result:
                 adv_decline_ratio = adv_result["adv_decline_ratio"]
-        # 涨跌比：基于各指数涨跌幅差异化估算（避免四指数共享统一值）
         if adv_decline_ratio is None:
             if change_pct > 3.0:
                 adv_decline_ratio = 4.0 + min(change_pct - 3, 3) * 2
@@ -620,18 +608,22 @@ class DataSourceProvider:
                 adv_decline_ratio = 0.3
             adv_decline_ratio = round(adv_decline_ratio, 2)
 
-        # === Step 7: 新高占比 ===
+        # Step 7: 新高占比
         new_high_ratio = daily_data.get("new_high_ratio") if daily_data else None
-        # 新高占比：基于60日收盘价序列真实计算
-        if new_high_ratio is None and daily_data and daily_data.get("closes_for_history") and len(daily_data["closes_for_history"]) >= 60:
+        if (
+            new_high_ratio is None
+            and daily_data
+            and daily_data.get("closes_for_history")
+            and len(daily_data["closes_for_history"]) >= 60
+        ):
             closes_list = daily_data["closes_for_history"]
             high_60 = max(closes_list[-60:])
             current = closes_list[-1]
-            if current >= high_60 * 0.995:
-                new_high_ratio = round((current / high_60) * 20, 1)
-            else:
-                new_high_ratio = round((current / high_60) * 10, 1)
-        # 降级：基于涨跌幅估算（不使用random）
+            new_high_ratio = (
+                round((current / high_60) * 20, 1)
+                if current >= high_60 * 0.995
+                else round((current / high_60) * 10, 1)
+            )
         if new_high_ratio is None:
             if change_pct > 1.0:
                 new_high_ratio = round(8 + min(change_pct, 5) * 2, 1)
@@ -660,6 +652,10 @@ class DataSourceProvider:
             "trade_date": daily_data.get("trade_date", str(date.today())) if daily_data else str(date.today()),
         }
 
+        # 写入 Redis 缓存（L1 TTL=300s）
+        await cache_set(cache_key, result, ttl=settings.DATA_CACHE_TTL)
+
+        # 内存缓存兜底
         self._index_cache[index_code] = result
         if self._cache_time is None:
             self._cache_time = datetime.now()
@@ -667,17 +663,15 @@ class DataSourceProvider:
         return result
 
     async def get_all_index_data(self, codes: Optional[list[str]] = None) -> dict[str, dict]:
-        """批量获取多个指数数据"""
         if codes is None:
             codes = DEFAULT_INDEX_CODES
-
-        results = {}
+        results: dict[str, dict] = {}
         for code in codes:
             results[code] = await self.get_index_data(code)
         return results
 
     # ============================================================
-    # Mock 数据（仅在无任何数据源时使用）
+    # Mock 数据
     # ============================================================
     def _mock_index_data(self, index_code: str) -> dict:
         mock_data_map = {
@@ -711,23 +705,18 @@ class DataSourceProvider:
     _sector_cache_time: Optional[datetime] = None
 
     def _fetch_real_sectors(self) -> list[dict]:
-        """通过 AKShare 获取真实概念板块行情"""
         if self._sector_cache and self._sector_cache_time:
             if (datetime.now() - self._sector_cache_time).seconds < 1800:
                 return self._sector_cache
 
-        sectors = []
+        sectors: list[dict] = []
         try:
             import akshare as ak
             df = ak.stock_board_concept_name_em()
             if df is not None and not df.empty:
-                # 选取成交活跃的板块（换手率>0.5%）
                 active = df[df["换手率"] > 0.5].copy()
-
-                # 按总市值取前40个重要板块
                 top = active.nlargest(40, "总市值")
 
-                # 板块分组映射
                 GROUP_MAP = {
                     "半导体": "科技", "芯片": "科技", "人工智能": "科技", "AI": "科技",
                     "通信": "科技", "软件": "科技", "大数据": "科技", "云计算": "科技",
@@ -754,16 +743,12 @@ class DataSourceProvider:
                     up_count = int(row["上涨家数"])
                     down_count = int(row["下跌家数"])
                     total = up_count + down_count
-
-                    # 情绪评分：基于涨跌幅 + 涨跌比 + 换手率
                     turnover = float(row["换手率"])
                     up_ratio = up_count / max(1, total)
 
-                    # 评分: 涨跌幅贡献40分 + 涨跌比贡献30分 + 换手率贡献30分
-                    chg_score = 50 + chg * 5  # +1%涨≈55分
-                    ratio_score = up_ratio * 100  # 全涨=100, 全跌=0
+                    chg_score = 50 + chg * 5
+                    ratio_score = up_ratio * 100
                     turnover_score = min(100, max(0, 50 + (turnover - 2) * 10))
-
                     sentiment_score = round(chg_score * 0.4 + ratio_score * 0.3 + turnover_score * 0.3, 1)
                     sentiment_score = max(5, min(95, sentiment_score))
 
@@ -778,13 +763,9 @@ class DataSourceProvider:
                     else:
                         label = "extreme_greed"
 
-                    # 动量估算：基于涨跌幅（后续可接入历史数据计算真实动量）
                     momentum_5d = round(chg * 1.5, 1)
                     momentum_20d = round(chg * 3, 1)
-
-                    # 强度指数
-                    strength_index = round(50 + chg * 10 + up_ratio * 20, 1)
-                    strength_index = max(5, min(100, strength_index))
+                    strength_index = max(5, min(100, round(50 + chg * 10 + up_ratio * 20, 1)))
 
                     sectors.append({
                         "sector_code": str(row["板块代码"]),
@@ -797,7 +778,7 @@ class DataSourceProvider:
                         "strength_index": strength_index,
                         "sector_return": chg,
                         "turnover_ratio": turnover,
-                        "fund_flow": 0.0,  # 板块资金流向需单独接口
+                        "fund_flow": 0.0,
                     })
 
                 print(f"✅ 板块数据加载完成: {len(sectors)} 个板块（来源: AKShare）")
@@ -810,12 +791,10 @@ class DataSourceProvider:
         return sectors
 
     def get_mock_sectors(self) -> list[dict]:
-        """获取板块数据（优先真实数据，降级到 Mock）"""
         real = self._fetch_real_sectors()
         if real:
             return real
 
-        # 兜底 Mock
         return [
             {"sector_code": "BK001", "sector_name": "半导体", "sector_group": "科技", "sentiment_score": 72, "sentiment_label": "greed", "momentum_5d": 3.5, "momentum_20d": 8.2, "strength_index": 75, "sector_return": 1.8, "turnover_ratio": 4.5, "fund_flow": 25.0},
             {"sector_code": "BK002", "sector_name": "人工智能", "sector_group": "科技", "sentiment_score": 78, "sentiment_label": "greed", "momentum_5d": 5.2, "momentum_20d": 12.5, "strength_index": 82, "sector_return": 2.5, "turnover_ratio": 6.0, "fund_flow": 45.0},

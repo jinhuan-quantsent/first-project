@@ -1,21 +1,43 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import AppLayout from './components/layout/AppLayout';
 import Dashboard from './pages/Dashboard';
 import FundSearch from './pages/FundSearch';
 import Watchlist from './pages/Watchlist';
 import Portfolio from './pages/Portfolio';
 import Review from './pages/Review';
+import Login from './pages/Login';
+import Register from './pages/Register';
+import { useAppStore } from './store';
+
+function ProtectedRoute() {
+  const { auth } = useAppStore();
+
+  useEffect(() => {
+    auth.restoreSession();
+  }, []);
+
+  if (!auth.isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <Outlet />;
+}
 
 function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route element={<AppLayout />}>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/search" element={<FundSearch />} />
-          <Route path="/watchlist" element={<Watchlist />} />
-          <Route path="/portfolio" element={<Portfolio />} />
-          <Route path="/review" element={<Review />} />
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        <Route element={<ProtectedRoute />}>
+          <Route element={<AppLayout />}>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/search" element={<FundSearch />} />
+            <Route path="/watchlist" element={<Watchlist />} />
+            <Route path="/portfolio" element={<Portfolio />} />
+            <Route path="/review" element={<Review />} />
+          </Route>
         </Route>
       </Routes>
     </BrowserRouter>

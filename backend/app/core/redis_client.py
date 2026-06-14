@@ -56,10 +56,17 @@ async def init_redis() -> None:
         try:
             import redis.asyncio as aioredis
 
+            redis_kwargs: dict[str, Any] = {
+                "decode_responses": True,
+                "socket_connect_timeout": 5,
+            }
+            # Upstash 需要密码认证
+            if settings.UPSTASH_REDIS_TOKEN:
+                redis_kwargs["password"] = settings.UPSTASH_REDIS_TOKEN
+
             _redis_client = aioredis.from_url(
                 settings.redis_url,
-                decode_responses=True,
-                socket_connect_timeout=5,
+                **redis_kwargs,
             )
             await _redis_client.ping()
             print("✅ Redis 连接成功")
