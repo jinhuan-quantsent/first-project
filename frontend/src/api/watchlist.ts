@@ -11,7 +11,7 @@ export async function fetchWatchlist(): Promise<{
     items: WatchlistItem[];
     total: number;
     updated_at: string;
-  }>>('/watchlist');
+  }>>('/api/v1/watchlist');
   return res.data.data;
 }
 
@@ -22,11 +22,11 @@ export async function addWatchlistItem(item: {
   notes?: string;
   alert_threshold?: number;
 }): Promise<WatchlistItem> {
-  const res = await client.post<ApiResponse<WatchlistItem>>('/watchlist', item);
+  const res = await client.post<ApiResponse<WatchlistItem>>('/api/v1/watchlist', item);
   return res.data.data;
 }
 
 // 删除自选
 export async function deleteWatchlistItem(id: number): Promise<void> {
-  await client.delete(`/watchlist/${id}`);
+  await client.delete(`/api/v1/watchlist/${id}`);
 }
