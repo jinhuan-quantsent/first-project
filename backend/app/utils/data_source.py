@@ -10,6 +10,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import random
 from datetime import date, datetime, timedelta
@@ -25,6 +26,8 @@ from app.utils.exceptions import (
     AuthError,
     _classify_exception,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -860,6 +863,33 @@ data_source = DataSourceProvider()
 # 供 factor_engine 子包调用，返回 float 原始值
 # ============================================================
 
+# B类因子共享：moneyflow_hsgt 缓存获取（1次/分钟限流，TTL=3600s）
+async def _fetch_cached_moneyflow_hsgt() -> Optional[list[dict]]:
+    """获取并缓存 moneyflow_hsgt 原始数据（TTL=3600s，限流1次/分钟）"""
+    cache_key = _cache_key("tushare", "moneyflow_hsgt")
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    if not data_source._tushare_pro:
+        return None
+
+    try:
+        today = date.today()
+        df = data_source._tushare_pro.moneyflow_hsgt(
+            start_date=(today - timedelta(days=15)).strftime("%Y%m%d"),
+            end_date=today.strftime("%Y%m%d"),
+        )
+        if df is None or df.empty:
+            return None
+
+        records = df.to_dict("records")
+        await cache_set(cache_key, records, ttl=3600)
+        return records
+    except Exception as e:
+        logger.warning("moneyflow_hsgt fetch failed: %s", e)
+        return None
+
 async def fetch_volatility(index_code: str) -> float:
     """VOL 波动率因子：年化波动率(%)"""
     d = await data_source.get_index_data(index_code)
@@ -885,44 +915,91 @@ async def fetch_erp(index_code: str) -> float:
 
 async def fetch_fund_flow(index_code: str) -> float:
     """
-    FLOW 基金申赎资金流因子：ETF净申购份额变化(%)
-    数据来源：Tushare fund_daily
+    FLOW 基金申赎资金流因子：近5日日均全市场资金净流入(亿元)
+    数据来源：Tushare moneyflow_hsgt（北向+南向合计）
+    返回值范围：与 flow.py validate[-100,100] 兼容
+    三级降级：Tushare moneyflow_hsgt → 基于涨跌幅近似 → 默认0.0
     """
+    # 第一级：Tushare moneyflow_hsgt
     try:
-        import tushare as ts
-        if data_source._tushare_pro:
-            today = date.today()
-            df = data_source._tushare_pro.fund_daily(
-                trade_date=(today - timedelta(days=1)).strftime("%Y%m%d"),
-            )
-            if df is not None and not df.empty:
-                # 使用全市场ETF份额变化近似
-                net_flow = float(df.get("net_purchase", df.get("amount", 0)))
-                return round(net_flow / 1e8, 2)
-    except Exception:
-        pass
-    # Mock/降级：基于涨跌幅估算
-    d = await data_source.get_index_data(index_code)
-    chg = float(d.get("change_pct", 0))
-    return round(chg * 2.0, 2)
+        records = await _fetch_cached_moneyflow_hsgt()
+        if records:
+            recent = records[-5:] if len(records) >= 5 else records
+            total_flow = 0.0
+            for row in recent:
+                north = float(row.get("north_money", 0) or 0)
+                south = float(row.get("south_money", 0) or 0)
+                total_flow += north + south
+            # 日均净流入(亿元)，确保在 validate 范围 [-100, 100] 内
+            daily_avg = total_flow / len(recent) if recent else 0.0
+            return round(max(-100.0, min(100.0, daily_avg)), 2)
+    except Exception as e:
+        logger.warning("FLOW Tushare降级: %s", e)
+
+    # 第二级：基于涨跌幅近似估算
+    try:
+        d = await data_source.get_index_data(index_code)
+        chg = float(d.get("change_pct", 0))
+        return round(chg * 2.0, 2)
+    except Exception as e:
+        logger.warning("FLOW 近似估算降级: %s", e)
+
+    # 第三级：默认值
+    return 0.0
 
 
 async def fetch_etf_change(index_code: str) -> float:
     """
-    ETF ETF份额变化因子：主要宽基ETF份额周度变化率(%)
-    数据来源：Tushare fund_daily
+    ETF ETF份额变化因子：主要宽基ETF份额变化率(%)
+    数据来源：Tushare fund_daily（510300沪深300ETF + 510050上证50ETF）
+    计算方式：近2日 volume变化率 × (close/pre_close - 1) 近似份额变化率
+    三级降级：Tushare fund_daily → 基于指数涨跌幅近似 → 默认0.0
     """
+    # 第一级：Tushare fund_daily
     try:
         if data_source._tushare_pro:
-            today = date.today()
-            df = data_source._tushare_pro.fund_daily(
-                trade_date=today.strftime("%Y%m%d"),
-            )
-            if df is not None and not df.empty:
-                share_change = float(df.get("hold_change", df.get("amount", 0)))
-                return round(share_change / 1e8, 2)
-    except Exception:
-        pass
+            etf_codes = ["510300.SH", "510050.SH"]
+            total_change_rate = 0.0
+            valid_count = 0
+
+            for ts_code in etf_codes:
+                df = data_source._tushare_pro.fund_daily(
+                    ts_code=ts_code,
+                    start_date=(date.today() - timedelta(days=5)).strftime("%Y%m%d"),
+                    end_date=date.today().strftime("%Y%m%d"),
+                )
+                if df is not None and len(df) >= 2:
+                    df = df.sort_values("trade_date").reset_index(drop=True)
+                    latest = df.iloc[-1]
+                    prev = df.iloc[-2]
+
+                    vol_today = float(latest.get("volume", 0))
+                    vol_prev = float(prev.get("volume", 0))
+                    close = float(latest.get("close", 0))
+                    pre_close = float(latest.get("pre_close", 0))
+
+                    if vol_prev > 0 and pre_close > 0:
+                        vol_change_rate = vol_today / vol_prev - 1.0
+                        price_change_rate = close / pre_close - 1.0
+                        change_rate = vol_change_rate * price_change_rate
+                        total_change_rate += change_rate
+                        valid_count += 1
+
+            if valid_count > 0:
+                avg_change_rate = total_change_rate / valid_count
+                return round(avg_change_rate * 100, 2)
+    except Exception as e:
+        logger.warning("ETF Tushare降级: %s", e)
+
+    # 第二级：基于指数涨跌幅近似
+    try:
+        d = await data_source.get_index_data(index_code)
+        chg = float(d.get("change_pct", 0))
+        return round(chg * 0.5, 2)
+    except Exception as e:
+        logger.warning("ETF 近似估算降级: %s", e)
+
+    # 第三级：默认值
     return 0.0
 
 
@@ -940,44 +1017,141 @@ async def fetch_turnover(index_code: str) -> float:
 
 async def fetch_fund_position() -> float:
     """
-    POS 基金仓位估算因子：股票型+混合型公募基金平均仓位(%)
-    数据来源：Tushare fund_portfolio
+    POS 基金仓位估算因子：偏股混合基金平均股票仓位(%)
+    数据来源：Tushare fund_nav 回归估算
+    方法：对代表性基金净值变化与沪深300涨跌做回归，beta ≈ 股票仓位
+    三级降级：Tushare fund_nav回归 → 融资余额/市值比近似 → 默认62.0
     """
+    # 第一级：Tushare fund_nav 回归估算
     try:
         if data_source._tushare_pro:
+            # 代表性偏股混合基金
+            fund_codes = ["110011.OF", "161725.OF"]
             today = date.today()
-            df = data_source._tushare_pro.fund_portfolio(
-                trade_date=today.strftime("%Y%m%d"),
+            start = (today - timedelta(days=30)).strftime("%Y%m%d")
+
+            # 获取沪深300指数数据
+            idx_df = data_source._tushare_pro.index_daily(
+                ts_code="000300.SH",
+                start_date=start,
+                end_date=today.strftime("%Y%m%d"),
             )
-            if df is not None and not df.empty:
-                avg_pos = float(df["stock_ratio"].mean())
-                return round(avg_pos, 2)
-    except Exception:
-        pass
-    # Mock：基于V4.0经验值
+            if idx_df is None or len(idx_df) < 10:
+                raise ValueError("沪深300数据不足")
+
+            idx_df = idx_df.sort_values("trade_date").reset_index(drop=True)
+            idx_returns: list[float] = []
+            for i in range(1, len(idx_df)):
+                prev_close = float(idx_df.iloc[i - 1]["close"])
+                if prev_close > 0:
+                    idx_returns.append(
+                        (float(idx_df.iloc[i]["close"]) - prev_close) / prev_close
+                    )
+
+            betas: list[float] = []
+            for fund_code in fund_codes:
+                nav_df = data_source._tushare_pro.fund_nav(
+                    ts_code=fund_code,
+                    start_date=start,
+                    end_date=today.strftime("%Y%m%d"),
+                )
+                if nav_df is None or len(nav_df) < 10:
+                    continue
+
+                nav_df = nav_df.sort_values("end_date").reset_index(drop=True)
+                fund_returns: list[float] = []
+                for i in range(1, len(nav_df)):
+                    prev_nav = float(nav_df.iloc[i - 1]["unit_nav"])
+                    if prev_nav > 0:
+                        fund_returns.append(
+                            (float(nav_df.iloc[i]["unit_nav"]) - prev_nav) / prev_nav
+                        )
+
+                # 对齐长度（取较短的）
+                n = min(len(fund_returns), len(idx_returns))
+                if n < 5:
+                    continue
+
+                fr = fund_returns[-n:]
+                ir = idx_returns[-n:]
+
+                # 简单OLS: beta = Cov(fund, index) / Var(index)
+                mean_fr = sum(fr) / n
+                mean_ir = sum(ir) / n
+                cov_fr_ir = sum(
+                    (fr[i] - mean_fr) * (ir[i] - mean_ir) for i in range(n)
+                ) / n
+                var_ir = sum((ir[i] - mean_ir) ** 2 for i in range(n)) / n
+
+                if var_ir > 1e-12:
+                    beta = cov_fr_ir / var_ir
+                    beta = max(0.0, min(1.0, beta))  # 限制在[0,1]
+                    betas.append(beta)
+
+            if betas:
+                avg_beta = sum(betas) / len(betas)
+                position_pct = round(avg_beta * 100, 2)
+                return max(10.0, min(99.0, position_pct))
+    except Exception as e:
+        logger.warning("POS fund_nav回归降级: %s", e)
+
+    # 第二级：融资余额/市值比近似估算
+    try:
+        margin_data = data_source._fetch_tushare_margin()
+        if margin_data and margin_data.get("margin_balance"):
+            margin_balance = float(margin_data["margin_balance"])  # 亿元
+            # 用沪深300 total_mv 近似全市场市值
+            idx_basic = data_source._fetch_tushare_index_basic("SH000300")
+            if idx_basic and idx_basic.get("total_mv"):
+                # total_mv 单位: 万元，转 亿元
+                total_mv = float(idx_basic["total_mv"]) / 1e4
+                if total_mv > 0:
+                    ratio = margin_balance / total_mv
+                    # 历史经验：融资余额/市值约1%-3%对应仓位50%-80%
+                    position = 30 + ratio * 2000
+                    return round(max(10.0, min(99.0, position)), 2)
+    except Exception as e:
+        logger.warning("POS 融资余额近似降级: %s", e)
+
+    # 第三级：默认经验值
     return 62.0
 
 
 async def fetch_northbound_flow() -> float:
     """
-    NBF 北向资金方向因子：陆股通近5日净流入(亿元)
+    NBF 北向资金方向因子：近5日日均陆股通净流入(亿元)
     数据来源：Tushare moneyflow_hsgt
+    返回值范围：与 nbf.py validate[-200,200] 兼容
+    三级降级：Tushare moneyflow_hsgt → 基于市场涨跌近似 → 默认0.0
     """
+    # 第一级：Tushare moneyflow_hsgt
     try:
-        if data_source._tushare_pro:
-            import datetime as dt
-            today = dt.date.today()
-            df = data_source._tushare_pro.moneyflow_hsgt(
-                start_date=(today - dt.timedelta(days=10)).strftime("%Y%m%d"),
-                end_date=today.strftime("%Y%m%d"),
-            )
-            if df is not None and not df.empty:
-                recent = df.tail(5)
-                col = "north_money" if "north_money" in df.columns else "net_money"
-                net = float(recent[col].sum()) if col in df.columns else 0.0
-                return round(net, 2)
-    except Exception:
-        pass
+        records = await _fetch_cached_moneyflow_hsgt()
+        if records:
+            recent = records[-5:] if len(records) >= 5 else records
+            total_flow = 0.0
+            for row in recent:
+                # 优先 north_money，备选 north_net
+                val = row.get("north_money")
+                if val is None:
+                    val = row.get("north_net")
+                total_flow += float(val) if val is not None else 0.0
+            # 日均净流入(亿元)，确保在 validate 范围 [-200, 200] 内
+            daily_avg = total_flow / len(recent) if recent else 0.0
+            return round(max(-200.0, min(200.0, daily_avg)), 2)
+    except Exception as e:
+        logger.warning("NBF Tushare降级: %s", e)
+
+    # 第二级：基于市场涨跌近似
+    try:
+        d = await data_source.get_index_data("SH000300")
+        chg = float(d.get("change_pct", 0))
+        # 日均北向流入与市场涨跌正相关，粗略估算
+        return round(chg * 3.0, 2)
+    except Exception as e:
+        logger.warning("NBF 近似估算降级: %s", e)
+
+    # 第三级：默认值
     return 0.0
 
 
@@ -986,39 +1160,122 @@ async def fetch_put_call_ratio() -> float:
     PCR 认沽认购比因子：ETF期权认沽/认购成交量比
     高PCR → 避险情绪高 → 恐惧
     数据来源：Tushare opt_daily
+    三级降级：Tushare opt_daily → 波动率近似估算 → 默认0.85
     """
+    # 第一级：Tushare opt_daily
     try:
         if data_source._tushare_pro:
             today = date.today()
-            df = data_source._tushare_pro.opt_daily(
-                trade_date=today.strftime("%Y%m%d"),
-            )
-            if df is not None and not df.empty:
-                put_vol = float(df[df["option_type"] == "认沽"]["volume"].sum())
-                call_vol = float(df[df["option_type"] == "认购"]["volume"].sum())
-                if call_vol > 0:
-                    return round(put_vol / call_vol, 4)
-    except Exception:
-        pass
-    # Mock：基于VIX经验值
+            # 尝试最近3个交易日
+            for attempt in range(3):
+                try_date = today - timedelta(days=attempt)
+                df = data_source._tushare_pro.opt_daily(
+                    trade_date=try_date.strftime("%Y%m%d"),
+                )
+                if df is None or df.empty:
+                    continue
+
+                # 兼容多种字段名：认沽/put/P, 认购/call/C
+                put_mask = None
+                call_mask = None
+
+                if "option_type" in df.columns:
+                    put_vals = ["认沽", "put", "P"]
+                    call_vals = ["认购", "call", "C"]
+                    put_mask = df["option_type"].isin(put_vals)
+                    call_mask = df["option_type"].isin(call_vals)
+                elif "contract_type" in df.columns:
+                    put_vals = ["认沽", "put", "P"]
+                    call_vals = ["认购", "call", "C"]
+                    put_mask = df["contract_type"].isin(put_vals)
+                    call_mask = df["contract_type"].isin(call_vals)
+
+                if put_mask is not None and call_mask is not None:
+                    put_vol = float(df.loc[put_mask, "volume"].sum())
+                    call_vol = float(df.loc[call_mask, "volume"].sum())
+                    if call_vol > 0:
+                        pcr = put_vol / call_vol
+                        return round(max(0.1, min(5.0, pcr)), 4)
+    except Exception as e:
+        logger.warning("PCR opt_daily降级: %s", e)
+
+    # 第二级：波动率近似估算
+    try:
+        d = await data_source.get_index_data("SH000300")
+        vol = float(d.get("volatility", 20))
+        # 波动率越高 → 认沽需求越大 → PCR越高
+        pcr = 0.6 + (vol - 20) * 0.02
+        return round(max(0.1, min(5.0, pcr)), 4)
+    except Exception as e:
+        logger.warning("PCR 波动率估算降级: %s", e)
+
+    # 第三级：默认经验值
     return 0.85
 
 
 async def fetch_new_fund_heat() -> float:
     """
     NEWF 新发基金热度因子：近30日新成立基金总份额(亿份)
-    数据来源：Tushare fund_basic
+    数据来源：Tushare fund_basic + 本地过滤
+    三级降级：Tushare fund_basic本地过滤 → 基金数量近似估算 → 默认50.0
     """
+    # 第一级：Tushare fund_basic + 本地过滤
     try:
         if data_source._tushare_pro:
+            # fund_basic 不支持 issue_date 范围查询，需全量获取后本地过滤
+            # 先查场外基金（O: 主要新发基金来源），再查场内基金（E: ETF/LOF）
             today = date.today()
-            df = data_source._tushare_pro.fund_basic(
-                issue_date=(today - timedelta(days=30)).strftime("%Y%m%d"),
-                list_date=today.strftime("%Y%m%d"),
-            )
-            if df is not None and not df.empty:
-                total_shares = float(df["fund_shares"].sum())
-                return round(total_shares / 1e8, 2)
-    except Exception:
-        pass
+            cutoff = (today - timedelta(days=30)).strftime("%Y%m%d")
+            total_count = 0
+            total_shares_val = 0.0
+            has_shares = False
+
+            for mkt in ["O", "E"]:
+                try:
+                    df = data_source._tushare_pro.fund_basic(market=mkt)
+                    if df is None or df.empty:
+                        continue
+
+                    # 过滤近30日成立的基金
+                    if "found_date" in df.columns:
+                        recent = df[df["found_date"] >= cutoff]
+                    elif "list_date" in df.columns:
+                        recent = df[df["list_date"] >= cutoff]
+                    else:
+                        continue
+
+                    count = len(recent)
+                    total_count += count
+
+                    if "fund_shares" in recent.columns:
+                        total_shares_val += float(recent["fund_shares"].sum())
+                        has_shares = True
+                except Exception:
+                    continue
+
+            if total_count == 0:
+                return 0.0
+
+            if has_shares:
+                # fund_shares 单位通常为万份，转为亿份
+                return round(total_shares_val / 10000, 2)
+
+            # 如果没有 fund_shares，用基金数量近似估算
+            # 近30日平均每只基金发行约5亿份（经验值）
+            estimated_shares = total_count * 5.0
+            return round(estimated_shares, 2)
+    except Exception as e:
+        logger.warning("NEWF fund_basic降级: %s", e)
+
+    # 第二级：基于沪深300指数涨跌近似估算新发基金热度
+    try:
+        d = await data_source.get_index_data("SH000300")
+        chg = float(d.get("change_pct", 0))
+        # 市场涨→新发基金多→热度高，近似映射到0~100范围
+        heat = 50 + chg * 10
+        return round(max(0, min(200, heat)), 2)
+    except Exception as e:
+        logger.warning("NEWF 近似估算降级: %s", e)
+
+    # 第三级：默认经验值
     return 50.0
