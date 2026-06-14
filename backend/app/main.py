@@ -21,6 +21,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
     await init_redis()
     print(f"🚀 {settings.APP_NAME} v{settings.APP_VERSION} 启动成功")
+    print(f"📋 CORS origins: {settings.effective_cors_origins}")
     yield
     # 关闭
     await close_redis()
@@ -38,7 +39,7 @@ app = FastAPI(
 # CORS 配置
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=settings.effective_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

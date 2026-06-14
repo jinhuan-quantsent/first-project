@@ -17,6 +17,14 @@ from typing import Optional
 
 from app.core.config import settings
 from app.core.redis_client import cache_get, cache_set
+from app.utils.exceptions import (
+    DataSourceError,
+    NetworkError,
+    RateLimitError,
+    DataFormatError,
+    AuthError,
+    _classify_exception,
+)
 
 
 # ============================================================
@@ -256,7 +264,8 @@ class DataSourceProvider:
                 "source": "tushare",
             }
         except Exception as e:
-            print(f"⚠️ Tushare index_daily {index_code}: {e}")
+            classified = _classify_exception(e)
+            print(f"⚠️ Tushare index_daily {index_code}: [{type(classified).__name__}] {e}")
             return None
 
     # ============================================================
@@ -289,7 +298,8 @@ class DataSourceProvider:
                     }
             return None
         except Exception as e:
-            print(f"⚠️ Tushare index_dailybasic {index_code}: {e}")
+            classified = _classify_exception(e)
+            print(f"⚠️ Tushare index_dailybasic {index_code}: [{type(classified).__name__}] {e}")
             return None
 
     # ============================================================
@@ -323,7 +333,8 @@ class DataSourceProvider:
                 return self._margin_cache
             return None
         except Exception as e:
-            print(f"⚠️ Tushare margin: {e}")
+            classified = _classify_exception(e)
+            print(f"⚠️ Tushare margin: [{type(classified).__name__}] {e}")
             return None
 
     # ============================================================
@@ -344,7 +355,8 @@ class DataSourceProvider:
             adv_ratio = 1.0 + (up_count / 500) * 0.1 if up_count > 0 else 1.0
             return {"adv_decline_ratio": round(adv_ratio, 2), "up_limit_count": up_count, "source": "tushare"}
         except Exception as e:
-            print(f"⚠️ Tushare limit_list_d: {e}")
+            classified = _classify_exception(e)
+            print(f"⚠️ Tushare limit_list_d: [{type(classified).__name__}] {e}")
             return None
 
     # ============================================================
@@ -385,7 +397,8 @@ class DataSourceProvider:
                 "source": "akshare",
             }
         except Exception as e:
-            print(f"⚠️ AKShare index {index_code}: {e}")
+            classified = _classify_exception(e)
+            print(f"⚠️ AKShare index {index_code}: [{type(classified).__name__}] {e}")
             return None
 
     # ============================================================
@@ -404,7 +417,8 @@ class DataSourceProvider:
                 self._bond_yield_cache = round(val, 2)
                 return self._bond_yield_cache
         except Exception as e:
-            print(f"⚠️ AKShare bond_yield: {e}")
+            classified = _classify_exception(e)
+            print(f"⚠️ AKShare bond_yield: [{type(classified).__name__}] {e}")
 
         return None
 
@@ -437,7 +451,8 @@ class DataSourceProvider:
                     continue
             return None
         except Exception as e:
-            print(f"⚠️ AKShare margin: {e}")
+            classified = _classify_exception(e)
+            print(f"⚠️ AKShare margin: [{type(classified).__name__}] {e}")
             return None
 
     # ============================================================
@@ -520,9 +535,33 @@ class DataSourceProvider:
         # Step 2: 获取行情数据
         daily_data = None
         if self._tushare_available:
-            daily_data = self._fetch_tushare_index_daily(index_code)
+            try:
+                daily_data = self._fetch_tushare_index_daily(index_code)
+            except DataSourceError as de:
+                if isinstance(de, NetworkError):
+                    print(f"🔄 {index_code} Tushare 网络异常，可重试 [retry_possible=True]")
+                elif isinstance(de, RateLimitError):
+                    print(f"⏳ {index_code} Tushare 限流，将使用缓存兜底")
+                elif isinstance(de, DataFormatError):
+                    print(f"📊 {index_code} Tushare 数据格式异常，降级到 mock")
+                elif isinstance(de, AuthError):
+                    print(f"🔐 {index_code} Tushare 认证失败")
+                else:
+                    print(f"⚠️ {index_code} Tushare 数据源异常: {de}")
         if daily_data is None and self._akshare_available:
-            daily_data = self._fetch_akshare_index_daily(index_code)
+            try:
+                daily_data = self._fetch_akshare_index_daily(index_code)
+            except DataSourceError as de:
+                if isinstance(de, NetworkError):
+                    print(f"🔄 {index_code} AKShare 网络异常，可重试 [retry_possible=True]")
+                elif isinstance(de, RateLimitError):
+                    print(f"⏳ {index_code} AKShare 限流，将使用缓存兜底")
+                elif isinstance(de, DataFormatError):
+                    print(f"📊 {index_code} AKShare 数据格式异常，降级到 mock")
+                elif isinstance(de, AuthError):
+                    print(f"🔐 {index_code} AKShare 认证失败")
+                else:
+                    print(f"⚠️ {index_code} AKShare 数据源异常: {de}")
 
         if daily_data is not None:
             source = daily_data["source"]
@@ -784,7 +823,8 @@ class DataSourceProvider:
                 print(f"✅ 板块数据加载完成: {len(sectors)} 个板块（来源: AKShare）")
 
         except Exception as e:
-            print(f"⚠️ AKShare 板块数据获取失败: {e}")
+            classified = _classify_exception(e)
+            print(f"⚠️ AKShare 板块数据获取失败: [{type(classified).__name__}] {e}")
 
         self._sector_cache = sectors
         self._sector_cache_time = datetime.now()

@@ -7,10 +7,26 @@ export default function Login() {
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [localError, setLocalError] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !password) return;
+    setLocalError('');
+    auth.clearError();
+
+    if (!email || !password) {
+      setLocalError('请填写邮箱和密码');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setLocalError('邮箱格式不正确');
+      return;
+    }
+    if (password.length < 8) {
+      setLocalError('密码长度至少 8 位');
+      return;
+    }
+
     try {
       await auth.login(email, password);
       navigate('/');
@@ -19,15 +35,17 @@ export default function Login() {
     }
   };
 
+  const errorMsg = localError || auth.authError;
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-950 px-4">
       <div className="w-full max-w-md bg-gray-900 rounded-2xl p-8 shadow-2xl border border-gray-800">
         <h1 className="text-2xl font-bold text-white text-center mb-2">基金情绪分析系统</h1>
         <p className="text-gray-400 text-center mb-8">登录以访问个性化数据</p>
 
-        {auth.authError && (
+        {errorMsg && (
           <div className="mb-4 p-3 bg-red-900/30 border border-red-800 rounded-lg text-red-300 text-sm">
-            {auth.authError}
+            {errorMsg}
           </div>
         )}
 

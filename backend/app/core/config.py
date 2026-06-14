@@ -95,6 +95,29 @@ class Settings(BaseSettings):
         ]
     )
 
+    @property
+    def effective_cors_origins(self) -> List[str]:
+        """
+        获取生效的 CORS 源列表。
+
+        规则：
+        1. 始终包含 CORS_ORIGINS 中的手动配置（.env / 环境变量 / 默认值）
+        2. 生产环境下，如果 SUPABASE_URL 非空，自动从 URL 中提取域名并加入白名单
+        """
+        origins = list(self.CORS_ORIGINS)
+
+        if self.ENVIRONMENT == "production" and self.SUPABASE_URL:
+            from urllib.parse import urlparse
+            parsed = urlparse(self.SUPABASE_URL)
+            hostname = parsed.hostname
+            if hostname:
+                # 加入 https://{hostname} 形式
+                supabase_origin = f"https://{hostname}"
+                if supabase_origin not in origins:
+                    origins.append(supabase_origin)
+
+        return origins
+
     # --- Vercel ---
     VERCEL_URL: str = ""
 

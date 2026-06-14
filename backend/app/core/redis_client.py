@@ -89,37 +89,45 @@ async def close_redis() -> None:
 
 
 async def cache_get(key: str) -> Optional[Any]:
-    """获取缓存值"""
+    """获取缓存值（带延迟初始化：若缓存未初始化则自动创建 MemoryCache）"""
+    global _memory_cache
     if _redis_client:
         raw = await _redis_client.get(key)
         if raw:
             return json.loads(raw)
         return None
-    if _memory_cache:
-        return await _memory_cache.get(key)
-    return None
+    if _memory_cache is None:
+        _memory_cache = MemoryCache()
+    return await _memory_cache.get(key)
 
 
 async def cache_set(key: str, value: Any, ttl: int = 300) -> None:
-    """设置缓存值"""
+    """设置缓存值（带延迟初始化：若缓存未初始化则自动创建 MemoryCache）"""
+    global _memory_cache
     if _redis_client:
         await _redis_client.set(key, json.dumps(value, ensure_ascii=False, default=str), ex=ttl)
-    elif _memory_cache:
+    else:
+        if _memory_cache is None:
+            _memory_cache = MemoryCache()
         await _memory_cache.set(key, value, ttl)
 
 
 async def cache_delete(key: str) -> None:
-    """删除缓存"""
+    """删除缓存（带延迟初始化：若缓存未初始化则自动创建 MemoryCache）"""
+    global _memory_cache
     if _redis_client:
         await _redis_client.delete(key)
-    elif _memory_cache:
+    else:
+        if _memory_cache is None:
+            _memory_cache = MemoryCache()
         await _memory_cache.delete(key)
 
 
 async def cache_exists(key: str) -> bool:
-    """检查键是否存在"""
+    """检查键是否存在（带延迟初始化：若缓存未初始化则自动创建 MemoryCache）"""
+    global _memory_cache
     if _redis_client:
         return bool(await _redis_client.exists(key))
-    if _memory_cache:
-        return await _memory_cache.exists(key)
-    return False
+    if _memory_cache is None:
+        _memory_cache = MemoryCache()
+    return await _memory_cache.exists(key)
