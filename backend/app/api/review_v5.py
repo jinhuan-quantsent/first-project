@@ -694,8 +694,9 @@ async def run_backtest(
     elif not price_data:
         price_data = _generate_mock_price_data(req.index_code, req.start_date, req.end_date)
 
-    # 4. 构建行动映射
-    action_mapping = {}
+    # 4. 构建行动映射（空请求 → 使用默认映射）
+    from app.engine.backtest import DEFAULT_ACTION_MAPPING
+    action_mapping = {k: ActionRule(**v) for k, v in DEFAULT_ACTION_MAPPING.items()}
     for signal, item in req.action_mapping.items():
         action_mapping[signal] = ActionRule(
             action_type=item.type,
@@ -734,7 +735,7 @@ async def run_backtest(
         buy_signals=req.buy_signals,
         sell_signals=req.sell_signals,
         hold_signals=req.hold_signals,
-        action_mapping=action_mapping if action_mapping else None,
+        action_mapping=action_mapping,
         risk_params=risk_params,
     )
 

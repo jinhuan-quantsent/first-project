@@ -224,7 +224,8 @@ class BacktestEngine:
                 effective_signal = signal_buffer[0]
 
             # ---- 2. 获取行动映射 ----
-            action = config.action_mapping.get(effective_signal, ActionRule("hold", 0, "持有"))
+            am = config.action_mapping or {k: ActionRule(**v) for k, v in DEFAULT_ACTION_MAPPING.items()}
+            action = am.get(effective_signal, ActionRule("hold", 0, "持有"))
 
             # ---- 3. 计算当前组合状态 ----
             portfolio_value = cash + shares * close
