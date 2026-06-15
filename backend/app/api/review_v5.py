@@ -510,98 +510,88 @@ async def _compute_signals_from_index(
 def _generate_daily_action(
     signal_level: Optional[str],
     score: Optional[float],
-    current_portfolio: float,
+    current_cash: float,
+    current_position: float,
     initial_capital: float,
 ) -> tuple[str, int, str]:
     """
-    根据当天信号生成操作建议
+    根据因子信号生成操作建议 — 完全由因子驱动，无人为干预
 
-    规则:
-    - S+/S(极度恐惧/恐惧): 加仓，金额 = initial * 10%~20%
-    - A(偏恐): 小幅加仓，金额 = initial * 5%~10%
-    - B(中性偏多): 持有
-    - C(中性偏空): 持有或小幅减仓 initial * 5%
-    - D(贪婪): 减仓，金额 = initial * 10%~15%
-    - E/F(极度贪婪): 大幅减仓，金额 = initial * 15%~20%
-
-    具体金额根据 score 细分:
-    - 同一信号等级内，score越高(越极端) → 操作力度越大
-    - 单日最大操作不超过当前持仓的20%
+    核心规则:
+    - buy金额 = initial_capital × ratio，现金不够就买全部现金，没钱就不买(hold)
+    - sell金额 = current_position × ratio，按剩余仓位比例卖出
+    - C级映射sell而非hold（与backtest.py DEFAULT_ACTION_MAPPING对齐）
+    - E级 = 清仓，策略结束
+    - 亏完或清仓 → 策略结束，不重建仓位
     """
-    # 信号→操作映射: (action, min_pct_of_initial, max_pct_of_initial)
-    action_map: dict[str, tuple[str, float, float]] = {
-        "S+": ("buy", 0.15, 0.20),   # 极度恐惧 → 加仓 15-20%
-        "S":  ("buy", 0.10, 0.15),   # 恐惧 → 加仓 10-15%
-        "A":  ("buy", 0.05, 0.10),   # 偏恐惧 → 加仓 5-10%
-        "B":  ("hold", 0, 0),        # 中性偏多 → 持有
-        "C":  ("hold", 0, 0.05),     # 中性偏空 → 持有或微减
-        "D":  ("sell", 0.10, 0.15),  # 贪婪 → 减仓 10-15%
-        "E":  ("sell", 0.15, 0.20),  # 极度贪婪 → 减仓 15-20%
-        "F":  ("sell", 0.20, 0.25),  # 极端情况 → 减仓 20-25%
+    # 信号→操作映射: (action, pct_ratio)
+    # buy: ratio相对于initial_capital（加仓力度恒定，不受持仓变化影响）
+    # sell: ratio相对于current_position（按剩余仓位比例减仓）
+    # E: 清仓
+    action_map: dict[str, tuple[str, float, bool]] = {
+        "S+": ("buy",  0.20, False),   # 极度恐惧 → 加仓20% of initial
+        "S":  ("buy",  0.15, False),   # 恐惧 → 加仓15%
+        "A":  ("buy",  0.08, False),   # 偏恐惧 → 加仓8%
+        "B":  ("hold", 0,    False),   # 中性 → 持有
+        "C":  ("sell", 0.10, False),   # 偏贪婪 → 减仓10% of position
+        "D":  ("sell", 0.20, False),   # 贪婪 → 减仓20% of position
+        "E":  ("sell", 1.00, True),    # 极度贪婪 → 清仓（策略结束）
     }
 
-    default_action = ("hold", 0, 0)
-    action, min_pct, max_pct = action_map.get(signal_level or "", default_action)
+    default_action = ("hold", 0, False)
+    action, ratio, is_clear = action_map.get(signal_level or "", default_action)
 
-    # 如果信号等级不在映射中，默认持有
     if signal_level and signal_level not in action_map:
-        action, min_pct, max_pct = default_action
+        action, ratio, is_clear = default_action
 
     safe_score = score if score is not None else 50.0
 
-    # 信号中文含义
     signal_meanings: dict[str, str] = {
         "S+": "极度恐惧", "S": "恐惧", "A": "偏恐惧",
-        "B": "中性", "C": "偏贪婪", "D": "贪婪", "E": "极度贪婪", "F": "极端贪婪",
+        "B": "中性", "C": "偏贪婪", "D": "贪婪", "E": "极度贪婪",
     }
     meaning = signal_meanings.get(signal_level or "", "未知")
 
+    amount = 0
+
     if action == "hold":
-        amount = 0
-        if signal_level and signal_level in ("C",):
-            # C级有概率小幅减仓 — 金额基于当前持仓而非初始资金
-            if safe_score < 40:
-                amount = round(current_portfolio * 0.05)  # 减仓当前持仓的5%
-                amount = max(amount, 0)  # 不能为负
-                if amount > 0:
-                    action = "sell"
-                    reason = f"{signal_level}级({meaning})分数{safe_score}，小幅减仓{amount}元控制风险"
-                else:
-                    reason = f"{signal_level}级({meaning})分数{safe_score}，持仓已清空，维持观望"
-            else:
-                reason = f"{signal_level}级({meaning})分数{safe_score}，市场偏贪婪但未极端，维持持有观察"
-        elif signal_level == "B":
-            reason = f"{signal_level}级({meaning})分数{safe_score}，市场情绪平稳，持有不动"
-        else:
-            reason = f"信号{signal_level or '未知'}({meaning})分数{safe_score}，维持持有观察"
+        reason = f"{signal_level}级({meaning})分数{safe_score} → 持有"
+
     elif action == "buy":
-        # 根据 score 在 min-max 之间插值
-        ratio = min_pct + (max_pct - min_pct) * min(safe_score / 100.0, 1.0)
-        amount = round(initial_capital * ratio)
-        # 单日加仓不超过当前持仓的20%（但如果持仓已清空，允许用初始资金的5%重新建仓）
-        if current_portfolio <= 0:
-            amount = round(initial_capital * 0.05)  # 清仓后重新小额建仓
-            reason = f"{signal_level}级({meaning})分数{safe_score}，持仓已清空，逆向小额重建仓位{amount}元"
-        else:
-            max_buy = round(current_portfolio * 0.20)
-            amount = min(amount, max_buy)
-            if amount <= 0:
-                reason = f"{signal_level}级({meaning})分数{safe_score}，市场恐惧但可用资金不足，建议持有观察"
-                action = "hold"
-            else:
-                reason = f"{signal_level}级({meaning})分数{safe_score}，市场恐惧逆向加仓{amount}元"
-    else:  # sell
-        ratio = min_pct + (max_pct - min_pct) * min(safe_score / 100.0, 1.0)
-        # 减仓金额基于当前持仓而非初始资金，单日最多减仓20%
-        max_sell = round(current_portfolio * 0.20)
-        amount = round(min(current_portfolio * ratio, max_sell))
-        amount = max(amount, 0)  # 不能为负
-        if amount <= 0 or current_portfolio <= 0:
-            # 持仓已清空或金额为零，改为持有
+        # 加仓金额 = initial_capital × ratio
+        target_amount = round(initial_capital * ratio)
+        if current_cash <= 0:
+            # 没钱了，不买
             action = "hold"
-            reason = f"{signal_level}级({meaning})分数{safe_score}，持仓已清空，无法继续减仓"
+            amount = 0
+            reason = f"{signal_level}级({meaning})分数{safe_score} → 建议加仓{target_amount}元，现金已耗尽，持有"
+        elif current_cash < target_amount:
+            # 现金不够，全部买入
+            amount = round(current_cash)
+            reason = f"{signal_level}级({meaning})分数{safe_score} → 建议加仓{target_amount}元，现金不足，全部买入{amount}元"
         else:
-            reason = f"{signal_level}级({meaning})分数{safe_score}，市场贪婪减仓止盈{amount}元"
+            amount = target_amount
+            reason = f"{signal_level}级({meaning})分数{safe_score} → 加仓{amount}元"
+
+    elif action == "sell":
+        if is_clear:
+            # E级清仓
+            amount = round(current_position)
+            if amount <= 0:
+                action = "hold"
+                amount = 0
+                reason = f"{signal_level}级({meaning})分数{safe_score} → 建议清仓，持仓已空，策略结束"
+            else:
+                reason = f"{signal_level}级({meaning})分数{safe_score} → 清仓{amount}元，策略结束"
+        else:
+            # C/D级减仓 = position × ratio
+            amount = round(current_position * ratio)
+            if amount <= 0 or current_position <= 0:
+                action = "hold"
+                amount = 0
+                reason = f"{signal_level}级({meaning})分数{safe_score} → 建议减仓，持仓已空，持有"
+            else:
+                reason = f"{signal_level}级({meaning})分数{safe_score} → 减仓{amount}元({ratio*100:.0f}%仓位)"
 
     return action, amount, reason
 
@@ -750,9 +740,16 @@ async def _run_daily_tracking_backtest(
         if not signal_map and signal_map_db:
             signal_map = signal_map_db
 
-    # Step 3: 逐日计算
-    portfolio_value = req.initial_capital
+    # Step 3: 逐日计算 — cash + position 双轨制
+    # Day1建仓50% of initial，剩余50%留作加仓弹药
+    initial_position = round(req.initial_capital * 0.50)
+    initial_cash = req.initial_capital - initial_position
+
+    cash = initial_cash
+    position_value = initial_position  # 持仓市值（随净值涨跌）
+    portfolio_value = cash + position_value
     daily_records = []
+    strategy_ended = False  # 清仓/亏完 → 策略结束标记
 
     # 基准线（买入不动）
     benchmark_nav_start = nav_data[0]["nav"] if nav_data else 1.0
@@ -762,49 +759,83 @@ async def _run_daily_tracking_backtest(
         nav = day["nav"]
 
         if i == 0:
-            # Day 1: 初始买入，标记为建仓日
+            # Day 1: 建仓50%
             action = "buy"
-            action_amount = req.initial_capital
-            reason = f"建仓日：初始投入{req.initial_capital}元，从次日起根据信号调整仓位"
+            action_amount = initial_position
             signal_level = "B"
             signal_score = 50.0
             daily_return_pct = 0.0
+            reason = f"建仓日：投入{initial_position}元(50%)，预留{initial_cash}元作加仓弹药"
+            # state: cash=initial_cash, position=initial_position
+        elif strategy_ended:
+            # 策略已结束（清仓或亏完），后续只记录空仓状态
+            signal_level = "—"
+            signal_score = None
+            action = "hold"
+            action_amount = 0
+            daily_return_pct = 0.0
+            reason = "策略已结束"
+            portfolio_value = cash + position_value
         else:
-            # 获取当天信号 — 从预计算的signal_map中查找
+            # 获取当天信号
             date_key = date.replace("-", "") if "-" in date else date
             signal_info = signal_map.get(date_key, {"signal_level": "B", "composite_score": 50.0})
             signal_level = signal_info.get("signal_level")
             signal_score = signal_info.get("composite_score")
 
-            # 根据信号生成操作建议
-            action, action_amount, reason = _generate_daily_action(
-                signal_level, signal_score, portfolio_value, req.initial_capital,
-            )
-
-            # 计算日收益率（基于净值变化）
+            # 计算日收益率（基于净值变化）→ 持仓市值随涨跌
             prev_nav = nav_data[i - 1]["nav"]
-            if prev_nav > 0:
+            if prev_nav > 0 and nav > 0:
                 daily_return_pct = round((nav / prev_nav - 1) * 100, 2)
             else:
                 daily_return_pct = 0.0
 
-            # 执行操作，更新持仓市值
-            # 持仓市值 = 前日持仓 * (1 + 日收益率) + 操作金额
-            portfolio_value = portfolio_value * (1 + daily_return_pct / 100.0)
-            if action == "buy":
-                portfolio_value += action_amount
-            elif action == "sell":
-                portfolio_value -= action_amount
-                portfolio_value = max(portfolio_value, 0)  # 不能为负
+            # 持仓市值随净值涨跌
+            position_value = position_value * (1 + daily_return_pct / 100.0)
+            portfolio_value = cash + position_value
+
+            # 根据因子信号生成操作建议
+            action, action_amount, reason = _generate_daily_action(
+                signal_level, signal_score, cash, position_value, req.initial_capital,
+            )
+
+            # 执行操作，更新cash和position
+            if action == "buy" and action_amount > 0:
+                actual_buy = min(action_amount, round(cash))  # 不能超过现金
+                cash -= actual_buy
+                position_value += actual_buy
+                action_amount = actual_buy  # 记录实际买入金额
+                portfolio_value = cash + position_value
+            elif action == "sell" and action_amount > 0:
+                actual_sell = min(action_amount, round(position_value))  # 不能超过持仓
+                cash += actual_sell
+                position_value -= actual_sell
+                position_value = max(position_value, 0)
+                action_amount = actual_sell  # 记录实际卖出金额
+                portfolio_value = cash + position_value
+
+                # E级清仓 → 策略结束
+                if signal_level == "E":
+                    strategy_ended = True
+
+            # 检查策略是否自然结束（亏完）
+            if position_value <= 1 and cash <= 1:
+                strategy_ended = True
+                # 修正金额为0
+                position_value = max(position_value, 0)
+                cash = max(cash, 0)
+                portfolio_value = cash + position_value
 
         daily_records.append({
             "date": date,
             "signal_level": signal_level,
             "signal_score": signal_score,
             "action": action,
-            "action_amount": action_amount if action != "hold" and action != "none" else 0,
+            "action_amount": action_amount if action not in ("hold", "none") else 0,
             "nav": nav,
             "portfolio_value": round(portfolio_value, 2),
+            "cash": round(cash, 2),
+            "position_value": round(position_value, 2),
             "daily_return_pct": daily_return_pct,
             "reason": reason,
         })

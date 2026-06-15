@@ -59,7 +59,9 @@ export interface DailyTrackingDay {
   action: string;          // 操作类型: buy/sell/hold/none
   action_amount?: number;  // 操作金额(正=买入,负=卖出)
   nav: number;             // 当日净值
-  portfolio_value: number; // 当日持仓市值
+  portfolio_value: number; // 当日总市值(cash+position)
+  cash?: number;           // 当日现金余额
+  position_value?: number; // 当日持仓市值
   daily_return_pct: number;// 日收益率%
   reason: string;          // 建议原因
 }

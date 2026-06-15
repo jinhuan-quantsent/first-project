@@ -671,7 +671,7 @@ function FundBacktestSection({ strategies, activeStrategyId, selectedFund, onFun
 }
 
 /** ---- 逐日追踪结果展示 ---- */
-function DailyTrackingResultPanel({ result }: { result: BacktestResultV5 }) {
+function DailyTrackingResultPanel({ result, strategyName }: { result: BacktestResultV5; strategyName?: string }) {
   const tracking = result.daily_tracking || [];
   if (tracking.length === 0) return null;
 
@@ -785,7 +785,15 @@ function DailyTrackingResultPanel({ result }: { result: BacktestResultV5 }) {
 
   return (
     <div className="card p-4 space-y-4">
-      <h3 className="text-sm font-bold text-gray-700">逐日追踪结果</h3>
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-bold text-gray-700">逐日追踪结果</h3>
+        {strategyName && (
+          <span className="flex items-center gap-1.5 text-[11px] text-brand-600 bg-brand-50 px-2 py-1 rounded-full">
+            <span className="w-1.5 h-1.5 rounded-full bg-brand-500" />
+            因子方案: {strategyName}
+          </span>
+        )}
+      </div>
 
       {/* 汇总卡片区 */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
@@ -837,18 +845,20 @@ function DailyTrackingResultPanel({ result }: { result: BacktestResultV5 }) {
             </div>
           )}
         </div>
-        <div className="overflow-x-auto max-h-72 overflow-y-auto border border-gray-200 rounded-lg">
-          <table className="w-full text-xs text-left">
+        <div className="overflow-x-auto overflow-y-auto border border-gray-200 rounded-lg pb-2" style={{ maxHeight: '280px' }}>
+          <table className="w-full text-xs text-left min-w-[900px]">
             <thead className="bg-gray-50 sticky top-0 z-10">
               <tr className="text-gray-400">
-                <th className="px-2 py-1.5">日期</th>
-                <th className="px-2 py-1.5">信号</th>
-                <th className="px-2 py-1.5">建议</th>
-                <th className="px-2 py-1.5">操作金额</th>
-                <th className="px-2 py-1.5">当日净值</th>
-                <th className="px-2 py-1.5">持仓市值</th>
-                <th className="px-2 py-1.5">日收益率</th>
-                <th className="px-2 py-1.5">建议原因</th>
+                <th className="px-2 py-1.5 whitespace-nowrap">日期</th>
+                <th className="px-2 py-1.5 whitespace-nowrap">信号</th>
+                <th className="px-2 py-1.5 whitespace-nowrap">建议</th>
+                <th className="px-2 py-1.5 whitespace-nowrap">操作金额</th>
+                <th className="px-2 py-1.5 whitespace-nowrap">当日净值</th>
+                <th className="px-2 py-1.5 whitespace-nowrap">持仓市值</th>
+                <th className="px-2 py-1.5 whitespace-nowrap">现金</th>
+                <th className="px-2 py-1.5 whitespace-nowrap">持仓</th>
+                <th className="px-2 py-1.5 whitespace-nowrap">日收益率</th>
+                <th className="px-2 py-1.5 whitespace-nowrap min-w-[140px]">建议原因</th>
               </tr>
             </thead>
             <tbody>
@@ -884,6 +894,8 @@ function DailyTrackingResultPanel({ result }: { result: BacktestResultV5 }) {
                   </td>
                   <td className="px-2 py-1 font-mono text-gray-700">{r.nav.toFixed(4)}</td>
                   <td className="px-2 py-1 font-mono text-gray-600">¥{r.portfolio_value.toLocaleString('zh-CN', { maximumFractionDigits: 0 })}</td>
+                  <td className="px-2 py-1 font-mono text-gray-400">¥{(r.cash ?? 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}</td>
+                  <td className="px-2 py-1 font-mono text-gray-600">¥{(r.position_value ?? 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}</td>
                   <td className="px-2 py-1 font-mono">
                     <span className={
                       r.daily_return_pct > 0 ? 'text-red-500' :
@@ -1305,7 +1317,7 @@ export default function Backtest() {
 
       {/* 回测结果 — 逐日追踪模式 vs 普通模式 */}
       {result?.daily_tracking && result.daily_tracking.length > 0 ? (
-        <DailyTrackingResultPanel result={result} />
+        <DailyTrackingResultPanel result={result} strategyName={activeStrategy?.name} />
       ) : (
         <BacktestResultPanel result={result} />
       )}
