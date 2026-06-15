@@ -431,50 +431,57 @@ async def _compute_signals_from_index(
 
                 rsi = rsi_list[i] if i < len(rsi_list) else 50.0
 
+                # 距60日峰值跌幅: 如果价格远低于近期高点 → 恐惧加剧
+                peak_60 = max(closes_list[max(0, i-59):i+1]) if i > 0 else closes_list[i]
+                drawdown_from_peak = (closes_list[i] / peak_60 - 1) * 100 if peak_60 > 0 else 0.0
+
                 result[date_str] = {
                     "rsi": rsi,
                     "ret_20": ret_20,
                     "ret_5": ret_5,
                     "vol_20": vol_20,
+                    "drawdown": drawdown_from_peak,
                 }
             return result
 
         start_dt_str = start_date.replace("-", "")
         metrics = calc_20day_metrics(closes, dates, start_dt_str)
 
-        # 综合分数计算（放大灵敏度，避免全是B级）
-        # 恐惧(高分数) = 低RSI + 跌得多 + 高波动 + 价格低于均线
-        # 贪婪(低分数) = 高RSI + 涨得多 + 低波动 + 价格高于均线
+        # 综合分数计算（5因子+趋势+回撤，高灵敏度）
+        # 恐惧(高分数) = 低RSI + 跌得多 + 高波动 + 价格低于均线 + 距峰值远
+        # 贪婪(低分数) = 高RSI + 涨得多 + 低波动 + 价格高于均线 + 创新高
         signals = {}
         for date_str, m in metrics.items():
-            # RSI反转映射: RSI=0→100(极度恐惧), RSI=50→50(中性), RSI=100→0(极度贪婪)
-            # 放大偏离度: (RSI-50)*1.5 → 更灵敏
-            rsi_dev = (m["rsi"] - 50) * 1.5
+            # 1. RSI反转: 放大偏离度2x → 更灵敏
+            rsi_dev = (m["rsi"] - 50) * 2.0
             rsi_score = max(0, min(100, 50 - rsi_dev))
 
-            # 近20日涨跌幅映射: 放大到5x灵敏度
-            # -5%→75(恐惧), +5%→25(贪婪), 0%→50(中性)
-            ret_score = max(0, min(100, 50 - m["ret_20"] * 5))
+            # 2. 近20日涨跌幅: 7x灵敏度
+            # -7%→99(恐惧), +7%→1(贪婪), 0%→50(中性)
+            ret_score = max(0, min(100, 50 - m["ret_20"] * 7))
 
-            # 波动率映射: 15%波动→50分, 25%→75分, 35%→100分
+            # 3. 波动率: 15%→50, 25%→75, 35%→100
             vol_score = max(0, min(100, 50 + (m["vol_20"] - 15) * 2.5))
 
-            # 近5日动量: 放大到8x灵敏度
-            mom_score = max(0, min(100, 50 - m["ret_5"] * 8))
+            # 4. 近5日动量: 10x灵敏度（日度波动更敏感）
+            mom_score = max(0, min(100, 50 - m["ret_5"] * 10))
+
+            # 5. 距60日峰值回撤: 跌5%→60分(偏恐), 跌10%→80分(恐), 跌15%→95分(极恐)
+            # 创新高→15分(极贪)
+            dd_score = max(0, min(100, 50 - m["drawdown"] * 3))
 
             # 趋势检测: 价格与20日均线的关系
-            # 找到当前close对应的索引
             date_idx = dates.index(date_str) if date_str in dates else -1
             trend_bonus = 0
             if date_idx >= 20:
                 ma20 = sum(closes[date_idx-19:date_idx+1]) / 20
                 current_close = closes[date_idx]
-                # 价格低于均线 → 恐惧加分(最多±15)
                 dev_pct = (current_close / ma20 - 1) * 100
-                trend_bonus = max(-15, min(15, -dev_pct * 2))
+                trend_bonus = max(-20, min(20, -dev_pct * 3))
 
-            # 加权聚合 + 趋势修正
-            composite = rsi_score * 0.30 + ret_score * 0.25 + vol_score * 0.15 + mom_score * 0.20 + trend_bonus * 0.10
+            # 加权聚合: RSI(0.20) + ret20(0.20) + vol(0.10) + mom(0.15) + drawdown(0.25) + trend(0.10)
+            raw_composite = rsi_score * 0.20 + ret_score * 0.20 + vol_score * 0.10 + mom_score * 0.15 + dd_score * 0.25 + trend_bonus * 0.10
+            composite = raw_composite
 
             # 分数→信号等级（放宽阈值，更容易产生极端信号）
             def _score_to_signal(s: float) -> str:
@@ -552,11 +559,15 @@ def _generate_daily_action(
     if action == "hold":
         amount = 0
         if signal_level and signal_level in ("C",):
-            # C级有概率小幅减仓
+            # C级有概率小幅减仓 — 金额基于当前持仓而非初始资金
             if safe_score < 40:
-                amount = round(initial_capital * 0.05)
-                action = "sell"
-                reason = f"{signal_level}级({meaning})分数{safe_score}，小幅减仓{amount}元控制风险"
+                amount = round(current_portfolio * 0.05)  # 减仓当前持仓的5%
+                amount = max(amount, 0)  # 不能为负
+                if amount > 0:
+                    action = "sell"
+                    reason = f"{signal_level}级({meaning})分数{safe_score}，小幅减仓{amount}元控制风险"
+                else:
+                    reason = f"{signal_level}级({meaning})分数{safe_score}，持仓已清空，维持观望"
             else:
                 reason = f"{signal_level}级({meaning})分数{safe_score}，市场偏贪婪但未极端，维持持有观察"
         elif signal_level == "B":
@@ -567,13 +578,30 @@ def _generate_daily_action(
         # 根据 score 在 min-max 之间插值
         ratio = min_pct + (max_pct - min_pct) * min(safe_score / 100.0, 1.0)
         amount = round(initial_capital * ratio)
-        # 单日加仓不超过当前持仓的20%
-        amount = min(amount, round(current_portfolio * 0.20))
-        reason = f"{signal_level}级({meaning})分数{safe_score}，市场恐惧逆向加仓{amount}元"
+        # 单日加仓不超过当前持仓的20%（但如果持仓已清空，允许用初始资金的5%重新建仓）
+        if current_portfolio <= 0:
+            amount = round(initial_capital * 0.05)  # 清仓后重新小额建仓
+            reason = f"{signal_level}级({meaning})分数{safe_score}，持仓已清空，逆向小额重建仓位{amount}元"
+        else:
+            max_buy = round(current_portfolio * 0.20)
+            amount = min(amount, max_buy)
+            if amount <= 0:
+                reason = f"{signal_level}级({meaning})分数{safe_score}，市场恐惧但可用资金不足，建议持有观察"
+                action = "hold"
+            else:
+                reason = f"{signal_level}级({meaning})分数{safe_score}，市场恐惧逆向加仓{amount}元"
     else:  # sell
         ratio = min_pct + (max_pct - min_pct) * min(safe_score / 100.0, 1.0)
-        amount = round(min(initial_capital * ratio, current_portfolio * 0.20))  # 单日最多卖20%
-        reason = f"{signal_level}级({meaning})分数{safe_score}，市场贪婪减仓止盈{amount}元"
+        # 减仓金额基于当前持仓而非初始资金，单日最多减仓20%
+        max_sell = round(current_portfolio * 0.20)
+        amount = round(min(current_portfolio * ratio, max_sell))
+        amount = max(amount, 0)  # 不能为负
+        if amount <= 0 or current_portfolio <= 0:
+            # 持仓已清空或金额为零，改为持有
+            action = "hold"
+            reason = f"{signal_level}级({meaning})分数{safe_score}，持仓已清空，无法继续减仓"
+        else:
+            reason = f"{signal_level}级({meaning})分数{safe_score}，市场贪婪减仓止盈{amount}元"
 
     return action, amount, reason
 
@@ -734,12 +762,12 @@ async def _run_daily_tracking_backtest(
         nav = day["nav"]
 
         if i == 0:
-            # Day 1: 初始买入，不给建议
-            action = "none"
-            action_amount = 0
-            reason = f"初始买入{req.initial_capital}元，等待信号"
-            signal_level = None
-            signal_score = None
+            # Day 1: 初始买入，标记为建仓日
+            action = "buy"
+            action_amount = req.initial_capital
+            reason = f"建仓日：初始投入{req.initial_capital}元，从次日起根据信号调整仓位"
+            signal_level = "B"
+            signal_score = 50.0
             daily_return_pct = 0.0
         else:
             # 获取当天信号 — 从预计算的signal_map中查找
