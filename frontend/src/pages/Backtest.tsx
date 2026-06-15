@@ -85,13 +85,12 @@ const DEFAULT_PARAMS: BacktestStrategy['params'] = {
   factor_weights: Object.fromEntries(FACTOR_NAMES.map(n => [n, DEFAULT_WEIGHT])),
   sigmoid_params: Object.fromEntries(FACTOR_NAMES.map(n => [n, { ...DEFAULT_SIGMOID }])),
   position_matrix: [
-    [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00], // S+ (空仓)
-    [0.00, 0.00, 0.00, 0.20, 0.20, 0.30, 0.30], // S
-    [0.00, 0.00, 0.20, 0.30, 0.40, 0.50, 0.50], // A
-    [0.00, 0.20, 0.30, 0.40, 0.50, 0.60, 0.60], // B
-    [0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.80], // C
-    [0.50, 0.60, 0.70, 0.80, 0.90, 0.95, 0.95], // D
-    [0.70, 0.80, 0.90, 0.95, 1.00, 1.00, 1.00], // E (满仓)
+    // 5行(当前仓位) × 7列(信号等级 S+~E)，与后端 config.py V5_POSITION_MATRIX 一致
+    [0.30, 0.20, 0.10, 0.00, 0.00, 0.00, 0.00], // empty (空仓0%)
+    [0.50, 0.40, 0.30, 0.25, 0.10, 0.00, 0.00], // light (轻仓25%)
+    [0.70, 0.60, 0.50, 0.50, 0.40, 0.30, 0.20], // mid   (半仓50%)
+    [0.80, 0.75, 0.75, 0.75, 0.50, 0.40, 0.30], // heavy (重仓75%)
+    [1.00, 1.00, 1.00, 1.00, 0.60, 0.50, 0.40], // full  (满仓100%)
   ],
   risk_params: { cost_threshold: 0.015, frequency_days: 7, max_adjustment: 0.20 },
 };
@@ -550,24 +549,24 @@ export default function Backtest() {
         </ParamPanel>
 
         <ParamPanel title="仓位矩阵" open={panels.position} onToggle={() => togglePanel('position')}>
-          <p className="text-[10px] text-gray-400 mb-2">5体制 × 7信号 = 35个仓位值（开发中，暂不可编辑）</p>
+          <p className="text-[10px] text-gray-400 mb-2">5当前仓位 × 7信号等级 = 35个目标仓位百分比</p>
           <div className="overflow-x-auto">
             <table className="w-full text-[10px] text-left">
               <thead>
                 <tr className="text-gray-400">
-                  <th className="px-1 py-0.5">体制＼信号</th>
+                  <th className="px-1 py-0.5">仓位＼信号</th>
                   {['S+', 'S', 'A', 'B', 'C', 'D', 'E'].map(s => (
                     <th key={s} className="px-1 py-0.5 text-center">{s}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {['极度恐惧', '恐惧', '中性', '乐观', '极度乐观'].map((reg, ri) => (
-                  <tr key={reg} className="border-t border-gray-100">
-                    <td className="px-1 py-0.5 text-gray-500">{reg}</td>
+                {['空仓0%', '轻仓25%', '半仓50%', '重仓75%', '满仓100%'].map((pos, ri) => (
+                  <tr key={pos} className="border-t border-gray-100">
+                    <td className="px-1 py-0.5 text-gray-500">{pos}</td>
                     {(activeStrategy?.params.position_matrix?.[ri] ?? Array(7).fill(0)).map((v: number, ci: number) => (
                       <td key={ci} className="px-1 py-0.5 text-center font-mono">
-                        {Number(v.toFixed(2))}
+                        {typeof v === 'number' ? `${Math.round(v * 100)}%` : v}
                       </td>
                     ))}
                   </tr>

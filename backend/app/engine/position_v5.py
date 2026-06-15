@@ -14,8 +14,8 @@ from app.core.config import settings
 class PositionEngineV5:
     """V5.0 仓位建议引擎"""
 
-    # 仓位等级 → 百分比映射
-    LEVEL_TO_PCT: dict[str, float] = {
+    # 当前仓位等级对应的百分比范围
+    LEVEL_PCT: dict[str, float] = {
         "empty": 0.0,
         "light": 0.25,
         "mid": 0.50,
@@ -28,7 +28,6 @@ class PositionEngineV5:
     def __init__(self, session) -> None:
         self._session = session
         self._matrix = settings.V5_POSITION_MATRIX
-        self._level_pct = settings.V5_POSITION_LEVEL_PCT
         self._conf_adj = settings.V5_CONFIDENCE_POSITION_ADJ
         self._cost_threshold = settings.V5_COST_THRESHOLD_PCT
         self._freq_days = settings.V5_FREQUENCY_LIMIT_DAYS
@@ -49,14 +48,13 @@ class PositionEngineV5:
         # 1. 确定当前仓位等级
         current_level = self._pct_to_level(current_position_pct)
 
-        # 2. 矩阵查表
+        # 2. 矩阵查表 → 直接获取目标仓位百分比
         signal_idx = self._signal_to_idx(signal_level)
         current_idx = self.LEVELS.index(current_level)
-        target_level = self._matrix[current_idx][signal_idx]
+        target_pct = self._matrix[current_idx][signal_idx]
 
         # 3. 置信度修正
-        conf_factor = self._conf_adj.get(confidence_stars, 0.25)
-        target_pct = self.LEVEL_TO_PCT[target_level]
+        conf_factor = self._conf_adj.get(confidence_stars, 0.0)
         current_pct = current_position_pct
         if target_pct > current_pct:
             # 加仓：置信度修正
@@ -88,7 +86,7 @@ class PositionEngineV5:
 
         # 7. 生成建议原因
         reason = self._generate_reason(
-            signal_level, confidence_stars, current_level, target_level,
+            signal_level, confidence_stars, current_level, target_pct,
             cost_rejected, frequency_blocked,
         )
 
@@ -107,7 +105,12 @@ class PositionEngineV5:
             "action": action,
             "signal_level": signal_level,
             "confidence_stars": confidence_stars,
-            "matrix_result": {"current": current_level, "target": target_level},
+            "matrix_result": {
+                "current_level": current_level,
+                "target_pct": round(target_pct, 4),
+                "signal_idx": signal_idx,
+                "current_idx": current_idx,
+            },
             "confidence_adj_factor": conf_factor,
             "regime_adj_factor": 1.0,  # TODO
             "cost_rejected": cost_rejected,
@@ -161,7 +164,7 @@ class PositionEngineV5:
         signal_level: str,
         confidence_stars: int,
         current_level: str,
-        target_level: str,
+        target_pct: float,
         cost_rejected: bool,
         frequency_blocked: bool,
     ) -> str:
@@ -181,5 +184,5 @@ class PositionEngineV5:
         return (
             f"当前信号：{label}（{signal_level}），"
             f"置信度：{stars_str}，"
-            f"建议仓位从「{current_level}」调整至「{target_level}」"
+            f"建议仓位从「{current_level}」调整至「{target_pct:.0%}」"
         )

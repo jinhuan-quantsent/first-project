@@ -151,7 +151,7 @@ class Settings(BaseSettings):
     # --- V5.0 分歧度动态加权 ---
     V5_DIVERGENCE_PENALTY_MIN: float = 0.5   # 最大分歧时惩罚系数
     V5_DIVERGENCE_PENALTY_MAX: float = 1.0   # 无分歧时惩罚系数
-    V5_DIVERGENCE_STD_THRESHOLD: float = 0.35  # 触发防线的factor_std阈值
+    V5_DIVERGENCE_STD_THRESHOLD: float = 15.0  # 触发防线的factor_std阈值（Sigmoid得分0-100范围）
 
     # --- V5.0 防跳变规则 ---
     V5_ANTI_JUMP_SMALL_DIFF: int = 10   # 分数差<10 → 最多变1级
@@ -159,17 +159,15 @@ class Settings(BaseSettings):
     V5_ANTI_JUMP_CONSECUTIVE_DAYS: int = 3  # 连续N天同向 → 额外1级
 
     # --- V5.0 仓位矩阵 (5行当前仓位 × 7列信号等级) ---
-    V5_POSITION_MATRIX: List[List[str]] = Field(default_factory=lambda: [
-        ["empty", "empty", "light", "light", "mid",   "mid",   "mid"],    # empty
-        ["empty", "light", "light", "mid",   "mid",   "heavy", "heavy"],  # light
-        ["light", "light", "mid",   "mid",   "heavy", "heavy", "full"],   # mid
-        ["light", "mid",   "mid",   "heavy", "heavy", "full",  "full"],   # heavy
-        ["mid",   "mid",   "heavy", "heavy", "full",  "full",  "full"],   # full
+    # 存储数值化目标仓位百分比，与项目书3.6节对齐
+    V5_POSITION_MATRIX: List[List[float]] = Field(default_factory=lambda: [
+        # S+     S      A      B      C      D      E       ← 信号等级
+        [0.30,  0.20,  0.10,  0.00,  0.00,  0.00,  0.00],  # empty (空仓0%)
+        [0.50,  0.40,  0.30,  0.25,  0.10,  0.00,  0.00],  # light (轻仓25%)
+        [0.70,  0.60,  0.50,  0.50,  0.40,  0.30,  0.20],  # mid   (半仓50%)
+        [0.80,  0.75,  0.75,  0.75,  0.50,  0.40,  0.30],  # heavy (重仓75%)
+        [1.00,  1.00,  1.00,  1.00,  0.60,  0.50,  0.40],  # full  (满仓100%)
     ])
-    # 仓位等级映射: empty=0%, light=25%, mid=50%, heavy=75%, full=100%
-    V5_POSITION_LEVEL_PCT: dict = Field(default_factory=lambda: {
-        "empty": 0.0, "light": 0.25, "mid": 0.50, "heavy": 0.75, "full": 1.0,
-    })
     V5_POSITION_LEVELS: List[str] = Field(default_factory=lambda: ["empty", "light", "mid", "heavy", "full"])
 
     # --- V5.0 置信度修正系数 ---
@@ -177,7 +175,7 @@ class Settings(BaseSettings):
         4: 1.0,   # 4星 → 100%
         3: 0.75,  # 3星 → 75%
         2: 0.50,  # 2星 → 50%
-        1: 0.25,  # 1星 → 25%
+        1: 0.0,   # 1星 → 0% 不操作 (HOLD)
     })
 
     # --- V5.0 交易成本校验 ---

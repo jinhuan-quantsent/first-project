@@ -131,9 +131,10 @@ class ConfidenceEngine:
         """四道假信号防线"""
         triggered = []
 
-        # 防线1：市场极端波动
+        # 防线1：市场极端波动（因子得分标准差过大 → 极端分歧）
         if self.DEFENSE_EXTREME_VOL:
-            std = float(__import__("numpy").mean([r.sigmoid_score for r in results]))
+            import numpy as np
+            std = float(np.std([r.sigmoid_score for r in results]))
             if std > settings.V5_DIVERGENCE_STD_THRESHOLD:
                 triggered.append("extreme_volatility")
 
