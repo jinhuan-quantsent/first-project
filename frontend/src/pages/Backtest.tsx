@@ -3,10 +3,30 @@
  * 方案管理栏 + 5类折叠参数面板 + 回测结果展示
  */
 import { useState, useEffect, useCallback } from 'react';
-import { SlidersHorizontal, Save, Trash2, Play, RotateCcw, TrendingUp } from 'lucide-react';
+import { SlidersHorizontal, Save, Trash2, Play, RefreshCw, TrendingUp } from 'lucide-react';
 import { clsx } from 'clsx';
 import { runBacktestV5, saveBacktestStrategyV5, deleteBacktestStrategyV5 } from '../api/backtest';
 import client from '../api/client';
+
+/* ============================================================
+   11 因子中英文映射
+   ============================================================ */
+const FACTOR_LABELS: Record<string, string> = {
+  VOL:  '波动率',
+  ADR:  '涨跌比',
+  ERP:  '股债比',
+  FLOW: '北向资金',
+  ETF:  'ETF资金',
+  NHNL: '新高新低',
+  TURN: '换手率',
+  POS:  '持仓结构',
+  NBF:  '融资余额',
+  PCR:  '看跌看涨比',
+  NEWF: '新发基金',
+};
+const FACTOR_NAMES = Object.keys(FACTOR_LABELS);
+const DEFAULT_WEIGHT = 1 / FACTOR_NAMES.length; // ≈0.091
+const DEFAULT_SIGMOID = { c: 0.50, k: 3.0 };
 
 /* ============================================================
    类型
@@ -37,6 +57,19 @@ interface ApiStrategy {
   is_default: boolean;
 }
 
+/** API 返回的策略格式（id 为字符串） */
+interface ApiStrategy {
+  id: string;
+  name: string;
+  description: string;
+  params: {
+    buy_signals?: string[];
+    sell_signals?: string[];
+    hold_signals?: string[];
+  };
+  is_default: boolean;
+}
+
 interface BacktestResult {
   total_return: number;
   annual_return: number;
@@ -49,9 +82,17 @@ interface BacktestResult {
 
 const DEFAULT_PARAMS: BacktestStrategy['params'] = {
   signal_boundaries: [12, 25, 38, 52, 65, 80],
-  factor_weights: {},
-  sigmoid_params: {},
-  position_matrix: [],
+  factor_weights: Object.fromEntries(FACTOR_NAMES.map(n => [n, DEFAULT_WEIGHT])),
+  sigmoid_params: Object.fromEntries(FACTOR_NAMES.map(n => [n, { ...DEFAULT_SIGMOID }])),
+  position_matrix: [
+    [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00], // S+ (空仓)
+    [0.00, 0.00, 0.00, 0.20, 0.20, 0.30, 0.30], // S
+    [0.00, 0.00, 0.20, 0.30, 0.40, 0.50, 0.50], // A
+    [0.00, 0.20, 0.30, 0.40, 0.50, 0.60, 0.60], // B
+    [0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.80], // C
+    [0.50, 0.60, 0.70, 0.80, 0.90, 0.95, 0.95], // D
+    [0.70, 0.80, 0.90, 0.95, 1.00, 1.00, 1.00], // E (满仓)
+  ],
   risk_params: { cost_threshold: 0.015, frequency_days: 7, max_adjustment: 0.20 },
 };
 
@@ -412,15 +453,128 @@ export default function Backtest() {
         </ParamPanel>
 
         <ParamPanel title="因子权重" open={panels.factors} onToggle={() => togglePanel('factors')}>
-          <p className="text-[10px] text-gray-400">11 因子权重归一化总和=1.0（开发中）</p>
+          <p className="text-[10px] text-gray-400 mb-2">权重总和应=1.0（修改后点击保存方案）</p>
+          <div className="space-y-1.5">
+            {FACTOR_NAMES.map(name => {
+              const w = activeStrategy?.params.factor_weights?.[name] ?? DEFAULT_WEIGHT;
+              return (
+                <div key={name} className="flex items-center gap-2 text-xs">
+                  <span className="w-12 shrink-0 font-mono text-[10px] text-gray-500">{name}</span>
+                  <span className="w-14 shrink-0 text-[10px] text-gray-600">{FACTOR_LABELS[name]}</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="1"
+                    value={Number(w.toFixed(2))}
+                    onChange={e => {
+                      if (!activeStrategy) return;
+                      const v = parseFloat(e.target.value) || 0;
+                      setStrategies(prev => prev.map(s => {
+                        if (s.id !== activeId) return s;
+                        return {
+                          ...s,
+                          params: {
+                            ...s.params,
+                            factor_weights: { ...s.params.factor_weights, [name]: v },
+                          },
+                        };
+                      }));
+                    }}
+                    className="flex-1 px-1.5 py-0.5 border border-gray-200 rounded text-xs"
+                  />
+                  <span className="w-10 text-right text-[10px] text-gray-400 tabular-nums">{w.toFixed(2)}</span>
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-[10px] text-gray-400 mt-2">
+            当前总和：
+            <span className={`font-mono ${activeStrategy && Math.abs(Object.values(activeStrategy.params.factor_weights ?? {}).reduce((a: number, b: number) => a + b, 0) - 1.0) > 0.01 ? 'text-red-500 font-bold' : 'text-green-500'}`}>
+              {activeStrategy ? Object.values(activeStrategy.params.factor_weights ?? {}).reduce((a: number, b: number) => a + b, 0).toFixed(2) : '—.——'}
+            </span>
+          </p>
         </ParamPanel>
 
         <ParamPanel title="Sigmoid 参数" open={panels.sigmoid} onToggle={() => togglePanel('sigmoid')}>
-          <p className="text-[10px] text-gray-400">每因子独立 (c, k) 参数（开发中）</p>
+          <p className="text-[10px] text-gray-400 mb-2">每因子 (c, k)：c=中点（默认0.50），k=陡峭度（默认3.0）</p>
+          <div className="space-y-1.5">
+            {FACTOR_NAMES.map(name => {
+              const p = activeStrategy?.params.sigmoid_params?.[name] ?? DEFAULT_SIGMOID;
+              return (
+                <div key={name} className="flex items-center gap-2 text-xs">
+                  <span className="w-12 shrink-0 font-mono text-[10px] text-gray-500">{name}</span>
+                  <span className="w-14 shrink-0 text-[10px] text-gray-600">{FACTOR_LABELS[name]}</span>
+                  <input
+                    type="number" step="0.01" min="0.01" max="0.99"
+                    value={Number(p.c.toFixed(2))}
+                    onChange={e => {
+                      if (!activeStrategy) return;
+                      const v = parseFloat(e.target.value) || 0.50;
+                      setStrategies(prev => prev.map(s => {
+                        if (s.id !== activeId) return s;
+                        return {
+                          ...s,
+                          params: {
+                            ...s.params,
+                            sigmoid_params: { ...s.params.sigmoid_params, [name]: { ...p, c: v } },
+                          },
+                        };
+                      }));
+                    }}
+                    className="w-14 px-1.5 py-0.5 border border-gray-200 rounded text-xs text-center"
+                  />
+                  <input
+                    type="number" step="0.5" min="0.5" max="20"
+                    value={Number(p.k.toFixed(1))}
+                    onChange={e => {
+                      if (!activeStrategy) return;
+                      const v = parseFloat(e.target.value) || 3.0;
+                      setStrategies(prev => prev.map(s => {
+                        if (s.id !== activeId) return s;
+                        return {
+                          ...s,
+                          params: {
+                            ...s.params,
+                            sigmoid_params: { ...s.params.sigmoid_params, [name]: { ...p, k: v } },
+                          },
+                        };
+                      }));
+                    }}
+                    className="w-14 px-1.5 py-0.5 border border-gray-200 rounded text-xs text-center"
+                  />
+                </div>
+              );
+            })}
+          </div>
         </ParamPanel>
 
         <ParamPanel title="仓位矩阵" open={panels.position} onToggle={() => togglePanel('position')}>
-          <p className="text-[10px] text-gray-400">5×7 矩阵编辑（开发中）</p>
+          <p className="text-[10px] text-gray-400 mb-2">5体制 × 7信号 = 35个仓位值（开发中，暂不可编辑）</p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[10px] text-left">
+              <thead>
+                <tr className="text-gray-400">
+                  <th className="px-1 py-0.5">体制＼信号</th>
+                  {['S+', 'S', 'A', 'B', 'C', 'D', 'E'].map(s => (
+                    <th key={s} className="px-1 py-0.5 text-center">{s}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {['极度恐惧', '恐惧', '中性', '乐观', '极度乐观'].map((reg, ri) => (
+                  <tr key={reg} className="border-t border-gray-100">
+                    <td className="px-1 py-0.5 text-gray-500">{reg}</td>
+                    {(activeStrategy?.params.position_matrix?.[ri] ?? Array(7).fill(0)).map((v: number, ci: number) => (
+                      <td key={ci} className="px-1 py-0.5 text-center font-mono">
+                        {Number(v.toFixed(2))}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </ParamPanel>
 
         <ParamPanel title="风控参数" open={panels.risk} onToggle={() => togglePanel('risk')}>
