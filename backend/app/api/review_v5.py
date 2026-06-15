@@ -296,6 +296,148 @@ def _generate_mock_price_data(
 # 逐日追踪回测辅助函数
 # ============================================================
 
+async def _compute_signals_from_index(
+    index_code: str,
+    start_date: str,
+    end_date: str,
+) -> dict[str, dict]:
+    """
+    从指数历史日线实时计算信号（当数据库无历史信号时使用）
+
+    计算逻辑（基于价格动量的简化信号）：
+    1. RSI(14): 标准RSI → 反转映射（低RSI=恐惧=高分数）
+    2. 近20日涨跌幅: 涨多=贪婪=低分数
+    3. 近20日波动率: 高波动=恐惧=高分数
+    三因子加权 → 综合分数 → 7级信号
+
+    Returns: {date_str: {"signal_level": str, "composite_score": float}}
+    """
+    ts_code = _INDEX_CODE_MAP.get(index_code, index_code.replace("SH", "").replace("SZ", "") + ".SH")
+
+    try:
+        if not data_source._tushare_pro:
+            return {}
+
+        # 需要额外的历史数据做RSI/波动率计算，往前多取30天
+        extended_start_dt = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=45)).strftime("%Y%m%d")
+        end_dt = end_date.replace("-", "")
+
+        df = data_source._tushare_pro.index_daily(
+            ts_code=ts_code,
+            start_date=extended_start_dt,
+            end_date=end_dt,
+        )
+        if df is None or df.empty:
+            return {}
+
+        df = df.sort_values("trade_date", ascending=True)
+        closes = df["close"].tolist()
+        dates = df["trade_date"].tolist()
+        pct_chgs = df.get("pct_chg", df["close"].pct_change() * 100).tolist()
+
+        # 计算RSI(14)
+        def calc_rsi(changes: list[float], period: int = 14) -> list[float]:
+            rsi_values = []
+            for i in range(len(changes)):
+                if i < period:
+                    rsi_values.append(50.0)  # 默认中性
+                    continue
+                gains = [c for c in changes[i-period:i] if c > 0]
+                losses = [-c for c in changes[i-period:i] if c < 0]
+                avg_gain = sum(gains) / period if gains else 0
+                avg_loss = sum(losses) / period if losses else 0.0001
+                rs = avg_gain / avg_loss
+                rsi_values.append(100 - 100 / (1 + rs))
+            return rsi_values
+
+        rsi_list = calc_rsi(pct_chgs)
+
+        # 计算近20日涨跌幅和波动率
+        def calc_20day_metrics(closes_list: list[float], dates_list: list[str],
+                               start_dt_str: str) -> dict[str, dict]:
+            result = {}
+            for i in range(len(closes_list)):
+                date_str = str(dates_list[i])
+                if date_str < start_dt_str:
+                    continue
+
+                # 近20日涨跌幅
+                if i >= 20:
+                    ret_20 = (closes_list[i] / closes_list[i-20] - 1) * 100
+                else:
+                    ret_20 = 0.0
+
+                # 近20日波动率（日收益率标准差 * sqrt(252))
+                if i >= 20:
+                    recent_returns = [(closes_list[j] / closes_list[j-1] - 1) for j in range(i-19, i+1)]
+                    vol_20 = (sum(r**2 for r in recent_returns) / len(recent_returns) ** 0.5) * (252 ** 0.5) * 100
+                else:
+                    vol_20 = 20.0  # 默认中等波动
+
+                # 近5日涨跌幅（短期动量）
+                if i >= 5:
+                    ret_5 = (closes_list[i] / closes_list[i-5] - 1) * 100
+                else:
+                    ret_5 = 0.0
+
+                rsi = rsi_list[i] if i < len(rsi_list) else 50.0
+
+                result[date_str] = {
+                    "rsi": rsi,
+                    "ret_20": ret_20,
+                    "ret_5": ret_5,
+                    "vol_20": vol_20,
+                }
+            return result
+
+        start_dt_str = start_date.replace("-", "")
+        metrics = calc_20day_metrics(closes, dates, start_dt_str)
+
+        # 综合分数计算
+        # 恐惧(高分数) = 低RSI + 跌得多 + 高波动
+        # 贪婪(低分数) = 高RSI + 涨得多 + 低波动
+        signals = {}
+        for date_str, m in metrics.items():
+            # RSI反转映射: RSI=0→100分(极度恐惧), RSI=100→0分(极度贪婪)
+            rsi_score = 100 - m["rsi"]
+
+            # 近20日涨跌幅映射: 大跌→高分数(恐惧), 大涨→低分数(贪婪)
+            # 用倒U型映射: 0%→50分, -10%→80分, +10%→20分
+            ret_score = max(0, min(100, 50 - m["ret_20"] * 3))
+
+            # 波动率映射: 低波动→50分, 高波动→80分(恐惧加剧)
+            vol_score = max(0, min(100, 50 + (m["vol_20"] - 20) * 1.5))
+
+            # 近5日动量: 大跌→高分数
+            mom_score = max(0, min(100, 50 - m["ret_5"] * 5))
+
+            # 加权聚合
+            composite = rsi_score * 0.35 + ret_score * 0.25 + vol_score * 0.20 + mom_score * 0.20
+
+            # 分数→信号等级
+            def _score_to_signal(s: float) -> str:
+                if s >= 90: return "S+"
+                elif s >= 80: return "S"
+                elif s >= 65: return "A"
+                elif s >= 40: return "B"
+                elif s >= 25: return "C"
+                elif s >= 10: return "D"
+                else: return "E"
+
+            signal_level = _score_to_signal(composite)
+            signals[date_str] = {
+                "signal_level": signal_level,
+                "composite_score": round(composite, 1),
+                "_source": "computed",  # 标记为计算而非数据库
+            }
+
+        return signals
+
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("实时信号计算失败(%s): %s", index_code, e)
+        return {}
+
 def _generate_daily_action(
     signal_level: Optional[str],
     score: Optional[float],
@@ -338,6 +480,13 @@ def _generate_daily_action(
 
     safe_score = score if score is not None else 50.0
 
+    # 信号中文含义
+    signal_meanings: dict[str, str] = {
+        "S+": "极度恐惧", "S": "恐惧", "A": "偏恐惧",
+        "B": "中性", "C": "偏贪婪", "D": "贪婪", "E": "极度贪婪", "F": "极端贪婪",
+    }
+    meaning = signal_meanings.get(signal_level or "", "未知")
+
     if action == "hold":
         amount = 0
         if signal_level and signal_level in ("C",):
@@ -345,22 +494,24 @@ def _generate_daily_action(
             if safe_score < 40:
                 amount = round(initial_capital * 0.05)
                 action = "sell"
-                reason = f"{signal_level}级偏空信号({safe_score}分)，小幅减仓{amount}元控制风险"
+                reason = f"{signal_level}级({meaning})分数{safe_score}，小幅减仓{amount}元控制风险"
             else:
-                reason = f"信号{signal_level}({safe_score}分)，维持持有观察"
+                reason = f"{signal_level}级({meaning})分数{safe_score}，市场偏贪婪但未极端，维持持有观察"
+        elif signal_level == "B":
+            reason = f"{signal_level}级({meaning})分数{safe_score}，市场情绪平稳，持有不动"
         else:
-            reason = f"信号{signal_level or '未知'}({safe_score}分)，维持持有观察"
+            reason = f"信号{signal_level or '未知'}({meaning})分数{safe_score}，维持持有观察"
     elif action == "buy":
         # 根据 score 在 min-max 之间插值
         ratio = min_pct + (max_pct - min_pct) * min(safe_score / 100.0, 1.0)
         amount = round(initial_capital * ratio)
         # 单日加仓不超过当前持仓的20%
         amount = min(amount, round(current_portfolio * 0.20))
-        reason = f"{signal_level}级恐惧信号({safe_score}分)，逆向加仓{amount}元"
+        reason = f"{signal_level}级({meaning})分数{safe_score}，市场恐惧逆向加仓{amount}元"
     else:  # sell
         ratio = min_pct + (max_pct - min_pct) * min(safe_score / 100.0, 1.0)
         amount = round(min(initial_capital * ratio, current_portfolio * 0.20))  # 单日最多卖20%
-        reason = f"{signal_level}级贪婪信号({safe_score}分)，减仓止盈{amount}元"
+        reason = f"{signal_level}级({meaning})分数{safe_score}，市场贪婪减仓止盈{amount}元"
 
     return action, amount, reason
 
@@ -457,8 +608,8 @@ async def _run_daily_tracking_backtest(
 
     逻辑:
     1. 获取基金历史日线净值（从start_date到end_date）
-    2. 对每一天(除第一天外)，查询当天的市场情绪信号
-    3. 根据信号 + 仓位模型生成当日操作建议
+    2. 预计算整个回测区间的市场信号（数据库优先 → 实时计算降级）
+    3. 对每一天(除第一天外)，根据信号生成操作建议
     4. 计算每日持仓市值 = 前日持仓市值 * (1 + 日收益率) + 当日操作金额
     5. 返回完整的每日日志
     """
@@ -486,13 +637,28 @@ async def _run_daily_tracking_backtest(
             "pct_chg": float(item.get("pct_chg", 0) or 0),
         })
 
-    # Step 2: 逐日计算
+    # Step 2: 预计算信号 — 数据库优先，实时计算降级
     signal_index_code = "SH000300"  # 基金回测始终使用沪深300信号
-    portfolio_value = req.initial_capital
-    daily_records = []
 
-    # 基准线（买入不动）
-    benchmark_nav_start = nav_data[0]["nav"] if nav_data else 1.0
+    # 2a. 先尝试从数据库批量获取信号（快）
+    signal_map_db = await _get_real_signal_data(signal_index_code, req.start_date, req.end_date, session)
+
+    # 2b. 如果数据库信号覆盖率 < 50%，则用实时计算补充/替代（避免全是B/50.0）
+    signal_map = {}
+    nav_dates = set(item["date"] for item in nav_data)
+    db_coverage = len(set(signal_map_db.keys()) & nav_dates) / max(len(nav_dates), 1) if signal_map_db else 0
+
+    if db_coverage >= 0.5:
+        # 数据库覆盖率足够，使用数据库信号
+        signal_map = signal_map_db
+        _logger.info("回测信号: 数据库覆盖率 %.0f%%，使用数据库信号", db_coverage * 100)
+    else:
+        # 数据库覆盖率不足，实时计算信号
+        signal_map = await _compute_signals_from_index(signal_index_code, req.start_date, req.end_date)
+        _logger.info("回测信号: 数据库覆盖率 %.0f%%不足，使用实时计算信号(%d天)", db_coverage * 100, len(signal_map))
+        # 如果实时计算也失败，仍然尝试数据库（即使覆盖率低，也比全是B好）
+        if not signal_map and signal_map_db:
+            signal_map = signal_map_db
 
     for i, day in enumerate(nav_data):
         date = day["date"]
@@ -507,8 +673,9 @@ async def _run_daily_tracking_backtest(
             signal_score = None
             daily_return_pct = 0.0
         else:
-            # 获取当天信号
-            signal_info = await _get_signal_for_date(date, signal_index_code, session)
+            # 获取当天信号 — 从预计算的signal_map中查找
+            date_key = date.replace("-", "") if "-" in date else date
+            signal_info = signal_map.get(date_key, {"signal_level": "B", "composite_score": 50.0})
             signal_level = signal_info.get("signal_level")
             signal_score = signal_info.get("composite_score")
 
