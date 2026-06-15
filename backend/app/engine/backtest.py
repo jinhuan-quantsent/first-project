@@ -186,7 +186,6 @@ class BacktestEngine:
         # 初始状态
         cash = config.initial_capital
         shares = 0.0
-        total_invested = config.initial_capital
         prev_equity = config.initial_capital
 
         # 买入持有基准
@@ -231,7 +230,7 @@ class BacktestEngine:
             portfolio_value = cash + shares * close
             position_value = shares * close
             position_ratio = position_value / portfolio_value if portfolio_value > 0 else 0
-            total_return_rate = (portfolio_value - total_invested) / total_invested if total_invested > 0 else 0
+            total_return_rate = (portfolio_value - config.initial_capital) / config.initial_capital if config.initial_capital > 0 else 0
 
             if portfolio_value > peak_portfolio_value:
                 peak_portfolio_value = portfolio_value
@@ -318,7 +317,6 @@ class BacktestEngine:
                         actual_buy = buy_amount - commission
                         buy_shares = actual_buy / close
                         shares += buy_shares
-                        total_invested += buy_amount
                         cash -= buy_amount
                         action_text = f"加仓 ¥{buy_amount:,.0f}"
                         trade_record = TradeRecord(
@@ -383,7 +381,6 @@ class BacktestEngine:
                         actual_buy = buy_amount - commission
                         buy_shares = actual_buy / close
                         shares += buy_shares
-                        total_invested += buy_amount
                         cash -= buy_amount
                         action_text = f"回调加仓 ¥{buy_amount:,.0f}"
                         pullback_buys += 1
@@ -402,7 +399,6 @@ class BacktestEngine:
                         actual_buy = buy_amount - commission
                         buy_shares = actual_buy / close
                         shares += buy_shares
-                        total_invested += buy_amount
                         cash -= buy_amount
                         action_text = f"偏离加仓 ¥{buy_amount:,.0f}"
                         deviation_buys += 1

@@ -66,12 +66,13 @@ function formatChangeRate(v: number): { text: string; cls: string } {
    Mock 数据生成器
    为详情面板生成合理的 mock 数据
    ============================================================ */
-function generateMockDetailData(
+function buildRealDetailData(
   item: PortfolioItem,
-  signal: { signalLevel: SignalLevel; confidenceStars: number } | undefined,
+  signal: { signalLevel: SignalLevel; confidenceStars: number; factorDetails?: any[] } | undefined,
   navHistory: number[] | undefined,
   topStocks: { name: string; pct: number; change: number }[] | undefined,
   evaluation: any | undefined,
+  sentimentDetail: any | undefined,
 ): PositionDetailData {
   const signalLevel = signal?.signalLevel ?? 'B';
   const signalLabel = SIGNAL_LABELS[signalLevel] ?? '中性';
@@ -79,6 +80,46 @@ function generateMockDetailData(
     signalLevel === 'S+' || signalLevel === 'S' ? '加仓' :
     signalLevel === 'D' || signalLevel === 'E' ? '减仓' :
     signalLevel === 'A' ? '买入' : '持有';
+
+  // 从 V5 因子详情构建推荐理由
+  const factorNames: Record<string, string> = {
+    VOL: '波动率', TURN: '换手率', RATIO: '涨跌比', NEWF: '新高占比',
+    MARGIN: '融资融券', SPREAD: '股债利差', RSI: 'RSI指标',
+    FLOW: '北向资金', ETF: 'ETF流入', POS: '基金仓位', NBF: '非银融资',
+    PCR: '看跌看涨比', SHIBOR: 'Shibor利率',
+  };
+
+  let recommendationReason = '';
+  if (sentimentDetail?.factors && Array.isArray(sentimentDetail.factors)) {
+    const topFactors = [...sentimentDetail.factors]
+      .sort((a: any, b: any) => (b.sigmoid_score || b.raw_score || 0) - (a.sigmoid_score || a.raw_score || 0))
+      .slice(0, 3);
+    const factorTexts = topFactors.map((f: any) =>
+      `${factorNames[f.name] || f.name}${Math.round((f.sigmoid_score || f.raw_score || 0) * 100)}分`
+    );
+    recommendationReason = `基于${signalLabel}信号分析，当前市场情绪处于${signalLabel}区间(${signal?.confidenceStars ?? 3}星置信)。${factorTexts.join('+')}触发${signalLabel}信号，建议${operationTag}。该基金近期表现${item.return_rate >= 0 ? '优于' : '弱于'}基准${Math.abs(item.return_rate).toFixed(1)}%，${operationTag === '加仓' ? '逆向操作逢低布局' : operationTag === '减仓' ? '止盈减仓控制风险' : '维持当前仓位观察'}。`;
+  } else {
+    recommendationReason = `基于${signalLabel}信号分析，当前市场情绪处于${signalLabel}区间(${signal?.confidenceStars ?? 3}星置信)，建议${operationTag}。该基金近期${item.return_rate >= 0 ? '表现优于基准' : '弱于基准'}${Math.abs(item.return_rate).toFixed(1)}%。`;
+  }
+
+  // 从 evaluation 构建 趋势判断
+  const shortTerm = evaluation?.short_term
+    ? { label: evaluation.short_term.label || evaluation.short_term.judgment || '中性', reason: evaluation.short_term.reason || `${evaluation.short_term.period || '短期'}: ${evaluation.short_term.return_pct?.toFixed(2) ?? 0}%` }
+    : { label: signalLevel === 'S+' || signalLevel === 'S' ? '看多' : signalLevel === 'E' ? '看空' : '中性', reason: '基于信号推断' };
+
+  const midTerm = evaluation?.mid_term
+    ? { label: evaluation.mid_term.label || evaluation.mid_term.judgment || '中性', reason: evaluation.mid_term.reason || `${evaluation.mid_term.period || '中期'}: ${evaluation.mid_term.return_pct?.toFixed(2) ?? 0}%` }
+    : { label: '中性', reason: '数据不足' };
+
+  const longTerm = evaluation?.long_term
+    ? { label: evaluation.long_term.label || evaluation.long_term.judgment || '长期配置', reason: evaluation.long_term.reason || '建议长期持有' }
+    : { label: '长期配置', reason: '数据不足' };
+
+  // 从 daily_return + signal 构建 今日评估
+  const todayEvaluation = `净值估${item.daily_return >= 0 ? '增' : '减'}${Math.abs(item.daily_return).toFixed(2)}%，${signalLabel}信号${signal?.confidenceStars ?? 3}星置信度`;
+
+  // complianceStars 从 confidence_stars 推算（5星→4.8, 4星→4.5, 3星→4.0）
+  const complianceStars = Math.max(1, Math.min(5, (signal?.confidenceStars ?? 3) * 0.95 + 1));
 
   return {
     fundCode: item.fund_code,
@@ -89,30 +130,19 @@ function generateMockDetailData(
     holdingReturnRate: item.return_rate,
     signalLevel,
     confidenceStars: signal?.confidenceStars ?? 3,
-    signalReason: `${signalLevel}·${signalLabel}，近期波动较大`,
+    signalReason: `${signalLevel}·${signalLabel}，${operationTag === '加仓' ? '逆向加仓机会' : operationTag === '减仓' ? '止盈减仓信号' : '维持持有'}`,
 
-    complianceStars: 4.5,
+    complianceStars,
     complianceDirection: 'new',
     operationTag,
-    recommendationReason: `基于${signalLabel}信号分析，当前市场情绪处于${signalLabel}区间，建议${operationTag}。该基金近期表现${item.return_rate >= 0 ? '优于' : '弱于'}基准，仓位调整需谨慎。`,
+    recommendationReason,
     updateNote: `更新市值${formatMoney(item.market_value)}（${item.return_rate >= 0 ? '涨' : '跌'}${Math.abs(item.return_rate).toFixed(1)}%）`,
 
-    winRate: 72 + Math.floor(Math.random() * 16),
-    winRateDetail: `近1年${8 + Math.floor(Math.random() * 8)}场博弈`,
-    performanceRecords: [
-      { date: '2024-06-18', signal: 'S+', operation: '减仓', correctUp: true, correctDown: false, returnPct: -9.17, reason: '触发预警，51周新高分警惕!' },
-      { date: '2024-06-12', signal: '✓', operation: '减仓', correctUp: true, correctDown: false, returnPct: -47.3, reason: '剧烈波动分散降低风险+2%' },
-      { date: '2024-06-05', signal: '⚠', operation: '持有', correctUp: false, correctDown: true, returnPct: 8.3, reason: '新能源行情，小幅减仓锁定收益' },
-      { date: '2024-05-28', signal: 'S', operation: '加仓', correctUp: true, correctDown: false, returnPct: 3.2, reason: '底部信号确认，分批加仓' },
-      { date: '2024-05-20', signal: '△', operation: '持有', correctUp: false, correctDown: true, returnPct: -1.5, reason: '市场观望期，维持仓位' },
-    ],
+    winRate: 0,  // 暂无真实数据
+    winRateDetail: '',
+    performanceRecords: [],  // 暂无真实数据，显示空列表
 
-    tradeRecords: [
-      { date: '2024-06-18', type: '买入', amount: 15000, nav: 1.7140, fee: 127.88 },
-      { date: '2024-05-15', type: '买入', amount: 20000, nav: 1.1170, fee: 148.21 },
-      { date: '2024-04-02', type: '卖出', amount: 16600, nav: 1.1740, fee: 79.23 },
-      { date: '2024-03-13', type: '持有', amount: 122, nav: 0, fee: 0 },
-    ],
+    tradeRecords: [],  // 暂无真实数据，显示空列表
 
     navHistory: navHistory?.map((nav, i) => ({
       date: new Date(Date.now() - (navHistory.length - i) * 86400000).toISOString().slice(0, 10),
@@ -126,24 +156,15 @@ function generateMockDetailData(
         s.name.includes('金山') ? '办公软件龙头，AI赋能收入增速预期' :
         s.name.includes('中兴') ? '通信设备主业，产研投研能力领先' :
         `${s.name}核心标的`,
-    })) ?? [
-      { name: '中微公司', pct: 9.82, description: '半导体设备龙头，国产替代核心标的' },
-      { name: '金山办公', pct: 8.45, description: '办公软件龙头，AI赋能收入增速预期' },
-      { name: '中兴通讯', pct: 7.43, description: '通信设备主业，产研投研能力领先' },
-      { name: '兆易创新', pct: 6.21, description: '存储芯片龙头，受益AI算力需求' },
-    ],
+    })) ?? [],
 
-    morningStarRating: 4,
-    ratingDetails: [
-      '近1年夏普比率排名靠前',
-      'T2指数排名处于前30%',
-      '波动率低于同类平均',
-    ],
+    morningStarRating: 0,  // 暂无真实数据
+    ratingDetails: [],  // 暂无真实数据
 
-    todayEvaluation: `净值估${item.daily_return >= 0 ? '增' : '减'}${Math.abs(item.daily_return).toFixed(1)}%，半导体板块全线回暖`,
-    shortTerm: { label: '看多', reason: '板块轮动' },
-    midTerm: { label: '看多', reason: 'AI算力' },
-    longTerm: { label: '看多', reason: '半导体' },
+    todayEvaluation,
+    shortTerm,
+    midTerm,
+    longTerm,
   };
 }
 
@@ -303,7 +324,7 @@ export default function PortfolioV5() {
   // API 数据状态
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [items, setItems] = useState<PortfolioItem[]>([]);
-  const [signals, setSignals] = useState<Record<string, { signalLevel: SignalLevel; confidenceStars: number }>>({});
+  const [signals, setSignals] = useState<Record<string, { signalLevel: SignalLevel; confidenceStars: number; factorDetails?: any[] }>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -311,6 +332,7 @@ export default function PortfolioV5() {
   const [navHistories, setNavHistories] = useState<Record<string, number[]>>({});
   const [topStocksMap, setTopStocksMap] = useState<Record<string, { name: string; pct: number; change: number }[]>>({});
   const [evaluationsMap, setEvaluationsMap] = useState<Record<string, any>>({});
+  const [sentimentDetailsMap, setSentimentDetailsMap] = useState<Record<string, any>>({});
 
   const toggleExpand = useCallback((id: number) => {
     setExpandedId(prev => prev === id ? null : id);
@@ -348,7 +370,8 @@ export default function PortfolioV5() {
                 return [item.fund_code, {
                   signalLevel: sentiment.signal_level as SignalLevel,
                   confidenceStars: sentiment.confidence_stars,
-                }] as [string, { signalLevel: SignalLevel; confidenceStars: number }];
+                  factorDetails: sentiment.factor_details || [],
+                }] as [string, { signalLevel: SignalLevel; confidenceStars: number; factorDetails?: any[] }];
               } catch {
                 return null;
               }
@@ -370,7 +393,7 @@ export default function PortfolioV5() {
 
         if (cancelled) return;
 
-        const signalMap: Record<string, { signalLevel: SignalLevel; confidenceStars: number }> = {};
+        const signalMap: Record<string, { signalLevel: SignalLevel; confidenceStars: number; factorDetails?: any[] }> = {};
         signalEntries.forEach((entry) => {
           if (entry) signalMap[entry[0]] = entry[1];
         });
@@ -380,6 +403,7 @@ export default function PortfolioV5() {
         const realNavHistories: Record<string, number[]> = {};
         const realTopStocks: Record<string, { name: string; pct: number; change: number }[]> = {};
         const realEvaluations: Record<string, any> = {};
+        const realSentimentDetails: Record<string, any> = {};
 
         detailEntries.forEach((entry) => {
           if (!entry) return;
@@ -419,11 +443,17 @@ export default function PortfolioV5() {
               },
             };
           }
+
+          // 提取情绪因子详情
+          if (detail.sentiment_detail || detail.factors) {
+            realSentimentDetails[code] = detail.sentiment_detail || { factors: detail.factors };
+          }
         });
 
         setNavHistories(realNavHistories);
         setTopStocksMap(realTopStocks);
         setEvaluationsMap(realEvaluations);
+        setSentimentDetailsMap(realSentimentDetails);
       } catch (err: any) {
         if (!cancelled) {
           setError(err?.message || '加载持仓数据失败');
@@ -494,12 +524,13 @@ export default function PortfolioV5() {
         ) : (
           items.map(item => {
             const isExpanded = expandedId === item.id;
-            const detailData = generateMockDetailData(
+            const detailData = buildRealDetailData(
               item,
               signals[item.fund_code],
               navHistories[item.fund_code],
               topStocksMap[item.fund_code],
               evaluationsMap[item.fund_code],
+              { factors: signals[item.fund_code]?.factorDetails },
             );
 
             return (

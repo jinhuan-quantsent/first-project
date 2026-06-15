@@ -272,7 +272,11 @@ export default function PositionDetailPanel({ data, onCollapse }: PositionDetail
             <span className="text-xs text-gray-500">
               {data.complianceDirection === 'new' ? '▲ 新仓' : '↓ 最近清仓'}
             </span>
-            <StarRating value={data.complianceStars} />
+            {data.complianceStars > 0 ? (
+              <StarRating value={data.complianceStars} />
+            ) : (
+              <span className="text-[10px] text-gray-400">合规评级暂无数据</span>
+            )}
             <span className={`text-xs px-2 py-0.5 rounded font-medium ${
               data.operationTag === '加仓' ? 'bg-red-50 text-red-600' :
               data.operationTag === '减仓' ? 'bg-green-50 text-green-600' :
@@ -428,15 +432,21 @@ export default function PositionDetailPanel({ data, onCollapse }: PositionDetail
             <Award className="w-3.5 h-3.5 text-gray-400" />
             <span className="text-xs font-medium text-gray-600">基础评级</span>
           </div>
-          <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-gray-500">晨星评级</span>
-              <StarRating value={data.morningStarRating} />
+          {data.morningStarRating > 0 || data.ratingDetails.length > 0 ? (
+            <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
+              {data.morningStarRating > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500">晨星评级</span>
+                  <StarRating value={data.morningStarRating} />
+                </div>
+              )}
+              {data.ratingDetails.map((detail, i) => (
+                <p key={i} className="text-[10px] text-gray-400">{detail}</p>
+              ))}
             </div>
-            {data.ratingDetails.map((detail, i) => (
-              <p key={i} className="text-[10px] text-gray-400">{detail}</p>
-            ))}
-          </div>
+          ) : (
+            <p className="text-[10px] text-gray-300 text-center py-2">基础评级暂无数据</p>
+          )}
         </div>
 
         {/* ====== 子区8: 今日评估 + 趋势判断 ====== */}
