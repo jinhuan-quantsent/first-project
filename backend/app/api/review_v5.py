@@ -660,6 +660,13 @@ async def _run_daily_tracking_backtest(
         if not signal_map and signal_map_db:
             signal_map = signal_map_db
 
+    # Step 3: 逐日计算
+    portfolio_value = req.initial_capital
+    daily_records = []
+
+    # 基准线（买入不动）
+    benchmark_nav_start = nav_data[0]["nav"] if nav_data else 1.0
+
     for i, day in enumerate(nav_data):
         date = day["date"]
         nav = day["nav"]
