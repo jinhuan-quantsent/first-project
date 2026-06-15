@@ -3,8 +3,8 @@
  * 持仓汇总 + 可展开条目 + 执行按钮 + 历史建议 + 交易记录
  */
 import { useState, useCallback, useEffect } from 'react';
-import type { PortfolioItem, PortfolioSummary, SignalLevel } from '../../types';
-import { Plus, TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import type { PortfolioItem, PortfolioSummary, SignalLevel } from '../types';
+import { Plus, TrendingUp, TrendingDown, Minus, Briefcase } from 'lucide-react';
 import { clsx } from 'clsx';
 import ExecutionButton from '../components/fundsearch/ExecutionButton';
 import {
@@ -179,14 +179,25 @@ export default function PortfolioV5() {
 
         if (cancelled) return;
 
-        setSummary(portfolioData.summary);
-        setItems(portfolioData.items);
-        setAdvice(adviceData.items);
-        setTrades(tradeData.items);
+        // 防御性处理：确保 portfolioData 结构正确
+        const safePortfolioData = portfolioData || { items: [], summary: null };
+        const safeItems = Array.isArray(safePortfolioData.items) ? safePortfolioData.items : [];
+        const safeSummary = safePortfolioData.summary || null;
+
+        setSummary(safeSummary);
+        setItems(safeItems);
+        setAdvice(adviceData?.items ?? []);
+        setTrades(tradeData?.items ?? []);
+
+        // 空列表时跳过信号获取
+        if (safeItems.length === 0) {
+          if (!cancelled) setLoading(false);
+          return;
+        }
 
         // 并行获取每只基金的V5信号
         const signalEntries = await Promise.all(
-          portfolioData.items.map(async (item) => {
+          safeItems.map(async (item) => {
             try {
               const sentiment = await fetchV5Sentiment(item.fund_code);
               return [item.fund_code, {
@@ -298,16 +309,24 @@ export default function PortfolioV5() {
       {/* 持仓列表 */}
       {tab === 'positions' && (
         <div className="card overflow-hidden">
-          {items.map(item => (
-            <PositionItem
-              key={item.id}
-              item={item}
-              expanded={expandedId === item.id}
-              onToggle={() => toggleExpand(item.id)}
-              signal={signals[item.fund_code]}
-              onExecute={() => handleExecute(item)}
-            />
-          ))}
+          {items.length === 0 ? (
+            <div className="p-8 text-center">
+              <Briefcase className="w-8 h-8 text-gray-300 mx-auto mb-2" />
+              <p className="text-gray-500 text-sm font-medium">暂无持仓数据</p>
+              <p className="text-[10px] text-gray-300 mt-1">添加持仓基金后，即可查看仓位建议和交易操作</p>
+            </div>
+          ) : (
+            items.map(item => (
+              <PositionItem
+                key={item.id}
+                item={item}
+                expanded={expandedId === item.id}
+                onToggle={() => toggleExpand(item.id)}
+                signal={signals[item.fund_code]}
+                onExecute={() => handleExecute(item)}
+              />
+            ))
+          )}
         </div>
       )}
 
@@ -315,7 +334,10 @@ export default function PortfolioV5() {
       {tab === 'advice' && (
         <div className="card p-4 space-y-2">
           {advice.length === 0 ? (
-            <p className="text-gray-400 text-xs text-center py-4">暂无历史建议</p>
+            <div className="py-6 text-center">
+              <p className="text-gray-500 text-sm font-medium">暂无历史建议</p>
+              <p className="text-[10px] text-gray-300 mt-1">执行仓位调整后，建议记录将在此展示</p>
+            </div>
           ) : (
             advice.map((a: any, i: number) => (
               <div key={i} className="flex items-center gap-3 text-sm border-b border-gray-50 pb-2">
@@ -338,7 +360,10 @@ export default function PortfolioV5() {
       {tab === 'trades' && (
         <div className="card p-4 space-y-2">
           {trades.length === 0 ? (
-            <p className="text-gray-400 text-xs text-center py-4">暂无交易记录</p>
+            <div className="py-6 text-center">
+              <p className="text-gray-500 text-sm font-medium">暂无交易记录</p>
+              <p className="text-[10px] text-gray-300 mt-1">执行仓位操作后，交易记录将在此展示</p>
+            </div>
           ) : (
             trades.map((t: any, i: number) => (
               <div key={i} className="flex items-center gap-3 text-sm border-b border-gray-50 pb-2">

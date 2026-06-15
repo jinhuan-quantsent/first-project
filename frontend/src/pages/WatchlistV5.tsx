@@ -3,8 +3,8 @@
  * 自适应网格小卡片 + 点击展开详情（非跳转）
  */
 import { useState, useCallback, useEffect } from 'react';
-import type { WatchlistItem, SignalLevel } from '../../types';
-import { Star, Trash2, ChevronDown, ChevronUp, TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import type { WatchlistItem, SignalLevel } from '../types';
+import { Star, Trash2, ChevronDown, ChevronUp, TrendingUp, TrendingDown, Minus, Search } from 'lucide-react';
 import { clsx } from 'clsx';
 import { fetchWatchlistV5, removeWatchlistV5 } from '../api/watchlistV5';
 import { fetchV5Sentiment } from '../api/marketV5';
@@ -140,11 +140,20 @@ export default function WatchlistV5() {
       try {
         const data = await fetchWatchlistV5();
         if (cancelled) return;
-        setItems(data);
+
+        // 防御性处理：确保 data 是数组
+        const safeData = Array.isArray(data) ? data : [];
+        setItems(safeData);
+
+        // 空列表时跳过信号获取
+        if (safeData.length === 0) {
+          if (!cancelled) setLoading(false);
+          return;
+        }
 
         // 并行获取每只基金的V5信号
         const signalEntries = await Promise.all(
-          data.map(async (item) => {
+          safeData.map(async (item) => {
             try {
               const sentiment = await fetchV5Sentiment(item.fund_code);
               return [item.fund_code, {
@@ -235,8 +244,8 @@ export default function WatchlistV5() {
       {items.length === 0 ? (
         <div className="card p-8 text-center">
           <Star className="w-8 h-8 text-gray-300 mx-auto mb-2" />
-          <p className="text-gray-400 text-sm">暂无自选基金</p>
-          <p className="text-[10px] text-gray-300 mt-1">在基金查询页点击★添加自选</p>
+          <p className="text-gray-500 text-sm font-medium">暂无自选基金</p>
+          <p className="text-[10px] text-gray-300 mt-1">在基金查询页点击 ★ 添加自选基金，即可在此查看实时信号</p>
         </div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">

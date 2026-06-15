@@ -2,10 +2,11 @@
  * Backtest - V5.0 历史回溯页
  * 方案管理栏 + 5类折叠参数面板 + 回测结果展示
  */
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { SlidersHorizontal, Save, Trash2, Play, RotateCcw, TrendingUp } from 'lucide-react';
 import { clsx } from 'clsx';
 import { runBacktestV5, saveBacktestStrategyV5, deleteBacktestStrategyV5 } from '../api/backtest';
+import client from '../api/client';
 
 /* ============================================================
    类型
@@ -23,6 +24,19 @@ interface BacktestStrategy {
   };
 }
 
+/** API 返回的策略格式（id 为字符串） */
+interface ApiStrategy {
+  id: string;
+  name: string;
+  description: string;
+  params: {
+    buy_signals?: string[];
+    sell_signals?: string[];
+    hold_signals?: string[];
+  };
+  is_default: boolean;
+}
+
 interface BacktestResult {
   total_return: number;
   annual_return: number;
@@ -31,6 +45,40 @@ interface BacktestResult {
   sharpe: number;
   benchmark_return: number;
   equity_curve?: { date: string; value: number }[];
+}
+
+const DEFAULT_PARAMS: BacktestStrategy['params'] = {
+  signal_boundaries: [12, 25, 38, 52, 65, 80],
+  factor_weights: {},
+  sigmoid_params: {},
+  position_matrix: [],
+  risk_params: { cost_threshold: 0.015, frequency_days: 7, max_adjustment: 0.20 },
+};
+
+/** 将 API 返回的策略转换为前端格式 */
+function mapApiStrategy(s: ApiStrategy, idx: number): BacktestStrategy {
+  return {
+    id: idx + 1,
+    name: s.name,
+    is_active: s.is_default,
+    params: { ...DEFAULT_PARAMS },
+  };
+}
+
+/** 获取 API 策略列表 */
+async function fetchStrategiesFromApi(): Promise<ApiStrategy[]> {
+  try {
+    const res = await client.get<{ code: number; data: ApiStrategy[]; message: string }>(
+      '/api/v5/backtest/strategies',
+    );
+    if (res.data.code === 0 && Array.isArray(res.data.data)) {
+      return res.data.data;
+    }
+    return [];
+  } catch {
+    // 静默失败，使用硬编码备用策略
+    return [];
+  }
 }
 
 /* ============================================================
@@ -127,7 +175,8 @@ function BacktestResultPanel({ result }: { result: BacktestResult | null }) {
     return (
       <div className="card p-8 text-center">
         <TrendingUp className="w-8 h-8 text-gray-300 mx-auto mb-2" />
-        <p className="text-gray-400 text-sm">点击「运行回测」查看结果</p>
+        <p className="text-gray-500 text-sm font-medium">点击「运行回测」查看结果</p>
+        <p className="text-[10px] text-gray-300 mt-1">基于 V5.0 信号系统进行历史回测</p>
       </div>
     );
   }
@@ -213,14 +262,6 @@ function BacktestResultPanel({ result }: { result: BacktestResult | null }) {
 /* ============================================================
    主页面
    ============================================================ */
-const DEFAULT_PARAMS: BacktestStrategy['params'] = {
-  signal_boundaries: [12, 25, 38, 52, 65, 80],
-  factor_weights: {},
-  sigmoid_params: {},
-  position_matrix: [],
-  risk_params: { cost_threshold: 0.015, frequency_days: 7, max_adjustment: 0.20 },
-};
-
 export default function Backtest() {
   const [strategies, setStrategies] = useState<BacktestStrategy[]>([
     { id: 1, name: '稳健方案', is_active: true,  params: { ...DEFAULT_PARAMS, risk_params: { cost_threshold: 0.015, frequency_days: 7, max_adjustment: 0.20 } } },
@@ -233,6 +274,36 @@ export default function Backtest() {
   const [running,      setRunning]     = useState(false);
   const [result,       setResult]      = useState<BacktestResult | null>(null);
   const [error,        setError]       = useState<string | null>(null);
+  const [loadingStrategies, setLoadingStrategies] = useState(false);
+
+  /** 从 API 加载策略列表 */
+  useEffect(() => {
+    let cancelled = false;
+    const loadStrategies = async () => {
+      setLoadingStrategies(true);
+      try {
+        const apiStrategies = await fetchStrategiesFromApi();
+        if (cancelled) return;
+        if (apiStrategies.length > 0) {
+          const mapped = apiStrategies.map(mapApiStrategy);
+          setStrategies(mapped);
+          const defaultStrat = mapped.find(s => s.is_active);
+          if (defaultStrat) {
+            setActiveId(defaultStrat.id);
+          } else if (mapped.length > 0) {
+            setActiveId(mapped[0].id);
+          }
+        }
+        // 如果 API 返回空，保留硬编码的备用策略
+      } catch {
+        // 静默失败，保留默认策略
+      } finally {
+        if (!cancelled) setLoadingStrategies(false);
+      }
+    };
+    loadStrategies();
+    return () => { cancelled = true; };
+  }, []);
 
   const activeStrategy = strategies.find((s) => s.id === activeId) ?? null;
 
@@ -309,7 +380,10 @@ export default function Backtest() {
     <div className="max-w-5xl mx-auto space-y-4">
       <div>
         <h1 className="text-xl font-bold text-gray-800">历史回溯 V5.0</h1>
-        <p className="text-xs text-gray-400 mt-0.5">方案管理 · 参数调节 · 策略回测</p>
+        <p className="text-xs text-gray-400 mt-0.5">
+          方案管理 · 参数调节 · 策略回测
+          {loadingStrategies && <span className="ml-2 text-brand-500">加载策略中...</span>}
+        </p>
       </div>
 
       {/* 方案管理栏 */}
