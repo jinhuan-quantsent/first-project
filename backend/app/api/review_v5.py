@@ -1,6 +1,6 @@
 """
-回测接口 — V5.0
-策略回测 + 绩效评估
+回测接口 — V5.0 扩展版
+策略回测 + 绩效评估 + 5类参数 + 风控统计
 
 数据源：
 - 指数日线：Tushare index_daily
@@ -24,6 +24,8 @@ from app.engine.backtest import (
     BacktestConfig,
     BacktestResult,
     BacktestMetrics,
+    ActionRule,
+    RiskParams,
 )
 from app.models.factor_history import FactorHistory
 from app.models.market_sentiment import MarketSentiment
@@ -36,13 +38,42 @@ router = APIRouter(prefix="/api/v5/backtest")
 # Pydantic 模型
 # ============================================================
 
+class ActionMappingItem(BaseModel):
+    """行动映射单项"""
+    type: str = "hold"
+    mult: float = 0.0
+    label: str = ""
+
 class BacktestRequest(BaseModel):
-    """回测请求"""
+    """回测请求 — 5类参数"""
+    # 基础参数
     index_code: str = "SH000300"
     start_date: str = "2024-01-01"
     end_date: str = "2024-12-31"
     initial_capital: float = 100000.0
     signal_strategy: str = "v5_signal"
+
+    # Category 1: Signal Mapping
+    signal_boundaries: list[float] = [12.0, 25.0, 38.0, 52.0, 65.0, 80.0]
+    signal_lag_days: int = 1
+
+    # Category 2: Factor Weights
+    factor_weights: dict[str, float] = {}
+    factor_enabled: dict[str, bool] = {}
+
+    # Category 3: Action Mapping
+    action_mapping: dict[str, ActionMappingItem] = {}
+
+    # Category 4: Factor Engine
+    quantile_window: int = 252
+    sigmoid_k: float = 3.0
+    composite_method: str = "weighted_sum"
+    neutral_score: float = 50.0
+
+    # Category 5: Position & Risk
+    risk_params: dict = {}
+
+    # 向后兼容
     buy_signals: list[str] = ["S+", "S", "A"]
     sell_signals: list[str] = ["D", "E"]
     hold_signals: list[str] = ["B", "C"]
@@ -66,12 +97,7 @@ async def _get_real_price_data(
     start_date: str,
     end_date: str,
 ) -> list[dict]:
-    """
-    从Tushare获取真实指数日线数据
-
-    Returns:
-        [{date, close, signal_level, volume, pct_chg}, ...]
-    """
+    """从Tushare获取真实指数日线数据"""
     ts_code = _INDEX_CODE_MAP.get(index_code, index_code.replace("SH", "").replace("SZ", "") + ".SH")
 
     try:
@@ -98,7 +124,7 @@ async def _get_real_price_data(
                 "close": float(row["close"]),
                 "pct_chg": float(row.get("pct_chg", 0) or 0),
                 "volume": float(row.get("vol", 0) or 0),
-                "signal_level": "B",  # 默认持有，后面用factor_history覆盖
+                "signal_level": "B",
             })
 
         return result
@@ -115,14 +141,8 @@ async def _get_real_signal_data(
     end_date: str,
     session: AsyncSession,
 ) -> dict[str, str]:
-    """
-    从factor_history获取V5信号等级
-
-    Returns:
-        {trade_date: signal_level, ...}
-    """
+    """从factor_history获取V5信号等级"""
     try:
-        # 查询market_sentiment表中的signal_level
         stmt = select(
             MarketSentiment.trade_date,
             MarketSentiment.signal_level,
@@ -140,7 +160,7 @@ async def _get_real_signal_data(
         if rows:
             return {str(row[0]): str(row[1]) for row in rows if row[1]}
 
-        # 如果market_sentiment没有数据，从factor_history的COMPOSITE因子推算
+        # 降级：从factor_history的COMPOSITE因子推算
         stmt2 = select(
             FactorHistory.trade_date,
             FactorHistory.raw_value,
@@ -159,22 +179,14 @@ async def _get_real_signal_data(
         if not rows2:
             return {}
 
-        # COMPOSITE分数 → 信号等级映射
         def score_to_signal(score: float) -> str:
-            if score >= 90:
-                return "S+"
-            elif score >= 80:
-                return "S"
-            elif score >= 65:
-                return "A"
-            elif score >= 40:
-                return "B"
-            elif score >= 25:
-                return "C"
-            elif score >= 10:
-                return "D"
-            else:
-                return "E"
+            if score >= 90: return "S+"
+            elif score >= 80: return "S"
+            elif score >= 65: return "A"
+            elif score >= 40: return "B"
+            elif score >= 25: return "C"
+            elif score >= 10: return "D"
+            else: return "E"
 
         return {str(row[0]): score_to_signal(float(row[1])) for row in rows2}
 
@@ -189,9 +201,7 @@ def _generate_mock_price_data(
     start_date: str,
     end_date: str,
 ) -> list[dict]:
-    """
-    生成 Mock 价格数据（降级使用）
-    """
+    """生成 Mock 价格数据"""
     import random
 
     random.seed(hash(index_code))
@@ -238,12 +248,12 @@ async def run_backtest(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """
-    运行策略回测
+    运行策略回测 — 支持5类参数
 
     数据源降级链：Tushare真实日线 + factor_history信号 → Mock
     """
     # 检查缓存
-    cache_k = f"backtest:{req.index_code}:{req.start_date}:{req.end_date}:{req.signal_strategy}"
+    cache_k = f"backtest:{req.index_code}:{req.start_date}:{req.end_date}:{req.signal_strategy}:{hash(str(req.risk_params))}"
     cached = await cache_get(cache_k)
     if cached is not None:
         return cached
@@ -261,27 +271,67 @@ async def run_backtest(
             if date_key in signal_map:
                 item["signal_level"] = signal_map[date_key]
     elif not price_data:
-        # 降级到Mock
         price_data = _generate_mock_price_data(req.index_code, req.start_date, req.end_date)
 
-    # 4. 运行回测引擎
+    # 4. 构建行动映射
+    action_mapping = {}
+    for signal, item in req.action_mapping.items():
+        action_mapping[signal] = ActionRule(
+            action_type=item.type,
+            multiplier=item.mult,
+            label=item.label,
+        )
+
+    # 5. 构建风控参数
+    rp = req.risk_params
+    risk_params = RiskParams(
+        max_position=rp.get("max_position", 0.95),
+        min_position=rp.get("min_position", 0.05),
+        stop_loss=rp.get("stop_loss", -0.15),
+        stop_loss_threshold=rp.get("stop_loss_threshold", 1.0),
+        stop_loss_reduce_pct=rp.get("stop_loss_reduce_pct", 50.0),
+        take_profit=rp.get("take_profit", 0.30),
+        take_profit_drawdown=rp.get("take_profit_drawdown", 0.10),
+        overheat_days=rp.get("overheat_days", 10),
+        overheat_factor=rp.get("overheat_factor", 0.7),
+        pullback_lower=rp.get("pullback_lower", -0.08),
+        pullback_buy_mult=rp.get("pullback_buy_mult", 0.5),
+        position_dev_lower=rp.get("position_dev_lower", -0.05),
+        position_dev_buy_mult=rp.get("position_dev_buy_mult", 0.3),
+        base_buy_amount=rp.get("base_buy_amount", 10000.0),
+    )
+
+    # 6. 构建配置
     config = BacktestConfig(
         index_code=req.index_code,
         start_date=req.start_date,
         end_date=req.end_date,
         initial_capital=req.initial_capital,
         signal_strategy=req.signal_strategy,
+        signal_boundaries=req.signal_boundaries,
+        signal_lag_days=req.signal_lag_days,
         buy_signals=req.buy_signals,
         sell_signals=req.sell_signals,
         hold_signals=req.hold_signals,
+        action_mapping=action_mapping if action_mapping else None,
+        risk_params=risk_params,
     )
 
+    # 7. 运行回测
     engine = BacktestEngine(config)
     result = engine.run(price_data)
 
-    # 5. 组装响应
+    # 8. 组装响应
     equity_curve = [
-        {"date": pt.date, "value": pt.equity, "position_pct": pt.position_pct}
+        {
+            "date": pt.date,
+            "value": pt.equity,
+            "position_pct": pt.position_pct,
+            "signal_level": pt.signal_level,
+            "action_text": pt.action_text,
+            "reason": pt.reason,
+            "is_risk_action": pt.is_risk_action,
+        }
         for pt in result.equity_curve
     ]
 
@@ -303,7 +353,19 @@ async def run_backtest(
         for t in result.trades
     ]
 
+    # daily_log 最多返回最近60条
+    daily_log = result.daily_log[-60:] if result.daily_log else []
+
     data_source_tag = "real" if price_data and signal_map else "mock"
+
+    # 操作汇总
+    buy_count = sum(1 for t in result.trades if t.trade_type == "buy")
+    sell_count = sum(1 for t in result.trades if t.trade_type == "sell")
+    risk_count = sum(1 for t in result.trades if t.trade_type == "risk_sell")
+
+    summary_text = f"加仓{buy_count}次·减仓{sell_count}次·风控{risk_count}次"
+    if result.risk_stats:
+        summary_text += f"·回调加仓{result.risk_stats.get('pullback_buys',0)}次·偏离加仓{result.risk_stats.get('deviation_buys',0)}次"
 
     response = {
         "code": 0,
@@ -314,10 +376,14 @@ async def run_backtest(
             "sharpe_ratio": result.metrics.sharpe_ratio,
             "win_rate": result.metrics.win_rate,
             "total_trades": result.metrics.total_trades,
+            "signal_accuracy": result.metrics.signal_accuracy,
             "benchmark_return": round((result.benchmark_curve[-1].equity / config.initial_capital - 1) * 100, 2) if result.benchmark_curve else 0,
             "equity_curve": equity_curve,
             "benchmark_curve": benchmark_curve,
             "trades": trades,
+            "daily_log": daily_log,
+            "risk_stats": result.risk_stats,
+            "summary_text": summary_text,
             "_data_source": data_source_tag,
             "index_code": req.index_code,
             "start_date": req.start_date,
@@ -337,11 +403,7 @@ async def get_signal_performance(
     days: int = Query(default=30),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """
-    信号绩效统计
-
-    基于factor_history真实数据统计最近N天的信号分布和准确率
-    """
+    """信号绩效统计"""
     cache_k = f"signal_perf:{index_code}:{days}"
     cached = await cache_get(cache_k)
     if cached is not None:
@@ -350,7 +412,6 @@ async def get_signal_performance(
     end_date = datetime.now().strftime("%Y%m%d")
     start_date = (datetime.now() - timedelta(days=days + 10)).strftime("%Y%m%d")
 
-    # 从market_sentiment查询历史信号
     stmt = select(MarketSentiment).where(
         and_(
             MarketSentiment.index_code == index_code,
@@ -374,7 +435,6 @@ async def get_signal_performance(
             "message": "ok",
         }
 
-    # 统计信号分布
     signal_counts = {}
     signals = []
     for r in records:
@@ -387,7 +447,6 @@ async def get_signal_performance(
             "confidence": r.confidence,
         })
 
-    # 信号分类
     buy_count = sum(signal_counts.get(s, 0) for s in ["S+", "S", "A"])
     sell_count = sum(signal_counts.get(s, 0) for s in ["D", "E"])
     hold_count = sum(signal_counts.get(s, 0) for s in ["B", "C"])
@@ -401,7 +460,7 @@ async def get_signal_performance(
             "buy_signals": buy_count,
             "sell_signals": sell_count,
             "hold_signals": hold_count,
-            "signals": signals[:10],  # 最近10条
+            "signals": signals[:10],
             "_data_source": "real",
         },
         "message": "ok",
@@ -416,9 +475,7 @@ async def get_strategies(
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """
-    获取可用回测策略列表
-    """
+    """获取可用回测策略列表"""
     strategies = [
         {
             "id": "v5_signal",
@@ -475,7 +532,7 @@ async def get_backtest_history(
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """获取回测历史列表（Stub - 返回空列表）"""
+    """获取回测历史列表（Stub）"""
     return {
         "code": 0,
         "data": {
