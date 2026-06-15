@@ -1,5 +1,5 @@
-import type { SignalLevel, SignalLabel, mapOldToNew } from '../../types';
-import { SIGNAL_COLORS } from '../../types';
+import type { SignalLevel, SignalLabel } from '../../types';
+import { mapOldToNew, SIGNAL_COLORS } from '../../types';
 import { clsx } from 'clsx';
 
 interface SignalBadgeProps {
