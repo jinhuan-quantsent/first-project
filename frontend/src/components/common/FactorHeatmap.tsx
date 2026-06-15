@@ -69,7 +69,7 @@ export default function FactorHeatmap({ factors, className }: FactorHeatmapProps
                 {f.direction === 'fear' ? '恐' : '贪'}
               </span>
             </div>
-            <p className="text-[9px] text-gray-300 mt-0.5">w={f.weight}</p>
+            <p className="text-[10px] text-gray-300 mt-0.5">w={f.weight}</p>
           </div>
         );
       })}

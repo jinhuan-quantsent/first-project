@@ -7,6 +7,9 @@ import SentimentBadge from '../common/SentimentBadge';
 import { Star, TrendingUp, Shield, X, ArrowLeft } from 'lucide-react';
 import { clsx } from 'clsx';
 
+/** 安全取数，防止 undefined/null 调用 .toFixed() 崩溃 */
+const safeNum = (v: number | undefined | null, fallback = 0): number => v ?? fallback;
+
 interface FundDetailPanelProps {
   fund: FundSearchItem;
   detail: FundDetail | null;
@@ -61,7 +64,7 @@ export default function FundDetailPanel({
           <h3 className="text-sm font-bold text-gray-800 truncate">
             {fund.fund_name}
           </h3>
-          <p className="text-[10px] text-gray-400 font-mono">
+          <p className="text-xs text-gray-400 font-mono">
             {fund.fund_code} · {fund.fund_type}
           </p>
         </div>
@@ -100,11 +103,11 @@ export default function FundDetailPanel({
                   ))}
                 </div>
               </div>
-              <p className="text-[10px] text-gray-400 mt-0.5">V5.0 综合情绪评分</p>
+              <p className="text-xs text-gray-400 mt-0.5">V5.0 综合情绪评分</p>
               <p className="text-xs text-gray-500 mt-1">
-                净值 {fund.nav.toFixed(4)} · 日收益{' '}
-                <span className={fund.daily_return >= 0 ? 'text-red-500' : 'text-green-500'}>
-                  {fund.daily_return >= 0 ? '+' : ''}{fund.daily_return.toFixed(2)}%
+                净值 {safeNum(fund.nav).toFixed(4)} · 日收益{' '}
+                <span className={safeNum(fund.daily_return) >= 0 ? 'text-red-500' : 'text-green-500'}>
+                  {safeNum(fund.daily_return) >= 0 ? '+' : ''}{safeNum(fund.daily_return).toFixed(2)}%
                 </span>
               </p>
             </div>
@@ -136,8 +139,8 @@ export default function FundDetailPanel({
             </div>
             <div>
               <p className="text-sm font-bold text-gray-800">{sentiment.advice.action}</p>
-              <p className="text-[10px] text-gray-500 mt-0.5">{sentiment.advice.reason}</p>
-              <p className="text-[10px] text-gray-400 mt-1">
+              <p className="text-xs text-gray-500 mt-0.5">{sentiment.advice.reason}</p>
+              <p className="text-xs text-gray-400 mt-1">
                 建议仓位：{Math.round(sentiment.advice.targetPositionPct * 100)}%
               </p>
             </div>
@@ -147,7 +150,7 @@ export default function FundDetailPanel({
         {/* 基金详情信息 */}
         {detail && (
           <div className="bg-gray-50 rounded-xl p-4 space-y-2">
-            <h4 className="text-[10px] font-bold text-gray-400 uppercase">基金信息</h4>
+            <h4 className="text-xs font-bold text-gray-400 uppercase">基金信息</h4>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
               <div>
                 <span className="text-gray-400">基金经理</span>
@@ -163,7 +166,7 @@ export default function FundDetailPanel({
               </div>
               <div>
                 <span className="text-gray-400">累计净值</span>
-                <p className="font-medium text-gray-700 font-mono">{detail.accumulated_nav.toFixed(4)}</p>
+                <p className="font-medium text-gray-700 font-mono">{safeNum(detail.accumulated_nav).toFixed(4)}</p>
               </div>
             </div>
           </div>

@@ -110,13 +110,13 @@ export default function DashboardV5() {
                          realFactor.sigmoid_score <= 40 ? 'text-green-500' : 'text-gray-600';
       return (
         <div key={def.name} className="bg-gray-50 rounded-lg p-2 text-center">
-          <p className="text-[10px] text-gray-400">{def.label}</p>
+          <p className="text-xs text-gray-400">{def.label}</p>
           <p className="text-xs font-mono text-gray-600">{def.name}</p>
-          <p className={`text-[10px] font-bold ${scoreColor}`}>
+          <p className={`text-xs font-bold ${scoreColor}`}>
             {realFactor.sigmoid_score.toFixed(1)}
           </p>
           <span className={clsx(
-            'text-[9px] px-1 py-0.5 rounded',
+            'text-[10px] px-1 py-0.5 rounded',
             realFactor.direction === 'fear' ? 'bg-red-100 text-red-500' : 'bg-green-100 text-green-500'
           )}>
             {realFactor.direction === 'fear' ? '恐惧' : '贪婪'}
@@ -127,10 +127,10 @@ export default function DashboardV5() {
     // 无真实数据时显示默认方向
     return (
       <div key={def.name} className="bg-gray-50 rounded-lg p-2 text-center opacity-60">
-        <p className="text-[10px] text-gray-400">{def.label}</p>
+        <p className="text-xs text-gray-400">{def.label}</p>
         <p className="text-xs font-mono text-gray-600">{def.name}</p>
         <span className={clsx(
-          'text-[9px] px-1 py-0.5 rounded',
+          'text-[10px] px-1 py-0.5 rounded',
           def.dir === 'fear' ? 'bg-red-100 text-red-500' : 'bg-green-100 text-green-500'
         )}>
           {def.dir === 'fear' ? '恐惧' : '贪婪'}
@@ -159,7 +159,7 @@ export default function DashboardV5() {
           >
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs text-gray-400">{idx.index_name}</span>
-              <span className="text-[10px] font-mono text-gray-300">{idx.index_code}</span>
+              <span className="text-xs font-mono text-gray-300">{idx.index_code}</span>
             </div>
             <div className="flex items-center gap-3">
               <div
@@ -183,7 +183,7 @@ export default function DashboardV5() {
                     ))}
                   </div>
                 </div>
-                <p className="text-[10px] text-gray-400 mt-0.5">
+                <p className="text-xs text-gray-400 mt-0.5">
                   体制: {idx.regime === 'bull' ? '牛市' : idx.regime === 'bear' ? '熊市' : idx.regime === 'extreme_volatility' ? '极端波动' : '震荡'}
                 </p>
               </div>
@@ -281,7 +281,7 @@ export default function DashboardV5() {
       <div className="card p-5">
         <h3 className="text-sm font-bold text-gray-700 mb-3">
           11因子引擎概览
-          {factorsLoading && <span className="ml-2 text-[10px] text-gray-400 font-normal">加载中...</span>}
+          {factorsLoading && <span className="ml-2 text-xs text-gray-400 font-normal">加载中...</span>}
         </h3>
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
           {FACTOR_DEFS.map(renderFactorCard)}

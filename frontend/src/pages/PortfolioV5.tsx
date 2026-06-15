@@ -37,23 +37,23 @@ function PortfolioSummaryCard({ data }: { data: PortfolioSummary }) {
   return (
     <div className="card p-4 grid grid-cols-2 md:grid-cols-4 gap-4">
       <div>
-        <p className="text-[10px] text-gray-400">总市值</p>
+        <p className="text-xs text-gray-400">总市值</p>
         <p className="text-lg font-bold text-gray-800">¥{(data.total_value / 10000).toFixed(2)}万</p>
       </div>
       <div>
-        <p className="text-[10px] text-gray-400">累计收益</p>
+        <p className="text-xs text-gray-400">累计收益</p>
         <p className={`text-lg font-bold ${returnClass}`}>
           {data.total_return >= 0 ? '+' : ''}¥{(data.total_return / 10000).toFixed(2)}万
         </p>
       </div>
       <div>
-        <p className="text-[10px] text-gray-400">今日收益</p>
+        <p className="text-xs text-gray-400">今日收益</p>
         <p className={`text-lg font-bold ${dailyClass}`}>
           {data.daily_return >= 0 ? '+' : ''}¥{data.daily_return.toFixed(0)}
         </p>
       </div>
       <div>
-        <p className="text-[10px] text-gray-400">核心/卫星比</p>
+        <p className="text-xs text-gray-400">核心/卫星比</p>
         <p className="text-lg font-bold text-gray-800">
           {Math.round(data.core_ratio * 100)}% / {Math.round(data.satellite_ratio * 100)}%
         </p>
@@ -111,7 +111,7 @@ function MiniChart({ values, width = 200, height = 48 }: { values: number[]; wid
 function TopHoldings({ stocks }: { stocks: { name: string; pct: number; change: number }[] }) {
   if (!stocks || stocks.length === 0) {
     return (
-      <div className="text-[10px] text-gray-300 text-center py-2">
+      <div className="text-xs text-gray-300 text-center py-2">
         持仓股票数据暂无
       </div>
     );
@@ -119,12 +119,12 @@ function TopHoldings({ stocks }: { stocks: { name: string; pct: number; change: 
 
   return (
     <div className="space-y-1">
-      <p className="text-[10px] text-gray-500 font-medium flex items-center gap-1">
+      <p className="text-xs text-gray-500 font-medium flex items-center gap-1">
         <BarChart3 className="w-3 h-3" /> 前{stocks.length}大持仓股票
       </p>
       <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
         {stocks.map((s, i) => (
-          <div key={i} className="flex items-center justify-between text-[10px]">
+          <div key={i} className="flex items-center justify-between text-xs">
             <span className="text-gray-600 truncate">{s.name}</span>
             <span className="flex items-center gap-1 shrink-0 ml-2">
               <span className="text-gray-400 font-mono">{(s.pct * 100).toFixed(1)}%</span>
@@ -149,7 +149,7 @@ function FundEvaluation({ evaluation }: {
 }) {
   if (!evaluation) {
     return (
-      <div className="text-[10px] text-gray-300 text-center py-2">
+      <div className="text-xs text-gray-300 text-center py-2">
         基金评估数据暂无
       </div>
     );
@@ -169,15 +169,15 @@ function FundEvaluation({ evaluation }: {
 
   return (
     <div className="space-y-1.5">
-      <p className="text-[10px] text-gray-500 font-medium flex items-center gap-1">
+      <p className="text-xs text-gray-500 font-medium flex items-center gap-1">
         <Eye className="w-3 h-3" /> 基金评估
       </p>
       <div className="grid grid-cols-3 gap-2">
         {terms.map(t => (
           <div key={t.key} className="bg-gray-50 rounded p-2 text-center">
-            <p className="text-[9px] text-gray-400">{t.label}</p>
+            <p className="text-[10px] text-gray-400">{t.label}</p>
             <p className={`text-sm font-bold ${scoreColor(t.data.score)}`}>{t.data.label}</p>
-            <p className="text-[9px] text-gray-400">{t.data.score}分</p>
+            <p className="text-[10px] text-gray-400">{t.data.score}分</p>
           </div>
         ))}
       </div>
@@ -233,16 +233,16 @@ function PositionItem({
           <div className="flex items-center gap-2">
             <span className="text-xs font-mono text-gray-400">{item.fund_code}</span>
             <span className="text-sm font-medium text-gray-800 truncate">{fundShortName}</span>
-            <span className={`text-[10px] px-1.5 py-0.5 rounded ${tagColor}`}>
+            <span className={`text-xs px-1.5 py-0.5 rounded ${tagColor}`}>
               {item.portfolio_tag === 'core' ? '核心' : '卫星'}
             </span>
             {signal && (
-              <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${SIGNAL_BG[signal.signalLevel] || ''}`}>
+              <span className={`text-xs px-1.5 py-0.5 rounded font-bold ${SIGNAL_BG[signal.signalLevel] || ''}`}>
                 {signal.signalLevel}
               </span>
             )}
           </div>
-          <p className="text-[10px] text-gray-400 mt-0.5">
+          <p className="text-xs text-gray-400 mt-0.5">
             持仓 {item.weight_pct * 100}% | 成本 {item.cost_nav.toFixed(4)}
           </p>
         </div>
@@ -291,11 +291,11 @@ function PositionItem({
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             {/* 迷你走势图（展开版） */}
             <div className="bg-gray-50 rounded-lg p-3">
-              <p className="text-[10px] text-gray-400 mb-1">近30天净值走势</p>
+              <p className="text-xs text-gray-400 mb-1">近30天净值走势</p>
               <MiniChart values={navHistory || []} width={260} height={64} />
               <div className="flex justify-between mt-1">
-                <span className="text-[9px] text-gray-300">30天前</span>
-                <span className="text-[9px] text-gray-300">今天</span>
+                <span className="text-[10px] text-gray-300">30天前</span>
+                <span className="text-[10px] text-gray-300">今天</span>
               </div>
             </div>
 
@@ -311,7 +311,7 @@ function PositionItem({
           </div>
 
           {/* 简要信息 */}
-          <div className="grid grid-cols-3 gap-2 text-[10px] text-gray-400">
+          <div className="grid grid-cols-3 gap-2 text-xs text-gray-400">
             <div>买入日期：{item.buy_date}</div>
             <div>持有份额：{item.holding_shares.toLocaleString()}</div>
             <div>当前净值：{item.current_nav.toFixed(4)}</div>
@@ -555,7 +555,7 @@ export default function PortfolioV5() {
             <div className="p-8 text-center">
               <Briefcase className="w-8 h-8 text-gray-300 mx-auto mb-2" />
               <p className="text-gray-500 text-sm font-medium">暂无持仓数据</p>
-              <p className="text-[10px] text-gray-300 mt-1">添加持仓基金后，即可查看仓位建议和交易操作</p>
+              <p className="text-xs text-gray-300 mt-1">添加持仓基金后，即可查看仓位建议和交易操作</p>
             </div>
           ) : (
             items.map(item => (
@@ -581,18 +581,18 @@ export default function PortfolioV5() {
           {advice.length === 0 ? (
             <div className="py-6 text-center">
               <p className="text-gray-500 text-sm font-medium">暂无历史建议</p>
-              <p className="text-[10px] text-gray-300 mt-1">执行仓位调整后，建议记录将在此展示</p>
+              <p className="text-xs text-gray-300 mt-1">执行仓位调整后，建议记录将在此展示</p>
             </div>
           ) : (
             advice.map((a: any, i: number) => (
               <div key={i} className="flex items-center gap-3 text-sm border-b border-gray-50 pb-2">
-                <span className="text-[10px] text-gray-400 w-20">{a.date}</span>
+                <span className="text-xs text-gray-400 w-20">{a.date}</span>
                 <span className="font-mono text-xs">{a.fund_code}</span>
-                <span className={`text-[10px] px-1.5 py-0.5 rounded ${SIGNAL_BG[a.signal_level] || 'bg-gray-100 text-gray-600'}`}>
+                <span className={`text-xs px-1.5 py-0.5 rounded ${SIGNAL_BG[a.signal_level] || 'bg-gray-100 text-gray-600'}`}>
                   {a.signal_level}
                 </span>
                 <span className="text-xs text-gray-600">{a.action}</span>
-                <span className="text-[10px] text-gray-400 flex-1 truncate">{a.reason}</span>
+                <span className="text-xs text-gray-400 flex-1 truncate">{a.reason}</span>
               </div>
             ))
           )}
@@ -605,18 +605,18 @@ export default function PortfolioV5() {
           {trades.length === 0 ? (
             <div className="py-6 text-center">
               <p className="text-gray-500 text-sm font-medium">暂无交易记录</p>
-              <p className="text-[10px] text-gray-300 mt-1">执行仓位操作后，交易记录将在此展示</p>
+              <p className="text-xs text-gray-300 mt-1">执行仓位操作后，交易记录将在此展示</p>
             </div>
           ) : (
             trades.map((t: any, i: number) => (
               <div key={i} className="flex items-center gap-3 text-sm border-b border-gray-50 pb-2">
-                <span className="text-[10px] text-gray-400 w-20">{t.date}</span>
+                <span className="text-xs text-gray-400 w-20">{t.date}</span>
                 <span className={`text-xs font-medium ${t.action === '买入' ? 'text-red-500' : 'text-green-500'}`}>
                   {t.action}
                 </span>
                 <span className="font-mono text-xs">{t.fund_code}</span>
                 <span className="text-xs text-gray-600">¥{t.amount?.toLocaleString?.() ?? t.price?.toLocaleString?.() ?? '-'}</span>
-                <span className="text-[10px] text-gray-400 flex-1 truncate">{t.reason}</span>
+                <span className="text-xs text-gray-400 flex-1 truncate">{t.reason}</span>
               </div>
             ))
           )}

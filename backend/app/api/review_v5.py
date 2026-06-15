@@ -53,6 +53,9 @@ class BacktestRequest(BaseModel):
     initial_capital: float = 100000.0
     signal_strategy: str = "v5_signal"
 
+    # 基金回测参数（可选）
+    fund_code: Optional[str] = None  # 如果提供，使用基金净值作为价格数据
+
     # Category 1: Signal Mapping
     signal_boundaries: list[float] = [12.0, 25.0, 38.0, 52.0, 65.0, 80.0]
     signal_lag_days: int = 1
@@ -196,6 +199,55 @@ async def _get_real_signal_data(
         return {}
 
 
+async def _get_fund_price_data(
+    fund_code: str,
+    start_date: str,
+    end_date: str,
+) -> list[dict]:
+    """从Tushare获取基金净值作为价格数据（用于单基金回测）"""
+    from app.utils.eastmoney import code_to_tushare, get_fund_nav_history
+
+    ts_code = code_to_tushare(fund_code)
+
+    # 计算需要的天数（加10天缓冲）
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        days = (end_dt - start_dt).days + 10
+    except Exception:
+        days = 365
+
+    # 确保最少取60天数据
+    days = max(days, 60)
+
+    nav_history = await get_fund_nav_history(ts_code, days=days)
+
+    if not nav_history:
+        return []
+
+    # 将净值数据转换为回测引擎需要的格式
+    start_dt_str = start_date.replace("-", "")
+    end_dt_str = end_date.replace("-", "")
+
+    result = []
+    for h in nav_history:
+        date_str = str(h.get("date", ""))
+        if date_str >= start_dt_str and date_str <= end_dt_str:
+            nav_val = float(h.get("nav", 0) or 0)
+            daily_ret = float(h.get("daily_return", 0) or 0)
+            if nav_val <= 0:
+                continue
+            result.append({
+                "date": date_str,
+                "close": nav_val,
+                "pct_chg": daily_ret,
+                "volume": 0,
+                "signal_level": "B",  # 默认中性，后面会从市场情绪覆盖
+            })
+
+    return result
+
+
 def _generate_mock_price_data(
     index_code: str,
     start_date: str,
@@ -252,17 +304,37 @@ async def run_backtest(
 
     数据源降级链：Tushare真实日线 + factor_history信号 → Mock
     """
-    # 检查缓存
-    cache_k = f"backtest:{req.index_code}:{req.start_date}:{req.end_date}:{req.signal_strategy}:{hash(str(req.risk_params))}"
+    # 检查缓存（包含 action_mapping 的 hash，避免参数变化但命中旧缓存）
+    import hashlib
+    action_hash = hashlib.md5(str(req.action_mapping).encode()).hexdigest()[:8]
+    cache_k = f"backtest:{req.index_code}:{req.fund_code or ''}:{req.start_date}:{req.end_date}:{req.signal_strategy}:{action_hash}:{hash(str(req.risk_params))}"
     cached = await cache_get(cache_k)
     if cached is not None:
         return cached
 
-    # 1. 获取真实价格数据
-    price_data = await _get_real_price_data(req.index_code, req.start_date, req.end_date)
+    # 日期格式验证：start_date 不能大于 end_date
+    if req.start_date > req.end_date:
+        return {
+            "code": 400,
+            "data": None,
+            "message": f"开始日期({req.start_date})不能晚于结束日期({req.end_date})",
+        }
 
-    # 2. 获取真实信号数据
-    signal_map = await _get_real_signal_data(req.index_code, req.start_date, req.end_date, session)
+    # 基金代码验证：如果不在已知映射中，给出警告但不阻断
+    import logging
+    _logger = logging.getLogger(__name__)
+    if req.index_code not in _INDEX_CODE_MAP:
+        _logger.warning("回测使用未知指数代码: %s，将尝试直接转换", req.index_code)
+
+    # 1. 获取价格数据：如果 fund_code 存在，使用基金净值；否则使用指数日线
+    if req.fund_code:
+        price_data = await _get_fund_price_data(req.fund_code, req.start_date, req.end_date)
+    else:
+        price_data = await _get_real_price_data(req.index_code, req.start_date, req.end_date)
+
+    # 2. 获取信号数据：基金回测时使用沪深300的市场情绪（基金没有自己的信号等级）
+    signal_index_code = "SH000300" if req.fund_code else req.index_code
+    signal_map = await _get_real_signal_data(signal_index_code, req.start_date, req.end_date, session)
 
     # 3. 合并信号到价格数据
     if price_data and signal_map:
@@ -357,6 +429,8 @@ async def run_backtest(
     daily_log = result.daily_log[-60:] if result.daily_log else []
 
     data_source_tag = "real" if price_data and signal_map else "mock"
+    if req.fund_code and price_data:
+        data_source_tag = "fund_real"
 
     # 操作汇总
     buy_count = sum(1 for t in result.trades if t.trade_type == "buy")

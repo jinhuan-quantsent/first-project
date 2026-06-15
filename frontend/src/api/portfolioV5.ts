@@ -10,6 +10,22 @@ export async function fetchPortfolioV5(): Promise<{ items: PortfolioItem[]; summ
   return res.data.data;
 }
 
+/** 添加持仓 */
+export async function addPortfolioV5(params: {
+  fund_code: string;
+  fund_name: string;
+  fund_type?: string;
+  holding_shares?: number;
+  cost_nav?: number;
+  current_nav?: number;
+  buy_date?: string;
+  portfolio_tag?: string;
+  weight_pct?: number;
+}): Promise<PortfolioItem> {
+  const res = await client.post<ApiResponse<PortfolioItem>>('/api/v5/portfolio', params);
+  return res.data.data;
+}
+
 /** 获取仓位建议 */
 export async function fetchPositionAdviceV5(
   fundCode: string,

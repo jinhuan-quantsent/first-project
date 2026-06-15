@@ -18,11 +18,20 @@ import FundDetailPanel from '../components/fundsearch/FundDetailPanel';
 
 import { searchFunds, fetchFundDetail } from '../api/fund';
 import { fetchV5Sentiment } from '../api/marketV5';
+import { addWatchlistV5 } from '../api/watchlistV5';
+import { addPortfolioV5 } from '../api/portfolioV5';
 import type {
   FundSearchItem,
   FundDetail,
   SignalLevel,
 } from '../types';
+
+/** 合法的 SignalLevel 值集合 */
+const VALID_SIGNAL_LEVELS: Set<string> = new Set(['S+', 'S', 'A', 'B', 'C', 'D', 'E']);
+
+/** 安全地将字符串转为 SignalLevel，非法值回退到 'B' */
+const toSignalLevel = (v: string | undefined | null): SignalLevel =>
+  (v && VALID_SIGNAL_LEVELS.has(v)) ? (v as SignalLevel) : 'B';
 
 /** V5 情绪缓存结构 */
 interface FundSentiment {
@@ -116,12 +125,12 @@ export default function FundSearchV5() {
           setSentimentCache((prev) => ({
             ...prev,
             [fund.fund_code]: {
-              score:           s.composite_score,
-              signalLevel:     s.signal_level as SignalLevel,
-              confidenceStars:  s.confidence_stars,
-              shortTerm:      s.signal_level as SignalLevel,
-              midTerm:        s.signal_level as SignalLevel,
-              longTerm:        s.signal_level as SignalLevel,
+              score:           s.composite_score ?? 0,
+              signalLevel:     toSignalLevel(s.signal_level),
+              confidenceStars:  s.confidence_stars ?? 0,
+              shortTerm:      toSignalLevel(s.signal_level),
+              midTerm:        toSignalLevel(s.signal_level),
+              longTerm:        toSignalLevel(s.signal_level),
               hasDivergence:  false,
               divergenceType:  undefined,
               advice:          { action: '', level: '', reason: '', targetPositionPct: 0.5 },
@@ -143,6 +152,33 @@ export default function FundSearchV5() {
       setDetailLoading(false);
     }
   }, [selectedFund]);
+
+  /** 添加到自选 */
+  const handleAddWatchlist = useCallback(async (fund: FundSearchItem) => {
+    try {
+      await addWatchlistV5({ fund_code: fund.fund_code });
+      alert(`已将 ${fund.fund_short_name || fund.fund_name} 添加到自选`);
+    } catch (err: any) {
+      const msg = err?.response?.data?.message || err?.message || '添加自选失败';
+      alert(msg);
+    }
+  }, []);
+
+  /** 添加到持仓 */
+  const handleAddPortfolio = useCallback(async (fund: FundSearchItem) => {
+    try {
+      await addPortfolioV5({
+        fund_code: fund.fund_code,
+        fund_name: fund.fund_short_name || fund.fund_name,
+        fund_type: fund.fund_type,
+        current_nav: fund.nav,
+      });
+      alert(`已将 ${fund.fund_short_name || fund.fund_name} 添加到持仓`);
+    } catch (err: any) {
+      const msg = err?.response?.data?.message || err?.message || '添加持仓失败';
+      alert(msg);
+    }
+  }, []);
 
   const activeSignal = selectedFund ? (sentimentCache[selectedFund.fund_code]?.signalLevel ?? null) : null;
 
@@ -194,6 +230,8 @@ export default function FundSearchV5() {
           loading={loading}
           sentimentMap={sentimentMap}
           onSelect={handleSelect}
+          onAddWatchlist={handleAddWatchlist}
+          onAddPortfolio={handleAddPortfolio}
         />
       )}
 

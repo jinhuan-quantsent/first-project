@@ -5,8 +5,11 @@
 import type { FundSearchItem, SignalLevel } from '../../types';
 import SentimentBadge from '../common/SentimentBadge';
 import SignalLights from '../common/SignalLights';
-import { Star, ChevronUp, ChevronDown } from 'lucide-react';
+import { Star, ChevronUp, ChevronDown, Plus } from 'lucide-react';
 import { clsx } from 'clsx';
+
+/** 安全取数，防止 undefined/null 调用 .toFixed() 崩溃 */
+const safeNum = (v: number | undefined | null, fallback = 0): number => v ?? fallback;
 
 interface FundResultListProps {
   results: FundSearchItem[];
@@ -23,17 +26,21 @@ interface FundResultListProps {
     divergenceType?: 'bullish' | 'bearish';
   }>;
   onSelect: (fund: FundSearchItem) => void;
+  onAddWatchlist?: (fund: FundSearchItem) => void;
+  onAddPortfolio?: (fund: FundSearchItem) => void;
 }
 
 /** 涨跌颜色（A股习惯：红涨绿跌） */
-function returnClass(v: number): string {
-  if (v > 0) return 'text-red-500';
-  if (v < 0) return 'text-green-500';
+function returnClass(v: number | undefined | null): string {
+  const safe = v ?? 0;
+  if (safe > 0) return 'text-red-500';
+  if (safe < 0) return 'text-green-500';
   return 'text-gray-400';
 }
 
-function formatReturn(v: number): string {
-  return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+function formatReturn(v: number | undefined | null): string {
+  const safe = v ?? 0;
+  return `${safe >= 0 ? '+' : ''}${safe.toFixed(2)}%`;
 }
 
 export default function FundResultList({
@@ -43,6 +50,8 @@ export default function FundResultList({
   loading,
   sentimentMap,
   onSelect,
+  onAddWatchlist,
+  onAddPortfolio,
 }: FundResultListProps) {
   if (loading) {
     return (
@@ -82,6 +91,7 @@ export default function FundResultList({
                 <th className="text-right px-4 py-2.5 text-xs text-gray-500 font-medium">日收益</th>
                 <th className="text-right px-4 py-2.5 text-xs text-gray-500 font-medium">月收益</th>
                 <th className="text-right px-4 py-2.5 text-xs text-gray-500 font-medium">年收益</th>
+                <th className="text-center px-4 py-2.5 text-xs text-gray-500 font-medium">操作</th>
                 <th className="w-8" />
               </tr>
             </thead>
@@ -147,7 +157,7 @@ export default function FundResultList({
                     </td>
 
                     <td className={`px-4 py-2.5 text-right font-mono text-xs ${returnClass(fund.nav)}`}>
-                      {fund.nav.toFixed(4)}
+                      {safeNum(fund.nav).toFixed(4)}
                     </td>
                     <td className={`px-4 py-2.5 text-right text-xs ${returnClass(fund.daily_return)}`}>
                       {formatReturn(fund.daily_return)}
@@ -157,6 +167,26 @@ export default function FundResultList({
                     </td>
                     <td className={`px-4 py-2.5 text-right text-xs ${returnClass(fund.year_return)}`}>
                       {formatReturn(fund.year_return)}
+                    </td>
+
+                    {/* 操作按钮 */}
+                    <td className="px-3 py-2.5 text-center" onClick={e => e.stopPropagation()}>
+                      <div className="flex items-center justify-center gap-1">
+                        <button
+                          onClick={() => onAddWatchlist?.(fund)}
+                          className="p-1 rounded hover:bg-yellow-50 text-gray-400 hover:text-yellow-500 transition-colors"
+                          title="添加到自选"
+                        >
+                          <Star className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => onAddPortfolio?.(fund)}
+                          className="p-1 rounded hover:bg-green-50 text-gray-400 hover:text-green-500 transition-colors"
+                          title="添加到持仓"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </td>
 
                     <td className="px-2 py-2.5 text-gray-400">

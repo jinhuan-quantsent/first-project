@@ -99,6 +99,7 @@ export async function runBacktestV5(params: {
   start_date: string;
   end_date: string;
   initial_capital: number;
+  fund_code?: string;                 // 基金代码（单基金回测时传入）
   signal_boundaries?: number[];
   signal_lag_days?: number;
   factor_weights?: Record<string, number>;

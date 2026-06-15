@@ -115,7 +115,7 @@ export default function PositionMatrix({
         {Object.entries(CELL_COLORS).map(([label, color]) => (
           <div key={label} className="flex items-center gap-1">
             <div className="w-2 h-2 rounded" style={{ backgroundColor: color }} />
-            <span className="text-[9px] text-gray-400">{label}</span>
+            <span className="text-[10px] text-gray-400">{label}</span>
           </div>
         ))}
       </div>

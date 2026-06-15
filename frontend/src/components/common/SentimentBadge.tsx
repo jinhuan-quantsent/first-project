@@ -31,7 +31,15 @@ function normalizeLevel(l: SignalLevel | SignalLabel): SignalLevel {
   if (typeof l === 'string' && ['S+', 'S', 'A', 'B', 'C', 'D', 'E'].includes(l)) {
     return l as SignalLevel;
   }
-  return mapOldToNew(l as SignalLabel);
+  // 尝试从旧标签映射，映射失败则回退到 'B'（中性）
+  if (typeof l === 'string') {
+    try {
+      return mapOldToNew(l as SignalLabel);
+    } catch {
+      return 'B';
+    }
+  }
+  return 'B';
 }
 
 export default function SignalBadge({

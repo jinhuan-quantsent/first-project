@@ -89,7 +89,7 @@ export default function ConfidenceTooltip({
                       style={{ width: `${Math.min(100, Math.max(0, it.value))}%` }}
                     />
                   </div>
-                  <p className="text-[9px] text-gray-300 mt-0.5">{it.desc}</p>
+                  <p className="text-[10px] text-gray-300 mt-0.5">{it.desc}</p>
                 </div>
               ))}
             </div>

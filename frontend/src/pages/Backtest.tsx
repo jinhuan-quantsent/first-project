@@ -3,7 +3,8 @@
  * 方案管理栏 + 5类折叠参数面板（滑块+开关）+ 回测结果展示（8指标+曲线+日志）
  */
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Save, Trash2, Play, TrendingUp, ChevronDown, AlertTriangle, Shield } from 'lucide-react';
+import { Save, Trash2, Play, TrendingUp, ChevronDown, AlertTriangle, Shield, Pencil } from 'lucide-react';
+import { activateBacktestStrategyV5 } from '../api/backtest';
 import { clsx } from 'clsx';
 import { runBacktestV5, saveBacktestStrategyV5, deleteBacktestStrategyV5 } from '../api/backtest';
 import type { ModelParams, ActionRule, BacktestResultV5, DailyLogEntry, RiskStats } from '../api/backtest';
@@ -90,6 +91,14 @@ interface BacktestStrategy {
   params: ModelParams;
 }
 
+interface FundBacktestParams {
+  fundCode: string;
+  startDate: string;
+  endDate: string;
+  initialCapital: number;
+  strategyId: number | null;
+}
+
 interface ApiStrategy {
   id: string;
   name: string;
@@ -102,40 +111,113 @@ interface ApiStrategy {
    子组件
    ============================================================ */
 
-/** 方案管理栏 */
-function StrategyBar({ strategies, activeId, onSelect, onSave, onDelete, onNew }: {
+/** 方案管理栏 — 下拉选择 + 4按钮 + 重命名 */
+function StrategyBar({ strategies, activeId, onSelect, onSave, onDelete, onNew, onApply, onRename }: {
   strategies: BacktestStrategy[];
   activeId: number | null;
   onSelect: (id: number) => void;
   onSave: () => void;
   onDelete: (id: number) => void;
   onNew: () => void;
+  onApply: () => void;
+  onRename: (newName: string) => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState('');
+  const activeStrategy = strategies.find(s => s.id === activeId) ?? null;
+
+  /** 开始重命名 */
+  const startRename = () => {
+    if (!activeStrategy) return;
+    setEditName(activeStrategy.name);
+    setEditing(true);
+  };
+
+  /** 确认重命名 */
+  const confirmRename = () => {
+    const trimmed = editName.trim();
+    if (trimmed && trimmed !== activeStrategy?.name) {
+      onRename(trimmed);
+    }
+    setEditing(false);
+  };
+
+  /** 重命名输入框按键处理 */
+  const handleRenameKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') confirmRename();
+    if (e.key === 'Escape') setEditing(false);
+  };
+
   return (
-    <div className="card p-3 flex items-center gap-2 overflow-x-auto">
-      <button onClick={onNew}
-        className="px-3 py-1.5 text-xs border border-dashed border-gray-300 rounded-lg text-gray-400
-                   hover:border-brand-500 hover:text-brand-500 transition-colors shrink-0">
-        ＋ 新建方案
-      </button>
-      {strategies.map(s => (
-        <button key={s.id} onClick={() => onSelect(s.id)}
-          className={`px-3 py-1.5 text-xs rounded-lg border transition-all shrink-0 ${
-            activeId === s.id ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-gray-600 border-gray-200 hover:border-brand-300'
-          }`}>
-          {s.name}
-          {s.is_active && <span className="ml-1 text-[9px] opacity-70">(活跃)</span>}
-        </button>
-      ))}
-      <div className="ml-auto flex gap-1 shrink-0">
-        <button onClick={onSave} className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-brand-500" title="保存方案">
-          <Save className="w-3.5 h-3.5" />
-        </button>
-        {activeId !== null && (
-          <button onClick={() => onDelete(activeId)} className="p-1.5 rounded hover:bg-gray-100 text-gray-400 hover:text-red-500" title="删除方案">
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+    <div className="card p-3 flex items-center gap-3 overflow-x-auto">
+      {/* 左侧：下拉选择 + 活跃标记 + 重命名 */}
+      <div className="flex items-center gap-2 shrink-0">
+        <span className="text-xs text-gray-500 shrink-0">当前方案：</span>
+        <select
+          value={activeId ?? ''}
+          onChange={e => onSelect(Number(e.target.value))}
+          className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-brand-500 min-w-[120px]"
+        >
+          {strategies.map(s => (
+            <option key={s.id} value={s.id}>
+              {s.name}{s.is_active ? ' (活跃)' : ''}
+            </option>
+          ))}
+        </select>
+        {/* 活跃方案绿色圆点标记 */}
+        {activeStrategy?.is_active && (
+          <span className="flex items-center gap-1 text-xs text-green-600 bg-green-50 px-1.5 py-0.5 rounded-full shrink-0">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+            活跃
+          </span>
         )}
+        {/* 双击重命名区域 */}
+        {activeStrategy && editing ? (
+          <input
+            type="text"
+            value={editName}
+            onChange={e => setEditName(e.target.value)}
+            onBlur={confirmRename}
+            onKeyDown={handleRenameKeyDown}
+            autoFocus
+            className="px-2 py-0.5 text-xs border border-brand-300 rounded focus:outline-none focus:ring-1 focus:ring-brand-500 w-28"
+          />
+        ) : activeStrategy ? (
+          <button
+            onClick={startRename}
+            className="p-0.5 rounded hover:bg-gray-100 text-gray-400 hover:text-brand-500 transition-colors"
+            title="重命名方案"
+          >
+            <Pencil className="w-3 h-3" />
+          </button>
+        ) : null}
+      </div>
+
+      {/* 分隔符 */}
+      <div className="w-px h-5 bg-gray-200 shrink-0" />
+
+      {/* 右侧：4个操作按钮 */}
+      <div className="flex items-center gap-1.5 shrink-0">
+        <button onClick={onNew}
+          className="px-3 py-1.5 text-xs border border-dashed border-gray-300 rounded-lg text-gray-500
+                     hover:border-brand-500 hover:text-brand-500 transition-colors">
+          新建方案
+        </button>
+        <button onClick={onSave} disabled={!activeId}
+          className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-600
+                     hover:bg-gray-50 hover:border-brand-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+          保存当前
+        </button>
+        <button onClick={() => activeId && onDelete(activeId)} disabled={!activeId}
+          className="px-3 py-1.5 text-xs border border-red-200 rounded-lg text-red-500
+                     hover:bg-red-50 hover:border-red-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+          删除方案
+        </button>
+        <button onClick={onApply} disabled={!activeId}
+          className="px-3 py-1.5 text-xs border border-brand-200 rounded-lg text-brand-600 bg-brand-50
+                     hover:bg-brand-100 hover:border-brand-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+          应用到系统
+        </button>
       </div>
     </div>
   );
@@ -151,7 +233,7 @@ function ParamPanel({ title, open, onToggle, badge, children }: {
         className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors">
         <span className="flex items-center gap-2">
           {title}
-          {badge && <span className="text-[9px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full">{badge}</span>}
+          {badge && <span className="text-[10px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full">{badge}</span>}
         </span>
         <ChevronDown className={`w-3.5 h-3.5 text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
@@ -168,14 +250,14 @@ function RangeSlider({ label, value, min, max, step = 1, unit = '', onChange }: 
   const pct = ((value - min) / (max - min)) * 100;
   return (
     <div className="flex items-center gap-2 text-xs">
-      {label && <span className="w-24 shrink-0 text-gray-500 text-[10px]">{label}</span>}
+      {label && <span className="w-24 shrink-0 text-gray-500 text-xs">{label}</span>}
       <input type="range" min={min} max={max} step={step} value={value}
         onChange={e => onChange(parseFloat(e.target.value))}
         className="flex-1 h-1.5 bg-gray-200 rounded-full appearance-none cursor-pointer accent-brand-500
                    [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5
                    [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-brand-500 [&::-webkit-slider-thumb]:shadow-sm
                    [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:-mt-[5px]" />
-      <span className="w-16 text-right text-[10px] font-mono text-gray-600 tabular-nums">
+      <span className="w-16 text-right text-xs font-mono text-gray-600 tabular-nums">
         {typeof value === 'number' ? value.toFixed(step < 1 ? 2 : 0) : value}{unit}
       </span>
     </div>
@@ -186,13 +268,13 @@ function RangeSlider({ label, value, min, max, step = 1, unit = '', onChange }: 
 function SignalMappingPanel({ params, onChange }: { params: ModelParams; onChange: (p: ModelParams) => void }) {
   return (
     <div className="space-y-2">
-      <p className="text-[10px] text-gray-400">调整6个信号分界线，分数低于边界→对应信号</p>
+      <p className="text-xs text-gray-400">调整6个信号分界线，分数低于边界→对应信号</p>
       {params.signal_boundaries.map((v, i) => {
         const sig = SIGNAL_LEVELS[i];
         return (
           <div key={i} className="flex items-center gap-2">
-            <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded ${SIGNAL_BG[sig]}`}>{sig}</span>
-            <span className="text-[9px] text-gray-400 w-12">{SIGNAL_LABELS[sig]}</span>
+            <span className={`px-1.5 py-0.5 text-xs font-bold rounded ${SIGNAL_BG[sig]}`}>{sig}</span>
+            <span className="text-[10px] text-gray-400 w-12">{SIGNAL_LABELS[sig]}</span>
             <input type="range" min={0} max={100} step={1} value={v}
               onChange={e => {
                 const next = [...params.signal_boundaries];
@@ -203,7 +285,7 @@ function SignalMappingPanel({ params, onChange }: { params: ModelParams; onChang
                          [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5
                          [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-brand-500 [&::-webkit-slider-thumb]:shadow-sm
                          [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:-mt-[5px]" />
-            <span className="w-8 text-right text-[10px] font-mono text-gray-600 tabular-nums">{v}</span>
+            <span className="w-8 text-right text-xs font-mono text-gray-600 tabular-nums">{v}</span>
           </div>
         );
       })}
@@ -225,7 +307,7 @@ function FactorWeightsPanel({ params, onChange }: { params: ModelParams; onChang
 
   return (
     <div className="space-y-1.5">
-      <p className="text-[10px] text-gray-400">开关因子 + 滑块调节权重，有效权重总和应≈1.0</p>
+      <p className="text-xs text-gray-400">开关因子 + 滑块调节权重，有效权重总和应≈1.0</p>
       {FACTOR_NAMES.map(name => {
         const enabled = params.factor_enabled[name] ?? true;
         const weight = params.factor_weights[name] ?? parseFloat((1 / FACTOR_NAMES.length).toFixed(3));
@@ -235,8 +317,8 @@ function FactorWeightsPanel({ params, onChange }: { params: ModelParams; onChang
               className={`w-7 h-4 rounded-full transition-colors relative ${enabled ? 'bg-brand-500' : 'bg-gray-300'}`}>
               <span className={`absolute top-0.5 ${enabled ? 'right-0.5' : 'left-0.5'} w-3 h-3 bg-white rounded-full shadow transition-all`} />
             </button>
-            <span className="w-8 shrink-0 font-mono text-[10px] text-gray-500">{name}</span>
-            <span className="w-12 shrink-0 text-[10px] text-gray-600">{FACTOR_LABELS[name]}</span>
+            <span className="w-8 shrink-0 font-mono text-xs text-gray-500">{name}</span>
+            <span className="w-12 shrink-0 text-xs text-gray-600">{FACTOR_LABELS[name]}</span>
             <input type="range" min={0} max={0.5} step={0.005} value={weight}
               disabled={!enabled}
               onChange={e => onChange({ ...params, factor_weights: { ...params.factor_weights, [name]: parseFloat(e.target.value) } })}
@@ -244,11 +326,11 @@ function FactorWeightsPanel({ params, onChange }: { params: ModelParams; onChang
                          [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5
                          [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-brand-500 [&::-webkit-slider-thumb]:shadow-sm
                          [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:-mt-[5px]" />
-            <span className="w-10 text-right text-[10px] font-mono text-gray-400 tabular-nums">{weight.toFixed(3)}</span>
+            <span className="w-10 text-right text-xs font-mono text-gray-400 tabular-nums">{weight.toFixed(3)}</span>
           </div>
         );
       })}
-      <p className="text-[10px] text-gray-400 pt-1 border-t border-gray-100">
+      <p className="text-xs text-gray-400 pt-1 border-t border-gray-100">
         有效总和：
         <span className={`font-mono ${Math.abs(enabledWeight - 1.0) > 0.05 ? 'text-red-500 font-bold' : 'text-green-500'}`}>
           {enabledWeight.toFixed(3)}
@@ -262,12 +344,12 @@ function FactorWeightsPanel({ params, onChange }: { params: ModelParams; onChang
 function ActionMappingPanel({ params, onChange }: { params: ModelParams; onChange: (p: ModelParams) => void }) {
   return (
     <div className="space-y-1.5">
-      <p className="text-[10px] text-gray-400">7级信号 → 行动类型 + 操作倍数</p>
+      <p className="text-xs text-gray-400">7级信号 → 行动类型 + 操作倍数</p>
       {SIGNAL_LEVELS.map(sig => {
         const rule = params.action_mapping[sig] || DEFAULT_ACTION_MAPPING[sig];
         return (
           <div key={sig} className="flex items-center gap-2 text-xs">
-            <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded ${SIGNAL_BG[sig]}`}>{sig}</span>
+            <span className={`px-1.5 py-0.5 text-xs font-bold rounded ${SIGNAL_BG[sig]}`}>{sig}</span>
             <select value={rule.type}
               onChange={e => {
                 const newType = e.target.value as ActionRule['type'];
@@ -275,7 +357,7 @@ function ActionMappingPanel({ params, onChange }: { params: ModelParams; onChang
                 const newMapping = { ...params.action_mapping, [sig]: { ...rule, type: newType, label: autoLabel } };
                 onChange({ ...params, action_mapping: newMapping });
               }}
-              className="px-2 py-0.5 border border-gray-200 rounded text-[10px] bg-white">
+              className="px-2 py-0.5 border border-gray-200 rounded text-xs bg-white">
               {ACTION_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
             <input type="range" min={0} max={3} step={0.1} value={rule.mult}
@@ -287,8 +369,8 @@ function ActionMappingPanel({ params, onChange }: { params: ModelParams; onChang
                          [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5
                          [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-brand-500 [&::-webkit-slider-thumb]:shadow-sm
                          [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:-mt-[5px]" />
-            <span className="w-6 text-right text-[10px] font-mono text-gray-400 tabular-nums">{rule.mult.toFixed(1)}</span>
-            <span className="w-14 text-[10px] text-gray-500">{rule.label}</span>
+            <span className="w-6 text-right text-xs font-mono text-gray-400 tabular-nums">{rule.mult.toFixed(1)}</span>
+            <span className="w-14 text-xs text-gray-500">{rule.label}</span>
           </div>
         );
       })}
@@ -300,16 +382,16 @@ function ActionMappingPanel({ params, onChange }: { params: ModelParams; onChang
 function FactorEnginePanel({ params, onChange }: { params: ModelParams; onChange: (p: ModelParams) => void }) {
   return (
     <div className="space-y-2">
-      <p className="text-[10px] text-gray-400">全局因子引擎参数，替代每因子单独Sigmoid设置</p>
+      <p className="text-xs text-gray-400">全局因子引擎参数，替代每因子单独Sigmoid设置</p>
       <RangeSlider label="分位数窗口" value={params.quantile_window} min={60} max={504} step={1} unit="天"
         onChange={v => onChange({ ...params, quantile_window: v })} />
       <RangeSlider label="Sigmoid陡峭度" value={params.sigmoid_k} min={0.5} max={10} step={0.5}
         onChange={v => onChange({ ...params, sigmoid_k: v })} />
       <div className="flex items-center gap-2 text-xs">
-        <span className="w-24 shrink-0 text-gray-500 text-[10px]">聚合方式</span>
+        <span className="w-24 shrink-0 text-gray-500 text-xs">聚合方式</span>
         <select value={params.composite_method}
           onChange={e => onChange({ ...params, composite_method: e.target.value })}
-          className="flex-1 px-2 py-0.5 border border-gray-200 rounded text-[10px] bg-white">
+          className="flex-1 px-2 py-0.5 border border-gray-200 rounded text-xs bg-white">
           <option value="weighted_sum">加权求和 (weighted_sum)</option>
           <option value="geometric_mean">几何平均 (geometric_mean)</option>
         </select>
@@ -327,7 +409,7 @@ function PositionRiskPanel({ params, onChange }: { params: ModelParams; onChange
     <div className="space-y-3">
       {/* 仓位限制 */}
       <div>
-        <p className="text-[10px] text-gray-500 font-medium mb-1">📏 仓位限制</p>
+        <p className="text-xs text-gray-500 font-medium mb-1">📏 仓位限制</p>
         <RangeSlider label="最大仓位" value={params.max_position} min={0.5} max={1.0} step={0.05} unit=""
           onChange={v => u('max_position', v)} />
         <div className="mt-1">
@@ -338,7 +420,7 @@ function PositionRiskPanel({ params, onChange }: { params: ModelParams; onChange
 
       {/* 止损 */}
       <div>
-        <p className="text-[10px] text-gray-500 font-medium mb-1">🛡️ 止损</p>
+        <p className="text-xs text-gray-500 font-medium mb-1">🛡️ 止损</p>
         <RangeSlider label="止损线" value={params.stop_loss} min={-0.30} max={-0.05} step={0.01} unit=""
           onChange={v => u('stop_loss', v)} />
         <div className="mt-1"><RangeSlider label="触发阈值倍数" value={params.stop_loss_threshold} min={0.5} max={2.0} step={0.1}
@@ -349,7 +431,7 @@ function PositionRiskPanel({ params, onChange }: { params: ModelParams; onChange
 
       {/* 止盈 */}
       <div>
-        <p className="text-[10px] text-gray-500 font-medium mb-1">💰 止盈</p>
+        <p className="text-xs text-gray-500 font-medium mb-1">💰 止盈</p>
         <RangeSlider label="止盈线" value={params.take_profit} min={0.10} max={1.0} step={0.05} unit=""
           onChange={v => u('take_profit', v)} />
         <div className="mt-1"><RangeSlider label="止盈回撤触发" value={params.take_profit_drawdown} min={0.03} max={0.30} step={0.01} unit=""
@@ -358,7 +440,7 @@ function PositionRiskPanel({ params, onChange }: { params: ModelParams; onChange
 
       {/* 过热 */}
       <div>
-        <p className="text-[10px] text-gray-500 font-medium mb-1">🔥 过热检测</p>
+        <p className="text-xs text-gray-500 font-medium mb-1">🔥 过热检测</p>
         <RangeSlider label="连续天数" value={params.overheat_days} min={3} max={30} step={1} unit="天"
           onChange={v => u('overheat_days', v)} />
         <div className="mt-1"><RangeSlider label="减仓系数" value={params.overheat_factor} min={0.3} max={1.0} step={0.05}
@@ -367,7 +449,7 @@ function PositionRiskPanel({ params, onChange }: { params: ModelParams; onChange
 
       {/* 回调/偏离 */}
       <div>
-        <p className="text-[10px] text-gray-500 font-medium mb-1">📉 回调/偏离加仓</p>
+        <p className="text-xs text-gray-500 font-medium mb-1">📉 回调/偏离加仓</p>
         <RangeSlider label="回调下限" value={params.pullback_lower} min={-0.20} max={-0.02} step={0.01}
           onChange={v => u('pullback_lower', v)} />
         <div className="mt-1"><RangeSlider label="回调加仓倍数" value={params.pullback_buy_mult} min={0.1} max={1.0} step={0.1}
@@ -380,9 +462,82 @@ function PositionRiskPanel({ params, onChange }: { params: ModelParams; onChange
 
       {/* 基础金额 */}
       <div>
-        <p className="text-[10px] text-gray-500 font-medium mb-1">💵 基础金额</p>
+        <p className="text-xs text-gray-500 font-medium mb-1">💵 基础金额</p>
         <RangeSlider label="单次加仓金额" value={params.base_buy_amount} min={1000} max={50000} step={1000} unit="元"
           onChange={v => u('base_buy_amount', v)} />
+      </div>
+    </div>
+  );
+}
+
+/** ---- 单基金回测参数区 ---- */
+function FundBacktestSection({ strategies, activeStrategyId, onRunFundBacktest, running }: {
+  strategies: BacktestStrategy[];
+  activeStrategyId: number | null;
+  onRunFundBacktest: (params: FundBacktestParams) => void;
+  running: boolean;
+}) {
+  const [fundCode, setFundCode] = useState('');
+  const [startDate, setStartDate] = useState('2024-01-01');
+  const [endDate, setEndDate] = useState(new Date().toISOString().slice(0, 10));
+  const [initialCapital, setInitialCapital] = useState(100000);
+  const [selectedStrategyId, setSelectedStrategyId] = useState<number | null>(activeStrategyId);
+
+  // 同步活跃方案ID
+  useState(() => {
+    if (activeStrategyId) setSelectedStrategyId(activeStrategyId);
+  });
+
+  return (
+    <div className="card p-4">
+      <h3 className="text-sm font-bold text-gray-700 mb-3">回测参数</h3>
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        {/* 选择基金 */}
+        <div>
+          <label className="text-xs text-gray-400 block mb-1">选择基金</label>
+          <input type="text" value={fundCode} onChange={e => setFundCode(e.target.value)}
+            placeholder="输入基金代码"
+            className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-brand-500" />
+        </div>
+        {/* 开始日期 */}
+        <div>
+          <label className="text-xs text-gray-400 block mb-1">开始日期</label>
+          <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+            className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-brand-500" />
+        </div>
+        {/* 结束日期 */}
+        <div>
+          <label className="text-xs text-gray-400 block mb-1">结束日期</label>
+          <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+            className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-brand-500" />
+        </div>
+        {/* 初始金额 */}
+        <div>
+          <label className="text-xs text-gray-400 block mb-1">初始买入金额（元）</label>
+          <input type="number" value={initialCapital} onChange={e => setInitialCapital(Number(e.target.value))}
+            min={1000} step={1000}
+            className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white font-mono focus:outline-none focus:ring-1 focus:ring-brand-500" />
+        </div>
+        {/* 因子方案 */}
+        <div>
+          <label className="text-xs text-gray-400 block mb-1">因子方案</label>
+          <select value={selectedStrategyId ?? ''} onChange={e => setSelectedStrategyId(Number(e.target.value))}
+            className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-brand-500">
+            {strategies.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+      </div>
+      {/* 运行按钮 */}
+      <div className="mt-3">
+        <button
+          onClick={() => onRunFundBacktest({ fundCode, startDate, endDate, initialCapital, strategyId: selectedStrategyId })}
+          disabled={running || !fundCode.trim()}
+          className={`w-full py-2.5 rounded-lg text-sm font-medium text-white transition-colors ${
+            running || !fundCode.trim() ? 'bg-gray-400 cursor-not-allowed' : 'bg-brand-500 hover:bg-brand-600'
+          }`}
+        >
+          {running ? '回测运行中...' : '▶ 运行基金回测'}
+        </button>
       </div>
     </div>
   );
@@ -395,7 +550,7 @@ function BacktestResultPanel({ result }: { result: BacktestResultV5 | null }) {
       <div className="card p-8 text-center">
         <TrendingUp className="w-8 h-8 text-gray-300 mx-auto mb-2" />
         <p className="text-gray-500 text-sm font-medium">点击「运行回测」查看结果</p>
-        <p className="text-[10px] text-gray-300 mt-1">基于 V5.0 信号系统进行历史回测</p>
+        <p className="text-xs text-gray-300 mt-1">基于 V5.0 信号系统进行历史回测</p>
       </div>
     );
   }
@@ -493,7 +648,7 @@ function BacktestResultPanel({ result }: { result: BacktestResultV5 | null }) {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         {metrics.map(it => (
           <div key={it.label} className="bg-gray-50 rounded-lg p-2.5">
-            <p className="text-[10px] text-gray-400 flex items-center gap-1">
+            <p className="text-xs text-gray-400 flex items-center gap-1">
               {it.icon}{it.label}
             </p>
             <p className={`text-base font-bold ${it.cls}`}>{it.value}</p>
@@ -503,7 +658,7 @@ function BacktestResultPanel({ result }: { result: BacktestResultV5 | null }) {
 
       {/* 收益率曲线 */}
       <div className="bg-gray-50 rounded-lg p-3">
-        <p className="text-[10px] text-gray-400 mb-1">收益率曲线（策略 vs 基准）</p>
+        <p className="text-xs text-gray-400 mb-1">收益率曲线（策略 vs 基准）</p>
         {renderCurve()}
       </div>
 
@@ -519,7 +674,7 @@ function BacktestResultPanel({ result }: { result: BacktestResultV5 | null }) {
       {result.risk_stats && (result.risk_stats.risk_triggers > 0 || result.risk_stats.pullback_buys > 0) && (
         <div className="bg-orange-50 rounded-lg p-2.5 flex items-center gap-2">
           <AlertTriangle className="w-3.5 h-3.5 text-orange-500 shrink-0" />
-          <p className="text-[10px] text-orange-700">
+          <p className="text-xs text-orange-700">
             风控触发 {result.risk_stats.risk_triggers}次
             （止损{result.risk_stats.stop_loss_triggers}·过热{result.risk_stats.overheat_triggers}）
             · 回调加仓{result.risk_stats.pullback_buys}·偏离加仓{result.risk_stats.deviation_buys}
@@ -532,7 +687,7 @@ function BacktestResultPanel({ result }: { result: BacktestResultV5 | null }) {
         <div>
           <h4 className="text-xs font-medium text-gray-600 mb-1.5">每日操作日志（最近{dailyLog.length}条）</h4>
           <div className="overflow-x-auto max-h-48 overflow-y-auto border border-gray-200 rounded-lg">
-            <table className="w-full text-[10px] text-left">
+            <table className="w-full text-xs text-left">
               <thead className="bg-gray-50 sticky top-0">
                 <tr className="text-gray-400">
                   <th className="px-2 py-1">日期</th>
@@ -548,7 +703,7 @@ function BacktestResultPanel({ result }: { result: BacktestResultV5 | null }) {
                   <tr key={i} className="border-t border-gray-100 hover:bg-gray-50">
                     <td className="px-2 py-1 font-mono text-gray-600">{log.date}</td>
                     <td className="px-2 py-1">
-                      <span className={`px-1 py-0.5 rounded text-[9px] font-bold ${SIGNAL_BG[log.signal] || ''}`}>{log.signal}</span>
+                      <span className={`px-1 py-0.5 rounded text-[10px] font-bold ${SIGNAL_BG[log.signal] || ''}`}>{log.signal}</span>
                     </td>
                     <td className="px-2 py-1 font-mono text-gray-700">{log.nav.toFixed(2)}</td>
                     <td className="px-2 py-1 text-gray-700">{log.advice_text}</td>
@@ -595,6 +750,11 @@ export default function Backtest() {
     if (!activeStrategy) return;
     setRunning(true);
     setError(null);
+
+    // AbortController 实现 30秒超时
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
     try {
       const p = activeStrategy.params;
       const data = await runBacktestV5({
@@ -630,8 +790,66 @@ export default function Backtest() {
       });
       setResult(data);
     } catch (err: any) {
-      setError(err?.message || '回测运行失败，请重试');
+      // 增强错误提取：优先从 axios response 中提取服务端错误信息
+      const msg = err?.response?.data?.message || err?.message || '回测运行失败，请重试';
+      setError(msg);
     } finally {
+      clearTimeout(timeoutId);
+      setRunning(false);
+    }
+  };
+
+  /** 运行基金回测 */
+  const handleRunFundBacktest = async (params: FundBacktestParams) => {
+    const strategy = strategies.find(s => s.id === params.strategyId) ?? activeStrategy;
+    if (!strategy) return;
+
+    setRunning(true);
+    setError(null);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+    try {
+      const p = strategy.params;
+      const data = await runBacktestV5({
+        index_code: params.fundCode,  // 传基金代码给后端
+        fund_code: params.fundCode,   // 显式传fund_code
+        start_date: params.startDate,
+        end_date: params.endDate,
+        initial_capital: params.initialCapital,
+        signal_boundaries: p.signal_boundaries,
+        signal_lag_days: p.signal_lag_days,
+        factor_weights: p.factor_weights,
+        factor_enabled: p.factor_enabled,
+        action_mapping: p.action_mapping,
+        quantile_window: p.quantile_window,
+        sigmoid_k: p.sigmoid_k,
+        composite_method: p.composite_method,
+        neutral_score: p.neutral_score,
+        risk_params: {
+          max_position: p.max_position,
+          min_position: p.min_position,
+          stop_loss: p.stop_loss,
+          stop_loss_threshold: p.stop_loss_threshold,
+          stop_loss_reduce_pct: p.stop_loss_reduce_pct,
+          take_profit: p.take_profit,
+          take_profit_drawdown: p.take_profit_drawdown,
+          overheat_days: p.overheat_days,
+          overheat_factor: p.overheat_factor,
+          pullback_lower: p.pullback_lower,
+          pullback_buy_mult: p.pullback_buy_mult,
+          position_dev_lower: p.position_dev_lower,
+          position_dev_buy_mult: p.position_dev_buy_mult,
+          base_buy_amount: p.base_buy_amount,
+        },
+      });
+      setResult(data);
+    } catch (err: any) {
+      const msg = err?.response?.data?.message || err?.message || '回测运行失败，请重试';
+      setError(msg);
+    } finally {
+      clearTimeout(timeoutId);
       setRunning(false);
     }
   };
@@ -660,6 +878,26 @@ export default function Backtest() {
     }
   };
 
+  /** 应用方案到系统（设为活跃） */
+  const handleApply = async () => {
+    if (!activeId) return;
+    try {
+      await activateBacktestStrategyV5(activeId);
+      setStrategies(prev => prev.map(s => ({
+        ...s,
+        is_active: s.id === activeId,
+      })));
+    } catch (err: any) {
+      alert(err?.response?.data?.message || err?.message || '应用方案失败');
+    }
+  };
+
+  /** 重命名当前方案 */
+  const handleRename = (newName: string) => {
+    if (!activeId) return;
+    setStrategies(prev => prev.map(s => s.id === activeId ? { ...s, name: newName } : s));
+  };
+
   return (
     <div className="max-w-5xl mx-auto space-y-4">
       <div>
@@ -670,6 +908,7 @@ export default function Backtest() {
       {/* 方案管理栏 */}
       <StrategyBar strategies={strategies} activeId={activeId} onSelect={setActiveId}
         onSave={handleSave} onDelete={handleDelete}
+        onApply={handleApply} onRename={handleRename}
         onNew={() => {
           const newId = Math.max(0, ...strategies.map(s => s.id)) + 1;
           setStrategies(prev => [...prev, { id: newId, name: `新方案${newId}`, is_active: false, params: { ...DEFAULT_MODEL_PARAMS } }]);
@@ -700,7 +939,15 @@ export default function Backtest() {
         </ParamPanel>
       </div>
 
-      {/* 运行回测按钮 */}
+      {/* 单基金回测参数区 */}
+      <FundBacktestSection
+        strategies={strategies}
+        activeStrategyId={activeId}
+        onRunFundBacktest={handleRunFundBacktest}
+        running={running}
+      />
+
+      {/* 运行回测按钮（沪深300） */}
       <button onClick={handleRun} disabled={running}
         className={`w-full py-2.5 rounded-lg text-sm font-medium text-white transition-colors ${
           running ? 'bg-gray-400 cursor-not-allowed' : 'bg-brand-500 hover:bg-brand-600'

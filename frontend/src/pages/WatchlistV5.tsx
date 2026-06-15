@@ -51,10 +51,10 @@ function FundCard({
       </button>
 
       <div className="flex items-center gap-2 mb-1.5">
-        <span className="text-[10px] font-mono text-gray-400">{item.fund_code}</span>
+        <span className="text-xs font-mono text-gray-400">{item.fund_code}</span>
         {signal && (
           <span
-            className="text-[9px] px-1 py-0.5 rounded-full text-white"
+            className="text-[10px] px-1 py-0.5 rounded-full text-white"
             style={{ backgroundColor: signal.signalLevel === 'S+' ? '#059669' : signal.signalLevel === 'S' ? '#10B981' : signal.signalLevel === 'A' ? '#6EE7B7' : '#FBBF24' }}
           >
             {signal.signalLevel}
@@ -64,7 +64,7 @@ function FundCard({
 
       <p className="text-xs font-medium text-gray-800 truncate">{fundShortName}</p>
 
-      <div className="flex items-center gap-2 mt-1.5 text-[10px]">
+      <div className="flex items-center gap-2 mt-1.5 text-xs">
         <span className={returnCls(item.daily_return)}>
           {item.daily_return >= 0 ? '+' : ''}{item.daily_return.toFixed(2)}%
         </span>
@@ -103,7 +103,7 @@ function FundCardExpanded({
   return (
     <div className="mt-2 p-3 bg-gray-50 rounded-lg space-y-2 text-xs animate-fadeIn">
       <h4 className="font-bold text-gray-700">基金详情</h4>
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
         <div><span className="text-gray-400">基金名称</span><p className="font-medium text-gray-700">{item.fund_name}</p></div>
         <div><span className="text-gray-400">添加日期</span><p className="font-medium text-gray-700">{item.added_at}</p></div>
         <div><span className="text-gray-400">当前净值</span><p className="font-mono font-medium">{item.current_nav.toFixed(4)}</p></div>
@@ -245,7 +245,7 @@ export default function WatchlistV5() {
         <div className="card p-8 text-center">
           <Star className="w-8 h-8 text-gray-300 mx-auto mb-2" />
           <p className="text-gray-500 text-sm font-medium">暂无自选基金</p>
-          <p className="text-[10px] text-gray-300 mt-1">在基金查询页点击 ★ 添加自选基金，即可在此查看实时信号</p>
+          <p className="text-xs text-gray-300 mt-1">在基金查询页点击 ★ 添加自选基金，即可在此查看实时信号</p>
         </div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
