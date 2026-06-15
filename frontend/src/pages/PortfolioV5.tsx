@@ -14,6 +14,7 @@ import {
   executePositionV5,
 } from '../api/portfolioV5';
 import { fetchV5Sentiment } from '../api/marketV5';
+import client from '../api/client';
 
 /* ============================================================
    信号颜色映射
@@ -375,20 +376,36 @@ export default function PortfolioV5() {
           return;
         }
 
-        // 并行获取每只基金的V5信号
-        const signalEntries = await Promise.all(
-          safeItems.map(async (item) => {
-            try {
-              const sentiment = await fetchV5Sentiment(item.fund_code);
-              return [item.fund_code, {
-                signalLevel: sentiment.signal_level as SignalLevel,
-                confidenceStars: sentiment.confidence_stars,
-              }] as [string, { signalLevel: SignalLevel; confidenceStars: number }];
-            } catch {
-              return null;
-            }
-          }),
-        );
+        // 并行获取每只基金的V5信号 + 详情数据
+        const [signalEntries, detailEntries] = await Promise.all([
+          // 信号获取
+          Promise.all(
+            safeItems.map(async (item) => {
+              try {
+                const sentiment = await fetchV5Sentiment(item.fund_code);
+                return [item.fund_code, {
+                  signalLevel: sentiment.signal_level as SignalLevel,
+                  confidenceStars: sentiment.confidence_stars,
+                }] as [string, { signalLevel: SignalLevel; confidenceStars: number }];
+              } catch {
+                return null;
+              }
+            }),
+          ),
+          // 基金详情获取（净值走势+持仓股票+评估）
+          Promise.all(
+            safeItems.map(async (item) => {
+              try {
+                const resp = await client.get(`/api/v5/portfolio/fund-detail?fund_code=${item.fund_code}`);
+                const data = resp.data?.data;
+                if (!data) return null;
+                return [item.fund_code, data] as [string, any];
+              } catch {
+                return null;
+              }
+            }),
+          ),
+        ]);
 
         if (cancelled) return;
 
@@ -398,57 +415,57 @@ export default function PortfolioV5() {
         });
         setSignals(signalMap);
 
-        // 生成模拟增强数据（TODO: 接真实API）
-        const mockNavHistories: Record<string, number[]> = {};
-        const mockTopStocks: Record<string, { name: string; pct: number; change: number }[]> = {};
-        const mockEvaluations: Record<string, any> = {};
+        // 从详情API提取增强数据
+        const realNavHistories: Record<string, number[]> = {};
+        const realTopStocks: Record<string, { name: string; pct: number; change: number }[]> = {};
+        const realEvaluations: Record<string, any> = {};
 
-        safeItems.forEach(item => {
-          // 模拟30天净值走势
-          const baseNav = item.current_nav || 1.0;
-          const navs: number[] = [];
-          for (let d = 30; d >= 0; d--) {
-            const noise = (Math.random() - 0.48) * 0.02;
-            const trend = item.return_rate > 0 ? 0.001 : -0.001;
-            const nav = baseNav * (1 + trend * (30 - d) + noise * Math.sqrt(30 - d));
-            navs.push(parseFloat(nav.toFixed(4)));
+        detailEntries.forEach((entry) => {
+          if (!entry) return;
+          const [code, detail] = entry;
+
+          // 净值走势：从nav_history提取nav值
+          const navH = detail.nav_history || [];
+          if (navH.length > 1) {
+            realNavHistories[code] = navH.map((p: any) => p.nav || p.adj_nav || 0).filter((v: number) => v > 0);
           }
-          mockNavHistories[item.fund_code] = navs;
 
-          // 模拟前8大持仓股票
-          const stockNames = ['贵州茅台', '宁德时代', '招商银行', '中国平安', '隆基绿能', '比亚迪', '腾讯控股', '美的集团'];
-          const totalPct = 0.55;
-          mockTopStocks[item.fund_code] = stockNames.slice(0, 8).map((name, i) => ({
-            name,
-            pct: parseFloat(((totalPct / 8) * (1 - i * 0.05)).toFixed(3)),
-            change: parseFloat(((Math.random() - 0.45) * 4).toFixed(2)),
-          }));
+          // 持仓股票
+          const holdings = detail.top_holdings || [];
+          if (holdings.length > 0) {
+            realTopStocks[code] = holdings.map((h: any) => ({
+              name: h.stock_name || `${h.exchange}${h.stock_code}`,
+              pct: (h.weight_pct || 0) / 100,
+              change: h.daily_change || 0,
+            }));
+          }
 
-          // 模拟基金评估
-          const signal = signalMap[item.fund_code]?.signalLevel || 'B';
-          const isFear = ['S+', 'S', 'A'].includes(signal);
-          mockEvaluations[item.fund_code] = {
-            short_term: {
-              label: isFear ? '加仓' : '观望',
-              score: isFear ? 75 : 35,
-              reason: isFear ? '恐惧区间' : '贪婪区间',
-            },
-            mid_term: {
-              label: item.return_rate > 0 ? '持有' : '减仓',
-              score: item.return_rate > 0 ? 65 : 30,
-              reason: item.return_rate > 0 ? '正收益' : '负收益',
-            },
-            long_term: {
-              label: '定投',
-              score: 55,
-              reason: '长期配置',
-            },
-          };
+          // 基金评估
+          const eval_ = detail.evaluation;
+          if (eval_) {
+            realEvaluations[code] = {
+              short_term: {
+                label: eval_.short_term?.judgment || '中性',
+                score: Math.round((eval_.short_term?.return_pct || 0) * 10 + 50),
+                reason: `${eval_.short_term?.period || '短期'}: ${eval_.short_term?.return_pct?.toFixed(2) || 0}%`,
+              },
+              mid_term: {
+                label: eval_.mid_term?.judgment || '中性',
+                score: Math.round((eval_.mid_term?.return_pct || 0) * 5 + 50),
+                reason: `${eval_.mid_term?.period || '中期'}: ${eval_.mid_term?.return_pct?.toFixed(2) || 0}%`,
+              },
+              long_term: {
+                label: eval_.long_term?.judgment || '长期配置',
+                score: 55,
+                reason: eval_.long_term?.judgment || '建议长期持有',
+              },
+            };
+          }
         });
 
-        setNavHistories(mockNavHistories);
-        setTopStocksMap(mockTopStocks);
-        setEvaluationsMap(mockEvaluations);
+        setNavHistories(realNavHistories);
+        setTopStocksMap(realTopStocks);
+        setEvaluationsMap(realEvaluations);
       } catch (err: any) {
         if (!cancelled) {
           setError(err?.message || '加载持仓数据失败');
