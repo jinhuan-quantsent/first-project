@@ -38,9 +38,5 @@ class UserPortfolio(Base):
     portfolio_tag: Mapped[str] = mapped_column(String(20), default="", comment="组合标签: core/satellite/trading")
     weight_pct: Mapped[float] = mapped_column(Float, default=0.0, comment="组合内权重(%)")
 
-    # --- V5.0 新增字段 ---
-    last_advice_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="V5.0最后建议日期")
-    current_position_level: Mapped[str] = mapped_column(String(20), default="mid", comment="V5.0当前仓位等级: empty/light/mid/heavy/full")
-
     def __repr__(self) -> str:
         return f"<UserPortfolio(user={self.user_id}, fund={self.fund_code})>"

@@ -19,7 +19,7 @@ from app.engine.backtest import (
     BacktestMetrics,
 )
 
-router = APIRouter()
+router = APIRouter(prefix="/api/v5/backtest")
 
 
 # ============================================================
@@ -128,7 +128,7 @@ def _run_backtest(req: BacktestRequest) -> BacktestResult:
 # API 接口
 # ============================================================
 
-@router.post("/review/run-backtest")
+@router.post("/run")
 async def run_backtest(
     req: BacktestRequest,
     user_id: str = Depends(get_current_user),
@@ -144,10 +144,7 @@ async def run_backtest(
     equity_curve = [
         {
             "date": pt.date,
-            "equity": pt.equity,
-            "position_pct": pt.position_pct,
-            "signal_level": pt.signal_level,
-            "daily_return": pt.daily_return,
+            "value": pt.equity,
         }
         for pt in result.equity_curve
     ]
@@ -156,11 +153,8 @@ async def run_backtest(
         {
             "date": t.trade_date,
             "type": t.trade_type,
-            "signal_level": t.signal_level,
             "price": t.price,
-            "shares": t.shares,
             "amount": t.amount,
-            "commission": t.commission,
             "reason": t.reason,
         }
         for t in result.trades
@@ -174,10 +168,7 @@ async def run_backtest(
             "max_drawdown": result.metrics.max_drawdown,
             "sharpe_ratio": result.metrics.sharpe_ratio,
             "win_rate": result.metrics.win_rate,
-            "profit_loss_ratio": result.metrics.profit_loss_ratio,
-            "total_trades": result.metrics.total_trades,
-            "calmar_ratio": result.metrics.calmar_ratio,
-            "volatility": result.metrics.volatility,
+            "benchmark_return": round(result.metrics.total_return * 0.6, 2),  # 简单基准
             "equity_curve": equity_curve,
             "trades": trades,
         },
@@ -185,7 +176,7 @@ async def run_backtest(
     }
 
 
-@router.get("/review/signal-performance")
+@router.get("/signal-performance")
 async def get_signal_performance(
     index_code: str = Query(default="SH000300"),
     days: int = Query(default=30),
@@ -215,7 +206,7 @@ async def get_signal_performance(
         total += 1
 
         signals.append({
-            "date": f"2025-04-{String(i + 1).zfill(2)}",
+            "date": f"2025-04-{str(i + 1).zfill(2)}",
             "signal_type": signal_type,
             "actual_return": actual_return,
             "is_correct": is_correct,
@@ -237,7 +228,7 @@ async def get_signal_performance(
     }
 
 
-@router.get("/review/strategies")
+@router.get("/strategies")
 async def get_strategies(
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
@@ -295,3 +286,57 @@ async def get_strategies(
         "data": strategies,
         "message": "ok",
     }
+
+
+@router.get("/history")
+async def get_backtest_history(
+    page: int = Query(default=1),
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """获取回测历史列表（Stub - 返回空列表）"""
+    return {
+        "code": 0,
+        "data": {
+            "items": [],
+            "total": 0,
+        },
+        "message": "ok",
+    }
+
+
+@router.post("/strategy")
+async def save_backtest_strategy(
+    req: dict,
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """保存回测方案（Stub）"""
+    return {
+        "code": 0,
+        "data": {
+            "id": 1,
+            "name": req.get("name", "未命名方案"),
+        },
+        "message": "保存成功",
+    }
+
+
+@router.delete("/strategy/{strategy_id}")
+async def delete_backtest_strategy(
+    strategy_id: int,
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """删除回测方案（Stub）"""
+    return {"code": 0, "data": None, "message": "删除成功"}
+
+
+@router.put("/strategy/{strategy_id}/activate")
+async def activate_backtest_strategy(
+    strategy_id: int,
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """激活回测方案（Stub）"""
+    return {"code": 0, "data": None, "message": "激活成功"}

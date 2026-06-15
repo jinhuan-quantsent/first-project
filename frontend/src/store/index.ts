@@ -24,6 +24,7 @@ interface AuthState {
 
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string) => Promise<void>;
+  guestLogin: () => void;
   logout: () => void;
   restoreSession: () => void;
   clearError: () => void;
@@ -94,6 +95,22 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ auth: { ...get().auth, authLoading: false, authError: msg } });
         throw new Error(msg);
       }
+    },
+
+    guestLogin: () => {
+      const guestUser = { user_id: 'guest', email: 'guest@fundsent.top', role: 'guest' } as User;
+      const guestToken = 'guest-token';
+      set({
+        auth: {
+          user: guestUser,
+          token: guestToken,
+          isAuthenticated: true,
+          authLoading: false,
+          authError: null,
+        },
+      });
+      localStorage.setItem(TOKEN_KEY, guestToken);
+      localStorage.setItem(USER_KEY, JSON.stringify(guestUser));
     },
 
     logout: () => {

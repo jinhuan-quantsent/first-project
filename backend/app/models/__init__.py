@@ -7,6 +7,8 @@ from app.models.advice_log import AdviceLog
 from app.models.position_execution import PositionExecution
 from app.models.backtest_strategy import BacktestStrategy
 from app.models.backtest_result import BacktestResult
+from app.models.fund_basic import FundBasic
+from app.models.fund_nav import FundNav
 
 __all__ = [
     "Base",
@@ -17,4 +19,6 @@ __all__ = [
     "PositionExecution",
     "BacktestStrategy",
     "BacktestResult",
+    "FundBasic",
+    "FundNav",
 ]

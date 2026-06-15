@@ -76,9 +76,8 @@ app.include_router(health_router, prefix="", tags=["健康检查"])
 app.include_router(auth_router, prefix="", tags=["认证"])
 app.include_router(v5_router, prefix="", tags=["V5.0情绪引擎"])
 
-# 基金查询（改为 /api/v5/fund/*）
-fund_router.prefix = "/api/v5/fund"
-app.include_router(fund_router, prefix="", tags=["基金查询"])
+# 基金查询（prefix="/api/v5/fund" 必须在 include_router 参数里传，否则FastAPI不生效）
+app.include_router(fund_router, prefix="/api/v5/fund", tags=["基金查询"])
 
 # 持仓管理（已自带 /api/v5/portfolio 前缀）
 app.include_router(portfolio_router, prefix="", tags=["持仓管理"])
@@ -86,8 +85,7 @@ app.include_router(portfolio_router, prefix="", tags=["持仓管理"])
 # 自选基金（已自带 /api/v5/watchlist 前缀）
 app.include_router(watchlist_router, prefix="", tags=["自选基金"])
 
-# 回测引擎（改为 /api/v5/review/*）
-review_v5_router.prefix = "/api/v5/review"
+# 回测引擎（保留原始前缀 /api/v5/backtest）
 app.include_router(review_v5_router, prefix="", tags=["V5.0回测引擎"])
 
 

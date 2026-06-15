@@ -46,7 +46,7 @@ class PositionAdviceResponse(BaseModel):
     reason: str
 
 
-@router.get("/portfolio")
+@router.get("")
 async def get_portfolio(
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
@@ -105,7 +105,7 @@ async def get_portfolio(
     }
 
 
-@router.post("/portfolio", status_code=201)
+@router.post("", status_code=201)
 async def add_portfolio_item(
     item: PortfolioItem,
     user_id: str = Depends(get_current_user),
@@ -150,7 +150,7 @@ async def add_portfolio_item(
     }
 
 
-@router.put("/portfolio/{item_id}")
+@router.put("/{item_id}")
 async def update_portfolio_item(
     item_id: int,
     item: PortfolioItem,
@@ -189,7 +189,7 @@ async def update_portfolio_item(
     return {"code": 0, "data": {"id": existing.id}, "message": "更新成功"}
 
 
-@router.delete("/portfolio/{item_id}")
+@router.delete("/{item_id}")
 async def delete_portfolio_item(
     item_id: int,
     user_id: str = Depends(get_current_user),
@@ -211,7 +211,7 @@ async def delete_portfolio_item(
     return {"code": 0, "data": None, "message": "删除成功"}
 
 
-@router.get("/portfolio/overlap")
+@router.get("/overlap")
 async def get_portfolio_overlap(
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
@@ -250,7 +250,7 @@ async def get_portfolio_overlap(
 # V5.0 仓位建议接口
 # ============================================================
 
-@router.get("/portfolio/position-v5")
+@router.get("/position-v5")
 async def get_position_v5(
     fund_code: str = Query(..., description="基金代码"),
     current_position_pct: float = Query(..., description="当前仓位百分比 (0-1)"),
@@ -284,3 +284,46 @@ async def get_position_v5(
     )
 
     return {"code": 0, "data": advice, "message": "ok"}
+
+
+# ============================================================
+# V5.0 历史建议 & 交易记录（Stub）
+# ============================================================
+
+@router.get("/advice-history")
+async def get_advice_history(
+    fund_code: Optional[str] = Query(default=None),
+    page: int = Query(default=1),
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """获取仓位建议历史（Stub - 返回空列表）"""
+    return {
+        "code": 0,
+        "data": {
+            "items": [],
+            "stats": {
+                "total_advice": 0,
+                "executed": 0,
+                "pending": 0,
+            },
+        },
+        "message": "ok",
+    }
+
+
+@router.get("/trade-records")
+async def get_trade_records(
+    fund_code: Optional[str] = Query(default=None),
+    page: int = Query(default=1),
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """获取交易记录（Stub - 返回空列表）"""
+    return {
+        "code": 0,
+        "data": {
+            "items": [],
+        },
+        "message": "ok",
+    }

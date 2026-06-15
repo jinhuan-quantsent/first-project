@@ -41,7 +41,7 @@ export default function Login() {
     <div className="min-h-screen flex items-center justify-center bg-[var(--bg-primary)] px-4">
       <div className="w-full max-w-md bg-white rounded-2xl p-8 shadow-xl border border-gray-100">
         <h1 className="text-2xl font-bold text-gray-800 text-center mb-2">基金情绪分析系统</h1>
-        <p className="text-gray-400 text-center mb-8">登录以访问个性化数据</p>
+        <p className="text-gray-400 text-center mb-8">登录以访问个性化数据，或以游客身份浏览</p>
 
         {errorMsg && (
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm">
@@ -49,7 +49,7 @@ export default function Login() {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-5">
+        <form onSubmit={handleSubmit} noValidate className="space-y-5">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1.5">邮箱</label>
             <input
@@ -57,7 +57,6 @@ export default function Login() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="user@example.com"
-              required
               className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
             />
           </div>
@@ -68,9 +67,7 @@ export default function Login() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="输入密码"
-              required
-              minLength={8}
+              placeholder="输入密码（8位以上）"
               className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
             />
           </div>
@@ -83,6 +80,23 @@ export default function Login() {
             {auth.authLoading ? '登录中...' : '登录'}
           </button>
         </form>
+
+        {/* 游客模式入口 */}
+        <div className="mt-5 flex items-center gap-3">
+          <div className="flex-1 h-px bg-gray-200" />
+          <span className="text-xs text-gray-400">或</span>
+          <div className="flex-1 h-px bg-gray-200" />
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            auth.guestLogin();
+            navigate('/');
+          }}
+          className="mt-3 w-full py-2.5 border border-gray-300 text-gray-600 hover:bg-gray-50 font-medium rounded-lg transition-colors"
+        >
+          以游客身份访问
+        </button>
 
         <p className="mt-6 text-center text-sm text-gray-500">
           还没有账号？{' '}

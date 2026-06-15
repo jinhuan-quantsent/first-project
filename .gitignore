@@ -31,3 +31,4 @@ env/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+test_bclass_factors.py

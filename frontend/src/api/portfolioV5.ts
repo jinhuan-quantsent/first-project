@@ -6,7 +6,7 @@ import type { ApiResponse, PortfolioItem, PortfolioSummary, PositionAdviceData }
 
 /** 获取持仓列表 */
 export async function fetchPortfolioV5(): Promise<{ items: PortfolioItem[]; summary: PortfolioSummary }> {
-  const res = await client.get<ApiResponse<any>>('/api/v5/portfolio/list');
+  const res = await client.get<ApiResponse<any>>('/api/v5/portfolio');
   return res.data.data;
 }
 
@@ -29,7 +29,7 @@ export async function executePositionV5(params: {
   signal_level: string;
   confidence_stars: number;
 }): Promise<{ execution_id: number; message: string }> {
-  const res = await client.post<ApiResponse<any>>('/api/v5/portfolio/execute', params);
+  const res = await client.post<ApiResponse<any>>('/api/v5/portfolio/position-execute', params);
   return res.data.data;
 }
 

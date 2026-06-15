@@ -20,8 +20,14 @@ export default function AppLayout() {
     return () => clearInterval(interval);
   }, [loadSnapshot, loadMultiIndex]);
 
+  const isGuest = (auth.user as any)?.role === 'guest';
+
   const handleLogout = () => {
     auth.logout();
+    navigate('/login');
+  };
+
+  const handleLogin = () => {
     navigate('/login');
   };
 
@@ -38,15 +44,24 @@ export default function AppLayout() {
             <div className="flex items-center gap-2">
               <Avatar email={auth.user?.email || ''} size={28} />
               <span className="text-sm text-gray-600">
-                {auth.user?.email || ''}
+                {isGuest ? '游客模式' : (auth.user?.email || '')}
               </span>
             </div>
-            <button
-              onClick={handleLogout}
-              className="text-sm text-gray-500 hover:text-red-500 transition-colors px-2 py-1 rounded hover:bg-red-50"
-            >
-              登出
-            </button>
+            {isGuest ? (
+              <button
+                onClick={handleLogin}
+                className="text-sm text-gray-500 hover:text-brand-500 transition-colors px-2 py-1 rounded hover:bg-blue-50"
+              >
+                登录
+              </button>
+            ) : (
+              <button
+                onClick={handleLogout}
+                className="text-sm text-gray-500 hover:text-red-500 transition-colors px-2 py-1 rounded hover:bg-red-50"
+              >
+                登出
+              </button>
+            )}
           </div>
 
           <Outlet />

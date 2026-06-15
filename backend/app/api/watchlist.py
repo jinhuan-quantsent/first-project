@@ -25,7 +25,7 @@ class WatchlistAdd(BaseModel):
     alert_threshold: float = 0.0
 
 
-@router.get("/watchlist")
+@router.get("")
 async def get_watchlist(
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
@@ -41,31 +41,28 @@ async def get_watchlist(
 
     return {
         "code": 0,
-        "data": {
-            "items": [
-                {
-                    "id": item.id,
-                    "fund_code": item.fund_code,
-                    "fund_name": item.fund_name,
-                    "added_at": item.added_at.isoformat() if item.added_at else "",
-                    "notes": item.notes,
-                    "alert_threshold": item.alert_threshold,
-                    "sort_order": item.sort_order,
-                    "current_nav": 1.0,
-                    "daily_return": 0.0,
-                    "week_return": 0.0,
-                    "month_return": 0.0,
-                }
-                for item in items
-            ],
-            "total": len(items),
-            "updated_at": datetime.now().isoformat(),
-        },
+        "data": [
+            {
+                "id": item.id,
+                "fund_code": item.fund_code,
+                "fund_name": item.fund_name,
+                "fund_short_name": item.fund_name,
+                "added_at": item.added_at.isoformat() if item.added_at else "",
+                "notes": item.notes,
+                "alert_threshold": item.alert_threshold,
+                "sort_order": item.sort_order,
+                "current_nav": 1.0,
+                "daily_return": 0.0,
+                "week_return": 0.0,
+                "month_return": 0.0,
+            }
+            for item in items
+        ],
         "message": "ok",
     }
 
 
-@router.post("/watchlist", status_code=201)
+@router.post("", status_code=201)
 async def add_watchlist_item(
     item: WatchlistAdd,
     user_id: str = Depends(get_current_user),
@@ -104,7 +101,7 @@ async def add_watchlist_item(
     }
 
 
-@router.delete("/watchlist/{item_id}")
+@router.delete("/{item_id}")
 async def delete_watchlist_item(
     item_id: int,
     user_id: str = Depends(get_current_user),
