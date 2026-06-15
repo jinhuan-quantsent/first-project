@@ -1,16 +1,16 @@
 /**
- * PortfolioV5 - V5.0 持仓页（模板对齐增强版）
- * 持仓汇总 + 可展开条目 + 迷你走势图 + 持仓股票 + 基金评估 + 执行按钮
+ * PortfolioV5 - 持仓页重设计 V5
+ * 总览头部 + 列表行 + 详情展开面板
+ * 对齐设计稿 Image4 + Image5
  */
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import type { PortfolioItem, PortfolioSummary, SignalLevel } from '../types';
-import { Plus, TrendingUp, TrendingDown, Minus, Briefcase, BarChart3, Eye } from 'lucide-react';
+import { SIGNAL_LABELS } from '../types';
+import PositionDetailPanel, { type PositionDetailData } from '../components/portfolio/PositionDetailPanel';
+import { Briefcase, Pencil, ChevronDown, ChevronUp } from 'lucide-react';
 import { clsx } from 'clsx';
-import ExecutionButton from '../components/fundsearch/ExecutionButton';
 import {
   fetchPortfolioV5,
-  fetchAdviceHistoryV5,
-  fetchTradeRecordsV5,
   executePositionV5,
 } from '../api/portfolioV5';
 import { fetchV5Sentiment } from '../api/marketV5';
@@ -20,304 +20,276 @@ import client from '../api/client';
    信号颜色映射
    ============================================================ */
 const SIGNAL_BG: Record<string, string> = {
-  'S+': 'bg-purple-100 text-purple-700', S: 'bg-blue-100 text-blue-700',
-  A: 'bg-cyan-100 text-cyan-700', B: 'bg-lime-100 text-lime-700',
-  C: 'bg-yellow-100 text-yellow-700', D: 'bg-orange-100 text-orange-700',
-  E: 'bg-red-100 text-red-700',
+  'S+': 'bg-emerald-100 text-emerald-700',
+  S: 'bg-green-100 text-green-700',
+  A: 'bg-teal-100 text-teal-700',
+  B: 'bg-amber-100 text-amber-700',
+  C: 'bg-orange-100 text-orange-700',
+  D: 'bg-red-100 text-red-700',
+  E: 'bg-rose-100 text-rose-700',
 };
 
 /* ============================================================
-   子组件
+   工具函数
    ============================================================ */
-
-/** 持仓汇总卡片 */
-function PortfolioSummaryCard({ data }: { data: PortfolioSummary }) {
-  const returnClass = data.total_return_rate >= 0 ? 'text-red-500' : 'text-green-500';
-  const dailyClass  = data.daily_return    >= 0 ? 'text-red-500' : 'text-green-500';
-  return (
-    <div className="card p-4 grid grid-cols-2 md:grid-cols-4 gap-4">
-      <div>
-        <p className="text-xs text-gray-400">总市值</p>
-        <p className="text-lg font-bold text-gray-800">¥{(data.total_value / 10000).toFixed(2)}万</p>
-      </div>
-      <div>
-        <p className="text-xs text-gray-400">累计收益</p>
-        <p className={`text-lg font-bold ${returnClass}`}>
-          {data.total_return >= 0 ? '+' : ''}¥{(data.total_return / 10000).toFixed(2)}万
-        </p>
-      </div>
-      <div>
-        <p className="text-xs text-gray-400">今日收益</p>
-        <p className={`text-lg font-bold ${dailyClass}`}>
-          {data.daily_return >= 0 ? '+' : ''}¥{data.daily_return.toFixed(0)}
-        </p>
-      </div>
-      <div>
-        <p className="text-xs text-gray-400">核心/卫星比</p>
-        <p className="text-lg font-bold text-gray-800">
-          {Math.round(data.core_ratio * 100)}% / {Math.round(data.satellite_ratio * 100)}%
-        </p>
-      </div>
-    </div>
-  );
-}
-
-/** SVG 迷你走势图（30天净值） */
-function MiniChart({ values, width = 200, height = 48 }: { values: number[]; width?: number; height?: number }) {
-  if (!values || values.length < 2) {
-    return (
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ height: `${height}px` }}>
-        <text x={width / 2} y={height / 2} textAnchor="middle" fill="#CBD5E1" fontSize="8">暂无数据</text>
-      </svg>
-    );
+/** 格式化金额（自动万元） */
+function formatMoney(v: number): string {
+  if (Math.abs(v) >= 10000) {
+    return `¥${(v / 10000).toFixed(2)}万`;
   }
-
-  const padX = 4, padY = 4;
-  const innerW = width - padX * 2, innerH = height - padY * 2;
-  const minV = Math.min(...values), maxV = Math.max(...values);
-  const rangeV = maxV - minV || 1;
-
-  const points = values.map((v, i) => {
-    const x = padX + (i / (values.length - 1)) * innerW;
-    const y = padY + innerH - ((v - minV) / rangeV) * innerH;
-    return `${x},${y}`;
-  });
-
-  const isUp = values[values.length - 1] >= values[0];
-  const strokeColor = isUp ? '#EF4444' : '#22C55E';
-  const fillColor = isUp ? '#FEE2E2' : '#DCFCE7';
-
-  // 面积路径
-  const areaPath = `M${points[0].split(',')[0]},${padY + innerH} ` +
-    points.map((p, i) => `${i === 0 ? 'L' : ''}${p}`).join(' L') +
-    ` L${padX + innerW},${padY + innerH} Z`;
-  const linePath = `M${points.join(' L')}`;
-
-  return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="w-full" style={{ height: `${height}px` }}>
-      <defs>
-        <linearGradient id={`miniGrad-${isUp ? 'up' : 'down'}`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={strokeColor} stopOpacity="0.15" />
-          <stop offset="100%" stopColor={strokeColor} stopOpacity="0.02" />
-        </linearGradient>
-      </defs>
-      <path d={areaPath} fill={`url(#miniGrad-${isUp ? 'up' : 'down'})`} />
-      <path d={linePath} fill="none" stroke={strokeColor} strokeWidth="1.5" />
-    </svg>
-  );
+  return `¥${v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** 前8大持仓股票 */
-function TopHoldings({ stocks }: { stocks: { name: string; pct: number; change: number }[] }) {
-  if (!stocks || stocks.length === 0) {
-    return (
-      <div className="text-xs text-gray-300 text-center py-2">
-        持仓股票数据暂无
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-1">
-      <p className="text-xs text-gray-500 font-medium flex items-center gap-1">
-        <BarChart3 className="w-3 h-3" /> 前{stocks.length}大持仓股票
-      </p>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
-        {stocks.map((s, i) => (
-          <div key={i} className="flex items-center justify-between text-xs">
-            <span className="text-gray-600 truncate">{s.name}</span>
-            <span className="flex items-center gap-1 shrink-0 ml-2">
-              <span className="text-gray-400 font-mono">{(s.pct * 100).toFixed(1)}%</span>
-              <span className={`font-mono ${s.change >= 0 ? 'text-red-500' : 'text-green-500'}`}>
-                {s.change >= 0 ? '+' : ''}{s.change.toFixed(2)}%
-              </span>
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+/** 格式化金额（始终完整） */
+function formatMoneyFull(v: number): string {
+  return `¥${v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** 基金评估（短/中/长期） */
-function FundEvaluation({ evaluation }: {
-  evaluation?: {
-    short_term: { label: string; score: number; reason: string };
-    mid_term: { label: string; score: number; reason: string };
-    long_term: { label: string; score: number; reason: string };
+/** 格式化涨跌值（A股：红涨绿跌） */
+function formatChangeValue(v: number): { text: string; cls: string } {
+  const sign = v >= 0 ? '+' : '';
+  const cls = v >= 0 ? 'text-red-500' : 'text-green-500';
+  return {
+    text: `${sign}¥${Math.abs(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+    cls,
   };
-}) {
-  if (!evaluation) {
+}
+
+/** 格式化涨跌率 */
+function formatChangeRate(v: number): { text: string; cls: string } {
+  const sign = v >= 0 ? '+' : '';
+  const cls = v >= 0 ? 'text-red-500' : 'text-green-500';
+  return { text: `${sign}${v.toFixed(2)}%`, cls };
+}
+
+/* ============================================================
+   Mock 数据生成器
+   为详情面板生成合理的 mock 数据
+   ============================================================ */
+function generateMockDetailData(
+  item: PortfolioItem,
+  signal: { signalLevel: SignalLevel; confidenceStars: number } | undefined,
+  navHistory: number[] | undefined,
+  topStocks: { name: string; pct: number; change: number }[] | undefined,
+  evaluation: any | undefined,
+): PositionDetailData {
+  const signalLevel = signal?.signalLevel ?? 'B';
+  const signalLabel = SIGNAL_LABELS[signalLevel] ?? '中性';
+  const operationTag: PositionDetailData['operationTag'] =
+    signalLevel === 'S+' || signalLevel === 'S' ? '加仓' :
+    signalLevel === 'D' || signalLevel === 'E' ? '减仓' :
+    signalLevel === 'A' ? '买入' : '持有';
+
+  return {
+    fundCode: item.fund_code,
+    fundName: (item as any).fund_short_name || item.fund_name,
+    marketValue: item.market_value,
+    dailyReturn: item.daily_return,
+    holdingReturn: item.total_return,
+    holdingReturnRate: item.return_rate,
+    signalLevel,
+    confidenceStars: signal?.confidenceStars ?? 3,
+    signalReason: `${signalLevel}·${signalLabel}，近期波动较大`,
+
+    complianceStars: 4.5,
+    complianceDirection: 'new',
+    operationTag,
+    recommendationReason: `基于${signalLabel}信号分析，当前市场情绪处于${signalLabel}区间，建议${operationTag}。该基金近期表现${item.return_rate >= 0 ? '优于' : '弱于'}基准，仓位调整需谨慎。`,
+    updateNote: `更新市值${formatMoney(item.market_value)}（${item.return_rate >= 0 ? '涨' : '跌'}${Math.abs(item.return_rate).toFixed(1)}%）`,
+
+    winRate: 72 + Math.floor(Math.random() * 16),
+    winRateDetail: `近1年${8 + Math.floor(Math.random() * 8)}场博弈`,
+    performanceRecords: [
+      { date: '2024-06-18', signal: 'S+', operation: '减仓', correctUp: true, correctDown: false, returnPct: -9.17, reason: '触发预警，51周新高分警惕!' },
+      { date: '2024-06-12', signal: '✓', operation: '减仓', correctUp: true, correctDown: false, returnPct: -47.3, reason: '剧烈波动分散降低风险+2%' },
+      { date: '2024-06-05', signal: '⚠', operation: '持有', correctUp: false, correctDown: true, returnPct: 8.3, reason: '新能源行情，小幅减仓锁定收益' },
+      { date: '2024-05-28', signal: 'S', operation: '加仓', correctUp: true, correctDown: false, returnPct: 3.2, reason: '底部信号确认，分批加仓' },
+      { date: '2024-05-20', signal: '△', operation: '持有', correctUp: false, correctDown: true, returnPct: -1.5, reason: '市场观望期，维持仓位' },
+    ],
+
+    tradeRecords: [
+      { date: '2024-06-18', type: '买入', amount: 15000, nav: 1.7140, fee: 127.88 },
+      { date: '2024-05-15', type: '买入', amount: 20000, nav: 1.1170, fee: 148.21 },
+      { date: '2024-04-02', type: '卖出', amount: 16600, nav: 1.1740, fee: 79.23 },
+      { date: '2024-03-13', type: '持有', amount: 122, nav: 0, fee: 0 },
+    ],
+
+    navHistory: navHistory?.map((nav, i) => ({
+      date: new Date(Date.now() - (navHistory.length - i) * 86400000).toISOString().slice(0, 10),
+      nav,
+    })) ?? [],
+
+    topHoldings: topStocks?.map(s => ({
+      name: s.name,
+      pct: s.pct * 100,
+      description: s.name.includes('半导体') ? '半导体设备龙头，国产替代核心标的' :
+        s.name.includes('金山') ? '办公软件龙头，AI赋能收入增速预期' :
+        s.name.includes('中兴') ? '通信设备主业，产研投研能力领先' :
+        `${s.name}核心标的`,
+    })) ?? [
+      { name: '中微公司', pct: 9.82, description: '半导体设备龙头，国产替代核心标的' },
+      { name: '金山办公', pct: 8.45, description: '办公软件龙头，AI赋能收入增速预期' },
+      { name: '中兴通讯', pct: 7.43, description: '通信设备主业，产研投研能力领先' },
+      { name: '兆易创新', pct: 6.21, description: '存储芯片龙头，受益AI算力需求' },
+    ],
+
+    morningStarRating: 4,
+    ratingDetails: [
+      '近1年夏普比率排名靠前',
+      'T2指数排名处于前30%',
+      '波动率低于同类平均',
+    ],
+
+    todayEvaluation: `净值估${item.daily_return >= 0 ? '增' : '减'}${Math.abs(item.daily_return).toFixed(1)}%，半导体板块全线回暖`,
+    shortTerm: { label: '看多', reason: '板块轮动' },
+    midTerm: { label: '看多', reason: 'AI算力' },
+    longTerm: { label: '看多', reason: '半导体' },
+  };
+}
+
+/* ============================================================
+   总览头部组件
+   ============================================================ */
+function PortfolioHeader({ summary }: { summary: PortfolioSummary | null }) {
+  if (!summary) {
     return (
-      <div className="text-xs text-gray-300 text-center py-2">
-        基金评估数据暂无
+      <div className="mb-4">
+        <h1 className="text-xl font-bold text-gray-800">我的持仓</h1>
       </div>
     );
   }
 
-  const terms = [
-    { key: 'short_term', label: '短期', data: evaluation.short_term },
-    { key: 'mid_term', label: '中期', data: evaluation.mid_term },
-    { key: 'long_term', label: '长期', data: evaluation.long_term },
-  ] as const;
-
-  const scoreColor = (score: number) => {
-    if (score >= 70) return 'text-red-500';
-    if (score >= 40) return 'text-yellow-600';
-    return 'text-green-500';
-  };
+  const yesterdayPL = formatChangeValue(summary.daily_return);
+  const holdingPL = formatChangeValue(summary.total_return);
+  const holdingRate = formatChangeRate(summary.total_return_rate);
 
   return (
-    <div className="space-y-1.5">
-      <p className="text-xs text-gray-500 font-medium flex items-center gap-1">
-        <Eye className="w-3 h-3" /> 基金评估
-      </p>
-      <div className="grid grid-cols-3 gap-2">
-        {terms.map(t => (
-          <div key={t.key} className="bg-gray-50 rounded p-2 text-center">
-            <p className="text-[10px] text-gray-400">{t.label}</p>
-            <p className={`text-sm font-bold ${scoreColor(t.data.score)}`}>{t.data.label}</p>
-            <p className="text-[10px] text-gray-400">{t.data.score}分</p>
+    <div className="mb-4">
+      {/* 标题行 */}
+      <h1 className="text-xl font-bold text-gray-800 mb-3">我的持仓</h1>
+
+      {/* 分隔线 */}
+      <div className="border-t border-gray-200 mb-4" />
+
+      {/* 总览区 */}
+      <div className="flex items-start justify-between flex-wrap gap-4">
+        {/* 左：持仓总金额 */}
+        <div>
+          <p className="text-xs text-gray-400 mb-1">持仓总金额（元）</p>
+          <p className="text-3xl font-bold text-gray-900 font-mono">
+            {formatMoneyFull(summary.total_value)}
+          </p>
+        </div>
+
+        {/* 右：4个统计指标 */}
+        <div className="flex items-center gap-6 flex-wrap">
+          <div className="text-right">
+            <p className="text-[10px] text-gray-400 mb-0.5">昨日盈亏</p>
+            <p className={`text-sm font-bold font-mono ${yesterdayPL.cls}`}>
+              {yesterdayPL.text}
+            </p>
           </div>
-        ))}
+          <div className="text-right">
+            <p className="text-[10px] text-gray-400 mb-0.5">持仓盈亏</p>
+            <p className={`text-sm font-bold font-mono ${holdingPL.cls}`}>
+              {holdingPL.text}
+            </p>
+          </div>
+          <div className="text-right">
+            <p className="text-[10px] text-gray-400 mb-0.5">持有收益率</p>
+            <p className={`text-sm font-bold font-mono ${holdingRate.cls}`}>
+              {holdingRate.text}
+            </p>
+          </div>
+          <div className="text-right">
+            <p className="text-[10px] text-gray-400 mb-0.5">基金数量</p>
+            <p className="text-sm font-bold text-gray-800">{summary.fund_count}</p>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-function ChevronIcon({ expanded }: { expanded: boolean }) {
-  return (
-    <svg className={`w-4 h-4 text-gray-400 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-    </svg>
-  );
-}
-
-/** 单条持仓条目（可展开 + 增强内容） */
-function PositionItem({
+/* ============================================================
+   持仓列表行组件
+   ============================================================ */
+function PositionRow({
   item,
-  onToggle,
   expanded,
+  onToggle,
   signal,
-  onExecute,
-  navHistory,
-  topStocks,
-  evaluation,
 }: {
   item: PortfolioItem;
-  onToggle: () => void;
   expanded: boolean;
+  onToggle: () => void;
   signal: { signalLevel: SignalLevel; confidenceStars: number } | undefined;
-  onExecute: () => Promise<void>;
-  navHistory?: number[];
-  topStocks?: { name: string; pct: number; change: number }[];
-  evaluation?: {
-    short_term: { label: string; score: number; reason: string };
-    mid_term: { label: string; score: number; reason: string };
-    long_term: { label: string; score: number; reason: string };
-  };
 }) {
-  const returnClass = item.return_rate >= 0 ? 'text-red-500' : 'text-green-500';
-  const dailyClass  = item.daily_return >= 0 ? 'text-red-500' : 'text-green-500';
-  const tagColor = item.portfolio_tag === 'core' ? 'bg-brand-50 text-brand-600' : 'bg-amber-50 text-amber-700';
   const fundShortName = (item as any).fund_short_name || item.fund_name;
+  const daily = formatChangeValue(item.daily_return);
+  const holding = formatChangeValue(item.total_return);
+  const holdingRate = formatChangeRate(item.return_rate);
+  const signalLevel = signal?.signalLevel;
+  const signalLabel = signalLevel ? SIGNAL_LABELS[signalLevel] : '';
 
   return (
-    <div className="border-t border-gray-100">
-      {/* 主行 */}
+    <div className={clsx(
+      'border-b border-gray-100 last:border-b-0',
+      expanded && 'bg-gray-50/50',
+    )}>
+      {/* 主行：可点击展开 */}
       <div
         onClick={onToggle}
-        className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50 transition-colors"
+        className="flex items-center gap-2 px-4 py-3 cursor-pointer hover:bg-gray-50 transition-colors"
       >
+        {/* 左侧：基金名+代码 (~30%) */}
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-mono text-gray-400">{item.fund_code}</span>
-            <span className="text-sm font-medium text-gray-800 truncate">{fundShortName}</span>
-            <span className={`text-xs px-1.5 py-0.5 rounded ${tagColor}`}>
-              {item.portfolio_tag === 'core' ? '核心' : '卫星'}
+          <p className="text-sm font-medium text-gray-800 truncate">{fundShortName}</p>
+          <p className="text-[11px] text-gray-400 font-mono">{item.fund_code}</p>
+        </div>
+
+        {/* 中间偏左：持仓市值+编辑 (~20%) */}
+        <div className="shrink-0 flex items-center gap-1 min-w-[100px]">
+          <span className="text-sm font-bold text-gray-800 font-mono">{formatMoney(item.market_value)}</span>
+          <button
+            onClick={(e) => { e.stopPropagation(); }}
+            className="text-gray-300 hover:text-[var(--brand-cyan)] transition-colors"
+            title="编辑持仓"
+          >
+            <Pencil className="w-3 h-3" />
+          </button>
+        </div>
+
+        {/* 中间：昨收+持有 (~25%) */}
+        <div className="shrink-0 text-right space-y-0.5 min-w-[120px]">
+          <p className={`text-xs font-mono ${daily.cls}`}>
+            昨收 {daily.text}
+          </p>
+          <p className={`text-xs font-mono ${holding.cls}`}>
+            持有 {holding.text}
+          </p>
+          <p className={`text-[10px] font-mono ${holdingRate.cls}`}>
+            ({holdingRate.text})
+          </p>
+        </div>
+
+        {/* 右侧：信号徽章+原因+展开箭头 (~25%) */}
+        <div className="shrink-0 flex items-center gap-2 min-w-[140px] justify-end">
+          {signal && (
+            <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap ${SIGNAL_BG[signalLevel ?? 'B']}`}>
+              {signalLevel}·{signalLabel}
             </span>
-            {signal && (
-              <span className={`text-xs px-1.5 py-0.5 rounded font-bold ${SIGNAL_BG[signal.signalLevel] || ''}`}>
-                {signal.signalLevel}
-              </span>
-            )}
-          </div>
-          <p className="text-xs text-gray-400 mt-0.5">
-            持仓 {item.weight_pct * 100}% | 成本 {item.cost_nav.toFixed(4)}
-          </p>
+          )}
+          <span className="text-[10px] text-gray-400 truncate max-w-[80px]">
+            {signal ? `${signalLabel}信号` : ''}
+          </span>
+          {expanded ? (
+            <ChevronUp className="w-4 h-4 text-gray-400 shrink-0" />
+          ) : (
+            <ChevronDown className="w-4 h-4 text-gray-400 shrink-0" />
+          )}
         </div>
-
-        {/* 迷你走势图 */}
-        {navHistory && navHistory.length > 1 && (
-          <div className="w-20 shrink-0 hidden sm:block">
-            <MiniChart values={navHistory} width={80} height={28} />
-          </div>
-        )}
-
-        <div className="text-right shrink-0">
-          <p className="text-sm font-mono font-medium text-gray-800">¥{(item.market_value / 10000).toFixed(2)}万</p>
-          <p className={`text-xs font-mono ${returnClass}`}>
-            {item.return_rate >= 0 ? '+' : ''}{item.return_rate.toFixed(2)}%
-          </p>
-        </div>
-
-        <div className={`text-xs font-mono shrink-0 w-16 text-right ${dailyClass}`}>
-          {item.daily_return >= 0 ? '+' : ''}{item.daily_return.toFixed(0)}
-        </div>
-
-        <ChevronIcon expanded={expanded} />
       </div>
-
-      {/* 展开区域 */}
-      {expanded && (
-        <div className="px-4 pb-4 space-y-3 animate-fadeIn">
-          {/* 操作建议 */}
-          <div className="bg-gray-50 rounded-lg p-3 flex items-center justify-between">
-            <div className="text-xs text-gray-500">
-              当前仓位 <span className="font-bold text-gray-800">{(item.weight_pct * 100).toFixed(0)}%</span>
-            </div>
-            <ExecutionButton
-              fundCode={item.fund_code}
-              fundName={fundShortName}
-              signalLevel={signal?.signalLevel ?? 'B'}
-              confidenceStars={signal?.confidenceStars ?? 3}
-              currentPositionPct={item.weight_pct}
-              targetPositionPct={Math.min(0.95, item.weight_pct + 0.10)}
-              onExecute={onExecute}
-            />
-          </div>
-
-          {/* 增强内容网格 */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {/* 迷你走势图（展开版） */}
-            <div className="bg-gray-50 rounded-lg p-3">
-              <p className="text-xs text-gray-400 mb-1">近30天净值走势</p>
-              <MiniChart values={navHistory || []} width={260} height={64} />
-              <div className="flex justify-between mt-1">
-                <span className="text-[10px] text-gray-300">30天前</span>
-                <span className="text-[10px] text-gray-300">今天</span>
-              </div>
-            </div>
-
-            {/* 持仓股票 */}
-            <div className="bg-gray-50 rounded-lg p-3">
-              <TopHoldings stocks={topStocks || []} />
-            </div>
-
-            {/* 基金评估 */}
-            <div className="bg-gray-50 rounded-lg p-3">
-              <FundEvaluation evaluation={evaluation} />
-            </div>
-          </div>
-
-          {/* 简要信息 */}
-          <div className="grid grid-cols-3 gap-2 text-xs text-gray-400">
-            <div>买入日期：{item.buy_date}</div>
-            <div>持有份额：{item.holding_shares.toLocaleString()}</div>
-            <div>当前净值：{item.current_nav.toFixed(4)}</div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -327,18 +299,15 @@ function PositionItem({
    ============================================================ */
 export default function PortfolioV5() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [tab, setTab] = useState<'positions' | 'advice' | 'trades'>('positions');
 
   // API 数据状态
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [items, setItems] = useState<PortfolioItem[]>([]);
-  const [advice, setAdvice] = useState<any[]>([]);
-  const [trades, setTrades] = useState<any[]>([]);
   const [signals, setSignals] = useState<Record<string, { signalLevel: SignalLevel; confidenceStars: number }>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 增强数据（mock占位，后续接真实API）
+  // 增强数据
   const [navHistories, setNavHistories] = useState<Record<string, number[]>>({});
   const [topStocksMap, setTopStocksMap] = useState<Record<string, { name: string; pct: number; change: number }[]>>({});
   const [evaluationsMap, setEvaluationsMap] = useState<Record<string, any>>({});
@@ -354,11 +323,7 @@ export default function PortfolioV5() {
       setLoading(true);
       setError(null);
       try {
-        const [portfolioData, adviceData, tradeData] = await Promise.all([
-          fetchPortfolioV5(),
-          fetchAdviceHistoryV5().catch(() => ({ items: [], stats: {} })),
-          fetchTradeRecordsV5().catch(() => ({ items: [] })),
-        ]);
+        const portfolioData = await fetchPortfolioV5();
 
         if (cancelled) return;
 
@@ -368,8 +333,6 @@ export default function PortfolioV5() {
 
         setSummary(safeSummary);
         setItems(safeItems);
-        setAdvice(adviceData?.items ?? []);
-        setTrades(tradeData?.items ?? []);
 
         if (safeItems.length === 0) {
           if (!cancelled) setLoading(false);
@@ -378,7 +341,6 @@ export default function PortfolioV5() {
 
         // 并行获取每只基金的V5信号 + 详情数据
         const [signalEntries, detailEntries] = await Promise.all([
-          // 信号获取
           Promise.all(
             safeItems.map(async (item) => {
               try {
@@ -392,7 +354,6 @@ export default function PortfolioV5() {
               }
             }),
           ),
-          // 基金详情获取（净值走势+持仓股票+评估）
           Promise.all(
             safeItems.map(async (item) => {
               try {
@@ -424,13 +385,11 @@ export default function PortfolioV5() {
           if (!entry) return;
           const [code, detail] = entry;
 
-          // 净值走势：从nav_history提取nav值
           const navH = detail.nav_history || [];
           if (navH.length > 1) {
             realNavHistories[code] = navH.map((p: any) => p.nav || p.adj_nav || 0).filter((v: number) => v > 0);
           }
 
-          // 持仓股票
           const holdings = detail.top_holdings || [];
           if (holdings.length > 0) {
             realTopStocks[code] = holdings.map((h: any) => ({
@@ -440,7 +399,6 @@ export default function PortfolioV5() {
             }));
           }
 
-          // 基金评估
           const eval_ = detail.evaluation;
           if (eval_) {
             realEvaluations[code] = {
@@ -489,15 +447,14 @@ export default function PortfolioV5() {
     });
   }, [signals]);
 
+  // =============== 渲染 ===============
+
   if (loading) {
     return (
       <div className="max-w-4xl mx-auto space-y-4">
-        <div>
-          <h1 className="text-xl font-bold text-gray-800">我的持仓 V5.0</h1>
-          <p className="text-xs text-gray-400 mt-0.5">持仓汇总 · 仓位建议 · 走势分析</p>
-        </div>
+        <PortfolioHeader summary={null} />
         <div className="card p-8 text-center">
-          <div className="inline-block w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+          <div className="inline-block w-6 h-6 border-2 border-[var(--brand-cyan)] border-t-transparent rounded-full animate-spin" />
           <p className="text-gray-400 text-sm mt-2">加载持仓数据...</p>
         </div>
       </div>
@@ -507,14 +464,13 @@ export default function PortfolioV5() {
   if (error) {
     return (
       <div className="max-w-4xl mx-auto space-y-4">
-        <div>
-          <h1 className="text-xl font-bold text-gray-800">我的持仓 V5.0</h1>
-          <p className="text-xs text-gray-400 mt-0.5">持仓汇总 · 仓位建议 · 走势分析</p>
-        </div>
+        <PortfolioHeader summary={null} />
         <div className="card p-8 text-center">
           <p className="text-red-500 text-sm">{error}</p>
-          <button onClick={() => window.location.reload()}
-            className="mt-3 px-4 py-1.5 text-xs bg-brand-500 text-white rounded-lg hover:bg-brand-600">
+          <button
+            onClick={() => window.location.reload()}
+            className="mt-3 px-4 py-1.5 text-xs bg-[var(--brand-cyan)] text-white rounded-lg hover:bg-[var(--brand-cyan-dark)] transition-colors"
+          >
             重试
           </button>
         </div>
@@ -523,105 +479,51 @@ export default function PortfolioV5() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-4">
-      <div>
-        <h1 className="text-xl font-bold text-gray-800">我的持仓 V5.0</h1>
-        <p className="text-xs text-gray-400 mt-0.5">持仓汇总 · 仓位建议 · 走势分析</p>
-      </div>
-
-      {/* 汇总 */}
-      {summary && <PortfolioSummaryCard data={summary} />}
-
-      {/* Tab 切换 */}
-      <div className="flex gap-1">
-        {([
-          { key: 'positions', label: `持仓 (${items.length})` },
-          { key: 'advice',    label: '历史建议' },
-          { key: 'trades',    label: '交易记录' },
-        ] as { key: 'positions' | 'advice' | 'trades'; label: string }[]).map(t => (
-          <button key={t.key} onClick={() => setTab(t.key)}
-            className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${
-              tab === t.key ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
-            }`}>
-            {t.label}
-          </button>
-        ))}
-      </div>
+    <div className="max-w-4xl mx-auto">
+      {/* 总览头部 */}
+      <PortfolioHeader summary={summary} />
 
       {/* 持仓列表 */}
-      {tab === 'positions' && (
-        <div className="card overflow-hidden">
-          {items.length === 0 ? (
-            <div className="p-8 text-center">
-              <Briefcase className="w-8 h-8 text-gray-300 mx-auto mb-2" />
-              <p className="text-gray-500 text-sm font-medium">暂无持仓数据</p>
-              <p className="text-xs text-gray-300 mt-1">添加持仓基金后，即可查看仓位建议和交易操作</p>
-            </div>
-          ) : (
-            items.map(item => (
-              <PositionItem
-                key={item.id}
-                item={item}
-                expanded={expandedId === item.id}
-                onToggle={() => toggleExpand(item.id)}
-                signal={signals[item.fund_code]}
-                onExecute={() => handleExecute(item)}
-                navHistory={navHistories[item.fund_code]}
-                topStocks={topStocksMap[item.fund_code]}
-                evaluation={evaluationsMap[item.fund_code]}
-              />
-            ))
-          )}
-        </div>
-      )}
+      <div className="card overflow-hidden mt-4">
+        {items.length === 0 ? (
+          <div className="p-8 text-center">
+            <Briefcase className="w-8 h-8 text-gray-300 mx-auto mb-2" />
+            <p className="text-gray-500 text-sm font-medium">暂无持仓数据</p>
+            <p className="text-xs text-gray-300 mt-1">添加持仓基金后，即可查看仓位建议和交易操作</p>
+          </div>
+        ) : (
+          items.map(item => {
+            const isExpanded = expandedId === item.id;
+            const detailData = generateMockDetailData(
+              item,
+              signals[item.fund_code],
+              navHistories[item.fund_code],
+              topStocksMap[item.fund_code],
+              evaluationsMap[item.fund_code],
+            );
 
-      {/* 历史建议 */}
-      {tab === 'advice' && (
-        <div className="card p-4 space-y-2">
-          {advice.length === 0 ? (
-            <div className="py-6 text-center">
-              <p className="text-gray-500 text-sm font-medium">暂无历史建议</p>
-              <p className="text-xs text-gray-300 mt-1">执行仓位调整后，建议记录将在此展示</p>
-            </div>
-          ) : (
-            advice.map((a: any, i: number) => (
-              <div key={i} className="flex items-center gap-3 text-sm border-b border-gray-50 pb-2">
-                <span className="text-xs text-gray-400 w-20">{a.date}</span>
-                <span className="font-mono text-xs">{a.fund_code}</span>
-                <span className={`text-xs px-1.5 py-0.5 rounded ${SIGNAL_BG[a.signal_level] || 'bg-gray-100 text-gray-600'}`}>
-                  {a.signal_level}
-                </span>
-                <span className="text-xs text-gray-600">{a.action}</span>
-                <span className="text-xs text-gray-400 flex-1 truncate">{a.reason}</span>
-              </div>
-            ))
-          )}
-        </div>
-      )}
+            return (
+              <div key={item.id}>
+                {/* 列表行 */}
+                <PositionRow
+                  item={item}
+                  expanded={isExpanded}
+                  onToggle={() => toggleExpand(item.id)}
+                  signal={signals[item.fund_code]}
+                />
 
-      {/* 交易记录 */}
-      {tab === 'trades' && (
-        <div className="card p-4 space-y-2">
-          {trades.length === 0 ? (
-            <div className="py-6 text-center">
-              <p className="text-gray-500 text-sm font-medium">暂无交易记录</p>
-              <p className="text-xs text-gray-300 mt-1">执行仓位操作后，交易记录将在此展示</p>
-            </div>
-          ) : (
-            trades.map((t: any, i: number) => (
-              <div key={i} className="flex items-center gap-3 text-sm border-b border-gray-50 pb-2">
-                <span className="text-xs text-gray-400 w-20">{t.date}</span>
-                <span className={`text-xs font-medium ${t.action === '买入' ? 'text-red-500' : 'text-green-500'}`}>
-                  {t.action}
-                </span>
-                <span className="font-mono text-xs">{t.fund_code}</span>
-                <span className="text-xs text-gray-600">¥{t.amount?.toLocaleString?.() ?? t.price?.toLocaleString?.() ?? '-'}</span>
-                <span className="text-xs text-gray-400 flex-1 truncate">{t.reason}</span>
+                {/* 展开详情面板 */}
+                {isExpanded && (
+                  <PositionDetailPanel
+                    data={detailData}
+                    onCollapse={() => setExpandedId(null)}
+                  />
+                )}
               </div>
-            ))
-          )}
-        </div>
-      )}
+            );
+          })
+        )}
+      </div>
     </div>
   );
 }

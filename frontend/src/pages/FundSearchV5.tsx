@@ -1,7 +1,8 @@
 /**
  * FundSearchV5 - V5.0 基金查询页（默认首页）
- * 集成：SignalRibbon · MarketInfoBar · SearchBox · ResultList
- *          SectorCards · OpportunityRadar · FundDetailPanel
+ * 集成：SignalRibbon · MarketInfoBar · SearchBox · ResultList(卡片式)
+ *          SectorCards · OpportunityRadar · FundDetailPanel(右侧面板)
+ * 布局：左右分栏 — 左侧搜索结果 + 右侧详情面板(条件渲染)
  */
 import { useState, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -25,6 +26,7 @@ import type {
   FundDetail,
   SignalLevel,
 } from '../types';
+import { SIGNAL_LABELS } from '../types';
 
 /** 合法的 SignalLevel 值集合 */
 const VALID_SIGNAL_LEVELS: Set<string> = new Set(['S+', 'S', 'A', 'B', 'C', 'D', 'E']);
@@ -44,6 +46,28 @@ interface FundSentiment {
   hasDivergence: boolean;
   divergenceType: 'bullish' | 'bearish' | undefined;
   advice: { action: string; level: string; reason: string; targetPositionPct: number };
+  /** 从因子明细推导的推荐理由，如"波动率82分+北向资金78分触发极度恐慌" */
+  reason?: string;
+}
+
+/**
+ * 从 V5 因子明细构建推荐理由文案
+ * 取 sigmoid_score 最高的 2 个因子，拼接为 "因子A XX分+因子B XX分触发<信号描述>"
+ */
+function buildReasonFromFactors(
+  factorDetails: { factor_name: string; sigmoid_score: number }[] | undefined,
+  signalLevel: SignalLevel,
+): string {
+  if (!factorDetails || factorDetails.length === 0) return '';
+  const sorted = [...factorDetails].sort((a, b) => b.sigmoid_score - a.sigmoid_score);
+  const top2 = sorted.slice(0, 2);
+  const parts = top2.map((f) => {
+    const display = f.sigmoid_score <= 1
+      ? Math.round(f.sigmoid_score * 100)
+      : Math.round(f.sigmoid_score);
+    return `${f.factor_name}${display}分`;
+  });
+  return `${parts.join('+')}触发${SIGNAL_LABELS[signalLevel]}`;
 }
 
 /* ============================================================
@@ -94,7 +118,6 @@ export default function FundSearchV5() {
       setResults(data.items);
       setTotal(data.total);
     } catch (err: any) {
-      // API失败时显示错误提示，不静默降级到Mock
       setResults([]);
       setTotal(0);
       setSearchError(err?.message || '搜索失败，请检查网络或稍后重试');
@@ -106,7 +129,6 @@ export default function FundSearchV5() {
   /** 选中/取消选中 */
   const handleSelect = useCallback(async (fund: FundSearchItem) => {
     if (selectedFund?.fund_code === fund.fund_code) {
-      // 再次点击同一行 → 收起面板
       setSelectedFund(null);
       setDetailData(null);
       setPanelOpen(false);
@@ -122,11 +144,13 @@ export default function FundSearchV5() {
       const [detail] = await Promise.all([
         fetchFundDetail(fund.fund_code).catch(() => null),
         fetchV5Sentiment(fund.fund_code).then((s) => {
+          const resolvedLevel = toSignalLevel(s.signal_level);
+          const reason = buildReasonFromFactors(s.factor_details, resolvedLevel);
           setSentimentCache((prev) => ({
             ...prev,
             [fund.fund_code]: {
               score:           s.composite_score ?? 0,
-              signalLevel:     toSignalLevel(s.signal_level),
+              signalLevel:     resolvedLevel,
               confidenceStars:  s.confidence_stars ?? 0,
               shortTerm:      toSignalLevel(s.signal_level),
               midTerm:        toSignalLevel(s.signal_level),
@@ -134,6 +158,7 @@ export default function FundSearchV5() {
               hasDivergence:  false,
               divergenceType:  undefined,
               advice:          { action: '', level: '', reason: '', targetPositionPct: 0.5 },
+              reason,
             },
           }));
         }).catch(() => {
@@ -152,6 +177,12 @@ export default function FundSearchV5() {
       setDetailLoading(false);
     }
   }, [selectedFund]);
+
+  /** 关闭面板 */
+  const handleClosePanel = useCallback(() => {
+    setPanelOpen(false);
+    setSelectedFund(null);
+  }, []);
 
   /** 添加到自选 */
   const handleAddWatchlist = useCallback(async (fund: FundSearchItem) => {
@@ -196,7 +227,7 @@ export default function FundSearchV5() {
       </div>
 
       {/* ======== 3. 大盘信息栏 ======= */}
-      <MarketInfoBar loading={false} />
+      <MarketInfoBar indexes={[]} loading={false} />
 
       {/* ======== 4. 搜索框 ======= */}
       <SearchBox
@@ -246,26 +277,27 @@ export default function FundSearchV5() {
       {/* ======== 7. 右侧详情面板（遮罩 + 滑入）======= */}
       {panelOpen && selectedFund && (
         <>
-          {/* 遮罩 */}
+          {/* 半透明遮罩 */}
           <div
             className="fixed inset-0 bg-black/20 z-40 transition-opacity duration-300"
-            onClick={() => { setPanelOpen(false); setSelectedFund(null); }}
+            onClick={handleClosePanel}
           />
-          {/* 面板 */}
+
+          {/* 面板：420px 宽，移动端全屏 */}
           <div
-            className="fixed top-0 right-0 h-full w-full max-w-md z-50 bg-white shadow-2xl
-                       overflow-y-auto animate-slideInRight"
+            className="fixed top-0 right-0 h-full w-full md:w-[420px] z-50 bg-white shadow-2xl
+                       overflow-hidden animate-slideInRight"
             style={{ animation: 'slideInRight 300ms ease-out' }}
           >
             <FundDetailPanel
               fund={selectedFund}
               detail={detailData}
-              sentiment={selectedFund ? (sentimentCache[selectedFund.fund_code] ?? null) : null}
+              sentiment={sentimentCache[selectedFund.fund_code] ?? null}
               loading={detailLoading}
-              onClose={() => { setPanelOpen(false); setSelectedFund(null); }}
+              onClose={handleClosePanel}
             />
             {detailError && (
-              <div className="px-4 py-2 text-center">
+              <div className="px-6 py-2 text-center">
                 <p className="text-red-500 text-xs">{detailError}</p>
               </div>
             )}

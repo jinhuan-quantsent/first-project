@@ -1,10 +1,21 @@
 /**
  * SectorCards - 板块情绪卡片网格
- * 8板块自适应网格，悬停上浮，点击查看详情
+ * 8板块自适应网格，按"有利度"排序（恐惧=买入机会=排前），悬停上浮，点击查看详情
  */
 import type { SignalLevel } from '../../types';
 import { ChevronRight } from 'lucide-react';
 import { clsx } from 'clsx';
+
+/** 信号等级有利度排序权重：恐惧=买入机会=有利→排前，贪婪=风险→排后 */
+const SIGNAL_FAVOR_ORDER: Record<SignalLevel, number> = {
+  'S+': 0,  // 极度恐惧 → 最有利
+  'S':  1,  // 恐惧
+  'A':  2,  // 偏恐惧
+  'B':  3,  // 中性
+  'C':  4,  // 偏贪婪
+  'D':  5,  // 贪婪
+  'E':  6,  // 极度贪婪 → 最不利
+};
 
 interface SectorCardData {
   sector_code: string;
@@ -67,11 +78,18 @@ export default function SectorCards({
     );
   }
 
+  /** 按"有利度"排序：恐惧信号（买入机会）排前，贪婪信号（风险）排后；同等级内按 sentiment_score 降序 */
+  const sortedSectors = [...sectors].sort((a, b) => {
+    const favDiff = SIGNAL_FAVOR_ORDER[a.signal_level] - SIGNAL_FAVOR_ORDER[b.signal_level];
+    if (favDiff !== 0) return favDiff;
+    return b.sentiment_score - a.sentiment_score;
+  });
+
   return (
     <div>
-      <h3 className="text-sm font-bold text-gray-700 mb-2">板块情绪</h3>
+      <h3 className="text-sm font-bold text-gray-700 mb-2">板块情绪 <span className="text-[10px] font-normal text-gray-400">按有利度排序</span></h3>
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
-        {sectors.map((s) => (
+        {sortedSectors.map((s) => (
           <button
             key={s.sector_code}
             onClick={() => onSelect?.(s)}

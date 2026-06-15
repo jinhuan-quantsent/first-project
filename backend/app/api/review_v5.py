@@ -56,6 +56,9 @@ class BacktestRequest(BaseModel):
     # 基金回测参数（可选）
     fund_code: Optional[str] = None  # 如果提供，使用基金净值作为价格数据
 
+    # 逐日追踪模式
+    daily_tracking: bool = False  # 是否启用逐日追踪模式
+
     # Category 1: Signal Mapping
     signal_boundaries: list[float] = [12.0, 25.0, 38.0, 52.0, 65.0, 80.0]
     signal_lag_days: int = 1
@@ -290,6 +293,348 @@ def _generate_mock_price_data(
 
 
 # ============================================================
+# 逐日追踪回测辅助函数
+# ============================================================
+
+def _generate_daily_action(
+    signal_level: Optional[str],
+    score: Optional[float],
+    current_portfolio: float,
+    initial_capital: float,
+) -> tuple[str, int, str]:
+    """
+    根据当天信号生成操作建议
+
+    规则:
+    - S+/S(极度恐惧/恐惧): 加仓，金额 = initial * 10%~20%
+    - A(偏恐): 小幅加仓，金额 = initial * 5%~10%
+    - B(中性偏多): 持有
+    - C(中性偏空): 持有或小幅减仓 initial * 5%
+    - D(贪婪): 减仓，金额 = initial * 10%~15%
+    - E/F(极度贪婪): 大幅减仓，金额 = initial * 15%~20%
+
+    具体金额根据 score 细分:
+    - 同一信号等级内，score越高(越极端) → 操作力度越大
+    - 单日最大操作不超过当前持仓的20%
+    """
+    # 信号→操作映射: (action, min_pct_of_initial, max_pct_of_initial)
+    action_map: dict[str, tuple[str, float, float]] = {
+        "S+": ("buy", 0.15, 0.20),   # 极度恐惧 → 加仓 15-20%
+        "S":  ("buy", 0.10, 0.15),   # 恐惧 → 加仓 10-15%
+        "A":  ("buy", 0.05, 0.10),   # 偏恐惧 → 加仓 5-10%
+        "B":  ("hold", 0, 0),        # 中性偏多 → 持有
+        "C":  ("hold", 0, 0.05),     # 中性偏空 → 持有或微减
+        "D":  ("sell", 0.10, 0.15),  # 贪婪 → 减仓 10-15%
+        "E":  ("sell", 0.15, 0.20),  # 极度贪婪 → 减仓 15-20%
+        "F":  ("sell", 0.20, 0.25),  # 极端情况 → 减仓 20-25%
+    }
+
+    default_action = ("hold", 0, 0)
+    action, min_pct, max_pct = action_map.get(signal_level or "", default_action)
+
+    # 如果信号等级不在映射中，默认持有
+    if signal_level and signal_level not in action_map:
+        action, min_pct, max_pct = default_action
+
+    safe_score = score if score is not None else 50.0
+
+    if action == "hold":
+        amount = 0
+        if signal_level and signal_level in ("C",):
+            # C级有概率小幅减仓
+            if safe_score < 40:
+                amount = round(initial_capital * 0.05)
+                action = "sell"
+                reason = f"{signal_level}级偏空信号({safe_score}分)，小幅减仓{amount}元控制风险"
+            else:
+                reason = f"信号{signal_level}({safe_score}分)，维持持有观察"
+        else:
+            reason = f"信号{signal_level or '未知'}({safe_score}分)，维持持有观察"
+    elif action == "buy":
+        # 根据 score 在 min-max 之间插值
+        ratio = min_pct + (max_pct - min_pct) * min(safe_score / 100.0, 1.0)
+        amount = round(initial_capital * ratio)
+        # 单日加仓不超过当前持仓的20%
+        amount = min(amount, round(current_portfolio * 0.20))
+        reason = f"{signal_level}级恐惧信号({safe_score}分)，逆向加仓{amount}元"
+    else:  # sell
+        ratio = min_pct + (max_pct - min_pct) * min(safe_score / 100.0, 1.0)
+        amount = round(min(initial_capital * ratio, current_portfolio * 0.20))  # 单日最多卖20%
+        reason = f"{signal_level}级贪婪信号({safe_score}分)，减仓止盈{amount}元"
+
+    return action, amount, reason
+
+
+async def _get_signal_for_date(
+    date_str: str,
+    index_code: str,
+    session: AsyncSession,
+) -> dict:
+    """
+    获取指定日期的情绪信号
+
+    优先从 market_sentiment 表精确查询，
+    查不到就返回最近一天的数据（前向填充），
+    都没有则返回默认中性信号。
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    # 1. 尝试从 market_sentiment 表精确查询
+    try:
+        stmt = select(
+            MarketSentiment.signal_level,
+            MarketSentiment.composite_score,
+        ).where(
+            and_(
+                MarketSentiment.index_code == index_code,
+                MarketSentiment.trade_date == date_str.replace("-", ""),
+            )
+        )
+        result = await session.execute(stmt)
+        row = result.first()
+        if row and row[0]:
+            return {"signal_level": str(row[0]), "composite_score": float(row[1]) if row[1] else 50.0}
+    except Exception as e:
+        _logger.debug("market_sentiment精确查询失败(%s): %s", date_str, e)
+
+    # 2. 尝试 factor_history 表（COMPOSITE因子）
+    try:
+        stmt2 = select(
+            FactorHistory.raw_value,
+        ).where(
+            and_(
+                FactorHistory.index_code == index_code,
+                FactorHistory.factor_name == "COMPOSITE",
+                FactorHistory.trade_date == date_str.replace("-", ""),
+            )
+        )
+        result2 = await session.execute(stmt2)
+        row2 = result2.first()
+        if row2 and row2[0] is not None:
+            score = float(row2[0])
+            def _score_to_signal(s: float) -> str:
+                if s >= 90: return "S+"
+                elif s >= 80: return "S"
+                elif s >= 65: return "A"
+                elif s >= 40: return "B"
+                elif s >= 25: return "C"
+                elif s >= 10: return "D"
+                else: return "E"
+            return {"signal_level": _score_to_signal(score), "composite_score": score}
+    except Exception as e:
+        _logger.debug("factor_history精确查询失败(%s): %s", date_str, e)
+
+    # 3. 前向填充：查最近一天的数据
+    try:
+        stmt3 = select(
+            MarketSentiment.trade_date,
+            MarketSentiment.signal_level,
+            MarketSentiment.composite_score,
+        ).where(
+            and_(
+                MarketSentiment.index_code == index_code,
+                MarketSentiment.trade_date < date_str.replace("-", ""),
+            )
+        ).order_by(MarketSentiment.trade_date.desc()).limit(1)
+        result3 = await session.execute(stmt3)
+        row3 = result3.first()
+        if row3 and row3[1]:
+            return {"signal_level": str(row3[1]), "composite_score": float(row3[2]) if row3[2] else 50.0}
+    except Exception as e:
+        _logger.debug("前向填充查询失败(%s): %s", date_str, e)
+
+    # 4. 降级返回中性信号
+    return {"signal_level": "B", "composite_score": 50.0}
+
+
+async def _run_daily_tracking_backtest(
+    req: BacktestRequest,
+    session: AsyncSession,
+) -> dict:
+    """
+    逐日持仓追踪回测
+
+    逻辑:
+    1. 获取基金历史日线净值（从start_date到end_date）
+    2. 对每一天(除第一天外)，查询当天的市场情绪信号
+    3. 根据信号 + 仓位模型生成当日操作建议
+    4. 计算每日持仓市值 = 前日持仓市值 * (1 + 日收益率) + 当日操作金额
+    5. 返回完整的每日日志
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    # Step 1: 获取基金净值历史
+    nav_data_raw = await _get_fund_price_data(req.fund_code or "", req.start_date, req.end_date)
+    if not nav_data_raw or len(nav_data_raw) < 5:
+        # 降级使用指数数据
+        nav_data_raw = await _get_real_price_data(req.index_code, req.start_date, req.end_date)
+    if not nav_data_raw or len(nav_data_raw) < 5:
+        return {
+            "code": 400,
+            "data": None,
+            "message": "基金历史数据不足5天，无法进行逐日回测",
+        }
+
+    # 构建净值列表
+    nav_data = []
+    for item in nav_data_raw:
+        nav_data.append({
+            "date": item["date"],
+            "nav": float(item.get("close", 0)),
+            "pct_chg": float(item.get("pct_chg", 0) or 0),
+        })
+
+    # Step 2: 逐日计算
+    signal_index_code = "SH000300"  # 基金回测始终使用沪深300信号
+    portfolio_value = req.initial_capital
+    daily_records = []
+
+    # 基准线（买入不动）
+    benchmark_nav_start = nav_data[0]["nav"] if nav_data else 1.0
+
+    for i, day in enumerate(nav_data):
+        date = day["date"]
+        nav = day["nav"]
+
+        if i == 0:
+            # Day 1: 初始买入，不给建议
+            action = "none"
+            action_amount = 0
+            reason = f"初始买入{req.initial_capital}元，等待信号"
+            signal_level = None
+            signal_score = None
+            daily_return_pct = 0.0
+        else:
+            # 获取当天信号
+            signal_info = await _get_signal_for_date(date, signal_index_code, session)
+            signal_level = signal_info.get("signal_level")
+            signal_score = signal_info.get("composite_score")
+
+            # 根据信号生成操作建议
+            action, action_amount, reason = _generate_daily_action(
+                signal_level, signal_score, portfolio_value, req.initial_capital,
+            )
+
+            # 计算日收益率（基于净值变化）
+            prev_nav = nav_data[i - 1]["nav"]
+            if prev_nav > 0:
+                daily_return_pct = round((nav / prev_nav - 1) * 100, 2)
+            else:
+                daily_return_pct = 0.0
+
+            # 执行操作，更新持仓市值
+            # 持仓市值 = 前日持仓 * (1 + 日收益率) + 操作金额
+            portfolio_value = portfolio_value * (1 + daily_return_pct / 100.0)
+            if action == "buy":
+                portfolio_value += action_amount
+            elif action == "sell":
+                portfolio_value -= action_amount
+                portfolio_value = max(portfolio_value, 0)  # 不能为负
+
+        daily_records.append({
+            "date": date,
+            "signal_level": signal_level,
+            "signal_score": signal_score,
+            "action": action,
+            "action_amount": action_amount if action != "hold" and action != "none" else 0,
+            "nav": nav,
+            "portfolio_value": round(portfolio_value, 2),
+            "daily_return_pct": daily_return_pct,
+            "reason": reason,
+        })
+
+    # 计算汇总
+    final_portfolio = round(portfolio_value, 2)
+    total_return_pct = round((portfolio_value / req.initial_capital - 1) * 100, 2)
+
+    # 操作统计
+    buy_count = sum(1 for r in daily_records if r["action"] == "buy")
+    sell_count = sum(1 for r in daily_records if r["action"] == "sell")
+    hold_count = sum(1 for r in daily_records if r["action"] == "hold")
+    none_count = sum(1 for r in daily_records if r["action"] == "none")
+    action_count = buy_count + sell_count
+
+    # 基准收益
+    if len(nav_data) >= 2 and benchmark_nav_start > 0:
+        benchmark_final_nav = nav_data[-1]["nav"]
+        benchmark_return_pct = round((benchmark_final_nav / benchmark_nav_start - 1) * 100, 2)
+    else:
+        benchmark_return_pct = 0.0
+
+    # 构建权益曲线
+    equity_curve = [
+        {
+            "date": r["date"],
+            "value": r["portfolio_value"],
+            "signal_level": r["signal_level"],
+        }
+        for r in daily_records
+    ]
+
+    # 构建基准曲线（买入不动）
+    benchmark_curve = []
+    if len(nav_data) >= 2 and benchmark_nav_start > 0:
+        for i, day in enumerate(nav_data):
+            bench_value = req.initial_capital * (day["nav"] / benchmark_nav_start)
+            benchmark_curve.append({
+                "date": day["date"],
+                "value": round(bench_value, 2),
+            })
+
+    # 操作汇总文字
+    summary_parts = [f"共执行{action_count}次操作"]
+    if buy_count > 0:
+        summary_parts.append(f"加仓{buy_count}次")
+    if sell_count > 0:
+        summary_parts.append(f"减仓{sell_count}次")
+    if hold_count > 0:
+        summary_parts.append(f"持有{hold_count}次")
+
+    # 找最大操作
+    max_buy = max((r for r in daily_records if r["action"] == "buy"), key=lambda r: r["action_amount"], default=None)
+    max_sell = max((r for r in daily_records if r["action"] == "sell"), key=lambda r: r["action_amount"], default=None)
+    if max_buy:
+        summary_parts.append(f"最大单日加仓+{max_buy['action_amount']}元发生在{max_buy['date'][:4]}-{max_buy['date'][4:6]}-{max_buy['date'][6:8]}({max_buy['signal_level']}级信号)")
+    if max_sell:
+        summary_parts.append(f"最大单日减仓-{max_sell['action_amount']}元发生在{max_sell['date'][:4]}-{max_sell['date'][4:6]}-{max_sell['date'][6:8]}({max_sell['signal_level']}级信号)")
+
+    summary_parts.append(f"整体策略偏向'恐惧加仓、贪婪减仓'的逆向操作，最终收益{total_return_pct:+.1f}%")
+    summary_text = "，".join(summary_parts)
+
+    return {
+        "code": 0,
+        "data": {
+            "total_return": total_return_pct,
+            "annual_return": 0.0,  # 逐日模式暂不计算年化
+            "max_drawdown": 0.0,   # 逐日模式暂不计算回撤
+            "sharpe_ratio": 0.0,
+            "win_rate": 0.0,
+            "benchmark_return": benchmark_return_pct,
+            "signal_accuracy": 0.0,
+            "equity_curve": equity_curve,
+            "benchmark_curve": benchmark_curve,
+            "trades": [],
+            "daily_log": [],
+            "risk_stats": None,
+            "summary_text": summary_text,
+            "_data_source": "daily_tracking",
+            "index_code": req.index_code,
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+            # 逐日追踪特有字段
+            "daily_tracking": daily_records,
+            "initial_capital": req.initial_capital,
+            "final_portfolio_value": final_portfolio,
+            "tracking_total_return_pct": total_return_pct,
+            "tracking_action_count": action_count,
+        },
+        "message": "ok",
+    }
+
+
+# ============================================================
 # API 接口
 # ============================================================
 
@@ -319,6 +664,10 @@ async def run_backtest(
             "data": None,
             "message": f"开始日期({req.start_date})不能晚于结束日期({req.end_date})",
         }
+
+    # 逐日追踪模式：当 daily_tracking=True 且 fund_code 存在时
+    if req.daily_tracking and req.fund_code:
+        return await _run_daily_tracking_backtest(req, session)
 
     # 基金代码验证：如果不在已知映射中，给出警告但不阻断
     import logging

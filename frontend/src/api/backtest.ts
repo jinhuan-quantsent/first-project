@@ -51,6 +51,19 @@ export interface ModelParams {
   base_buy_amount: number;             // 单次加仓金额
 }
 
+/** 逐日追踪 - 每日记录 */
+export interface DailyTrackingDay {
+  date: string;            // 日期
+  signal_level?: string;   // 当日信号等级
+  signal_score?: number;   // 当日信号分数
+  action: string;          // 操作类型: buy/sell/hold/none
+  action_amount?: number;  // 操作金额(正=买入,负=卖出)
+  nav: number;             // 当日净值
+  portfolio_value: number; // 当日持仓市值
+  daily_return_pct: number;// 日收益率%
+  reason: string;          // 建议原因
+}
+
 /** 回测结果 — 扩展版 */
 export interface BacktestResultV5 {
   total_return: number;
@@ -70,6 +83,12 @@ export interface BacktestResultV5 {
   index_code?: string;
   start_date?: string;
   end_date?: string;
+  // 逐日追踪特有字段
+  daily_tracking?: DailyTrackingDay[];
+  initial_capital?: number;
+  final_portfolio_value?: number;
+  tracking_total_return_pct?: number;
+  tracking_action_count?: number;
 }
 
 export interface DailyLogEntry {
@@ -100,6 +119,7 @@ export async function runBacktestV5(params: {
   end_date: string;
   initial_capital: number;
   fund_code?: string;                 // 基金代码（单基金回测时传入）
+  daily_tracking?: boolean;           // 是否启用逐日追踪模式
   signal_boundaries?: number[];
   signal_lag_days?: number;
   factor_weights?: Record<string, number>;

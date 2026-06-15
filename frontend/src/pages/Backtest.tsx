@@ -2,12 +2,12 @@
  * Backtest - V5.0 历史回溯页（模板对齐版）
  * 方案管理栏 + 5类折叠参数面板（滑块+开关）+ 回测结果展示（8指标+曲线+日志）
  */
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Save, Trash2, Play, TrendingUp, ChevronDown, AlertTriangle, Shield, Pencil } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Save, Trash2, Play, TrendingUp, ChevronDown, AlertTriangle, Shield, Pencil, Search } from 'lucide-react';
 import { activateBacktestStrategyV5 } from '../api/backtest';
 import { clsx } from 'clsx';
 import { runBacktestV5, saveBacktestStrategyV5, deleteBacktestStrategyV5 } from '../api/backtest';
-import type { ModelParams, ActionRule, BacktestResultV5, DailyLogEntry, RiskStats } from '../api/backtest';
+import type { ModelParams, ActionRule, BacktestResultV5, DailyLogEntry, RiskStats, DailyTrackingDay } from '../api/backtest';
 import client from '../api/client';
 
 /* ============================================================
@@ -91,12 +91,11 @@ interface BacktestStrategy {
   params: ModelParams;
 }
 
-interface FundBacktestParams {
-  fundCode: string;
-  startDate: string;
-  endDate: string;
-  initialCapital: number;
-  strategyId: number | null;
+interface FundSuggestion {
+  code: string;
+  name: string;
+  type?: string;
+  nav?: number;
 }
 
 interface ApiStrategy {
@@ -470,78 +469,449 @@ function PositionRiskPanel({ params, onChange }: { params: ModelParams; onChange
   );
 }
 
-/** ---- 单基金回测参数区 ---- */
-function FundBacktestSection({ strategies, activeStrategyId, onRunFundBacktest, running }: {
+/** ---- 单基金回测参数区（智能输入框） ---- */
+function FundBacktestSection({ strategies, activeStrategyId, selectedFund, onFundSelect, backtestParams, onParamsChange }: {
   strategies: BacktestStrategy[];
   activeStrategyId: number | null;
-  onRunFundBacktest: (params: FundBacktestParams) => void;
-  running: boolean;
+  selectedFund: FundSuggestion | null;
+  onFundSelect: (fund: FundSuggestion | null) => void;
+  backtestParams: {
+    startDate: string;
+    endDate: string;
+    initialCapital: number;
+    strategyId: number | null;
+  };
+  onParamsChange: (params: {
+    startDate: string;
+    endDate: string;
+    initialCapital: number;
+    strategyId: number | null;
+  }) => void;
 }) {
-  const [fundCode, setFundCode] = useState('');
-  const [startDate, setStartDate] = useState('2024-01-01');
-  const [endDate, setEndDate] = useState(new Date().toISOString().slice(0, 10));
-  const [initialCapital, setInitialCapital] = useState(100000);
-  const [selectedStrategyId, setSelectedStrategyId] = useState<number | null>(activeStrategyId);
+  const [fundInput, setFundInput] = useState('');
+  const [suggestions, setSuggestions] = useState<FundSuggestion[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [highlightIdx, setHighlightIdx] = useState(-1);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
 
   // 同步活跃方案ID
-  useState(() => {
-    if (activeStrategyId) setSelectedStrategyId(activeStrategyId);
-  });
+  useEffect(() => {
+    if (activeStrategyId && !backtestParams.strategyId) {
+      onParamsChange({ ...backtestParams, strategyId: activeStrategyId });
+    }
+  }, [activeStrategyId]);
+
+  // 点击外部关闭下拉
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  /** 搜索基金（debounce 300ms） */
+  const searchFunds = useCallback(async (keyword: string) => {
+    if (!keyword || keyword.length < 1) {
+      setSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+    try {
+      const res = await client.get('/api/v5/fund/search', {
+        params: { keyword, page_size: 8 },
+      });
+      const items = res.data?.data?.items || [];
+      const mapped: FundSuggestion[] = items.map((f: any) => ({
+        code: f.fund_code || '',
+        name: f.fund_name || f.fund_short_name || '',
+        type: f.fund_type || '',
+        nav: f.nav || 0,
+      }));
+      setSuggestions(mapped);
+      setShowSuggestions(mapped.length > 0);
+      setHighlightIdx(-1);
+    } catch {
+      setSuggestions([]);
+      setShowSuggestions(false);
+    }
+  }, []);
+
+  const handleFundInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setFundInput(val);
+    onFundSelect(null);
+
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    debounceTimerRef.current = setTimeout(() => searchFunds(val), 300);
+  };
+
+  const selectFund = (fund: FundSuggestion) => {
+    onFundSelect(fund);
+    setFundInput(`${fund.code} ${fund.name}`);
+    setShowSuggestions(false);
+    setHighlightIdx(-1);
+  };
+
+  const handleFundKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!showSuggestions || suggestions.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlightIdx(prev => Math.min(prev + 1, suggestions.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlightIdx(prev => Math.max(prev - 1, 0));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (highlightIdx >= 0 && highlightIdx < suggestions.length) {
+        selectFund(suggestions[highlightIdx]);
+      }
+    } else if (e.key === 'Escape') {
+      setShowSuggestions(false);
+    }
+  };
 
   return (
     <div className="card p-4">
       <h3 className="text-sm font-bold text-gray-700 mb-3">回测参数</h3>
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        {/* 选择基金 */}
-        <div>
+        {/* 选择基金 — 智能输入框 */}
+        <div ref={wrapperRef} className="relative">
           <label className="text-xs text-gray-400 block mb-1">选择基金</label>
-          <input type="text" value={fundCode} onChange={e => setFundCode(e.target.value)}
-            placeholder="输入基金代码"
-            className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-brand-500" />
+          <div className="relative">
+            <input
+              type="text"
+              placeholder="输入基金代码或名称，如 320007 或 诺安成长"
+              value={fundInput}
+              onChange={handleFundInput}
+              onFocus={() => fundInput.length >= 1 && suggestions.length > 0 && setShowSuggestions(true)}
+              onKeyDown={handleFundKeyDown}
+              className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-brand-500 pr-7"
+            />
+            <Search className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-300" />
+          </div>
+          {/* 搜索建议下拉 */}
+          {showSuggestions && suggestions.length > 0 && (
+            <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+              {suggestions.map((f, idx) => (
+                <div
+                  key={f.code}
+                  onClick={() => selectFund(f)}
+                  className={`px-3 py-2 cursor-pointer flex justify-between items-center text-xs ${
+                    idx === highlightIdx ? 'bg-brand-50' : 'hover:bg-gray-50'
+                  }`}
+                >
+                  <span className="text-gray-700 truncate">
+                    {f.name}
+                    {f.type && <span className="ml-1 text-gray-400 text-[10px]">{f.type}</span>}
+                  </span>
+                  <span className="text-gray-400 text-[10px] shrink-0 ml-2">{f.code}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* 已选基金标签 */}
+          {selectedFund && (
+            <div className="mt-1 flex items-center gap-1">
+              <span className="px-1.5 py-0.5 bg-brand-50 text-brand-600 text-[10px] rounded">{selectedFund.code}</span>
+              <span className="text-[10px] text-gray-400">{selectedFund.name}</span>
+              <button
+                onClick={() => { onFundSelect(null); setFundInput(''); }}
+                className="text-[10px] text-gray-300 hover:text-red-400 ml-0.5"
+              >✕</button>
+            </div>
+          )}
         </div>
         {/* 开始日期 */}
         <div>
           <label className="text-xs text-gray-400 block mb-1">开始日期</label>
-          <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+          <input type="date" value={backtestParams.startDate}
+            onChange={e => onParamsChange({ ...backtestParams, startDate: e.target.value })}
             className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-brand-500" />
         </div>
         {/* 结束日期 */}
         <div>
           <label className="text-xs text-gray-400 block mb-1">结束日期</label>
-          <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+          <input type="date" value={backtestParams.endDate}
+            onChange={e => onParamsChange({ ...backtestParams, endDate: e.target.value })}
             className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-brand-500" />
         </div>
         {/* 初始金额 */}
         <div>
           <label className="text-xs text-gray-400 block mb-1">初始买入金额（元）</label>
-          <input type="number" value={initialCapital} onChange={e => setInitialCapital(Number(e.target.value))}
+          <input type="number" value={backtestParams.initialCapital}
+            onChange={e => onParamsChange({ ...backtestParams, initialCapital: Number(e.target.value) })}
             min={1000} step={1000}
             className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white font-mono focus:outline-none focus:ring-1 focus:ring-brand-500" />
         </div>
         {/* 因子方案 */}
         <div>
           <label className="text-xs text-gray-400 block mb-1">因子方案</label>
-          <select value={selectedStrategyId ?? ''} onChange={e => setSelectedStrategyId(Number(e.target.value))}
+          <select value={backtestParams.strategyId ?? ''}
+            onChange={e => onParamsChange({ ...backtestParams, strategyId: Number(e.target.value) })}
             className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-brand-500">
             {strategies.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </div>
       </div>
-      {/* 运行按钮 */}
-      <div className="mt-3">
-        <button
-          onClick={() => onRunFundBacktest({ fundCode, startDate, endDate, initialCapital, strategyId: selectedStrategyId })}
-          disabled={running || !fundCode.trim()}
-          className={`w-full py-2.5 rounded-lg text-sm font-medium text-white transition-colors ${
-            running || !fundCode.trim() ? 'bg-gray-400 cursor-not-allowed' : 'bg-brand-500 hover:bg-brand-600'
-          }`}
-        >
-          {running ? '回测运行中...' : '▶ 运行基金回测'}
-        </button>
-      </div>
+      {/* 已选基金信息 */}
+      {selectedFund && (
+        <div className="mt-2 flex items-center gap-3 text-[10px] text-gray-400">
+          <span>已选: <strong className="text-gray-600">{selectedFund.name}</strong></span>
+          {(selectedFund.nav ?? 0) > 0 && <span>净值: {selectedFund.nav!.toFixed(4)}</span>}
+          {selectedFund.type && <span>类型: {selectedFund.type}</span>}
+          <span className="text-brand-500">将使用逐日追踪模式进行基金回测</span>
+        </div>
+      )}
     </div>
   );
 }
+
+/** ---- 逐日追踪结果展示 ---- */
+function DailyTrackingResultPanel({ result }: { result: BacktestResultV5 }) {
+  const tracking = result.daily_tracking || [];
+  if (tracking.length === 0) return null;
+
+  // 格式化日期
+  const fmtDate = (d: string) => {
+    if (d.length === 8) return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
+    return d;
+  };
+
+  // 操作类型中文
+  const actionLabel: Record<string, string> = {
+    buy: '加仓', sell: '减仓', hold: '持有', none: '—',
+  };
+
+  // 分页控制
+  const [page, setPage] = useState(0);
+  const PAGE_SIZE = 30;
+  const totalPages = Math.ceil(tracking.length / PAGE_SIZE);
+  const pagedData = tracking.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  // SVG 权益曲线（持仓市值 vs 基准）
+  const renderTrackingCurve = () => {
+    const curve = result.equity_curve;
+    const benchCurve = result.benchmark_curve;
+    if (!curve || curve.length < 2) {
+      return <svg viewBox="0 0 500 160" className="w-full h-36"><text x="250" y="80" textAnchor="middle" fill="#94A3B8" fontSize="10">暂无曲线数据</text></svg>;
+    }
+
+    const w = 500, h = 160, padX = 30, padY = 20;
+    const innerW = w - padX * 2, innerH = h - padY * 2;
+
+    const values = curve.map(p => p.value);
+    const allValues = [...values];
+    if (benchCurve && benchCurve.length > 1) {
+      allValues.push(...benchCurve.map(p => p.value));
+    }
+    const minV = Math.min(...allValues), maxV = Math.max(...allValues);
+    const rangeV = maxV - minV || 1;
+
+    const points = curve.map((p, i) => {
+      const x = padX + (i / (curve.length - 1)) * innerW;
+      const y = padY + innerH - ((p.value - minV) / rangeV) * innerH;
+      return { x, y };
+    });
+    const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
+    const areaD = `${pathD} L${points[points.length - 1].x},${padY + innerH} L${points[0].x},${padY + innerH} Z`;
+
+    // 基准线
+    let benchPathD = '';
+    if (benchCurve && benchCurve.length > 1) {
+      const bPoints = benchCurve.map((p, i) => {
+        const x = padX + (i / (benchCurve.length - 1)) * innerW;
+        const y = padY + innerH - ((p.value - minV) / rangeV) * innerH;
+        return { x, y };
+      });
+      benchPathD = bPoints.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
+    }
+
+    // 标注关键操作日
+    const buyDays = tracking.filter(t => t.action === 'buy');
+    const sellDays = tracking.filter(t => t.action === 'sell');
+    const actionMarkers: { x: number; color: string }[] = [];
+    for (const bd of buyDays) {
+      const idx = curve.findIndex(c => c.date === bd.date || c.date === bd.date.replace(/-/g, ''));
+      if (idx >= 0) {
+        const x = padX + (idx / (curve.length - 1)) * innerW;
+        actionMarkers.push({ x, color: '#22C55E' });
+      }
+    }
+    for (const sd of sellDays) {
+      const idx = curve.findIndex(c => c.date === sd.date || c.date === sd.date.replace(/-/g, ''));
+      if (idx >= 0) {
+        const x = padX + (idx / (curve.length - 1)) * innerW;
+        actionMarkers.push({ x, color: '#EF4444' });
+      }
+    }
+
+    const baseY = padY + innerH - ((values[0] - minV) / rangeV) * innerH;
+
+    return (
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-36">
+        <defs>
+          <linearGradient id="trackAreaGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#14B8A6" stopOpacity="0.3" />
+            <stop offset="100%" stopColor="#14B8A6" stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
+        <line x1={padX} y1={baseY} x2={w - padX} y2={baseY} stroke="#94A3B8" strokeWidth="1" strokeDasharray="4,2" />
+        <path d={areaD} fill="url(#trackAreaGrad)" />
+        <path d={pathD} fill="none" stroke="#14B8A6" strokeWidth="2" />
+        {benchPathD && <path d={benchPathD} fill="none" stroke="#94A3B8" strokeWidth="1.5" strokeDasharray="3,3" />}
+        {actionMarkers.map((m, i) => (
+          <line key={i} x1={m.x} y1={padY} x2={m.x} y2={padY + innerH} stroke={m.color} strokeWidth="0.5" strokeOpacity="0.5" />
+        ))}
+        <rect x={padX} y={6} width={12} height={3} fill="#14B8A6" rx={1} />
+        <text x={padX + 16} y={10} fill="#14B8A6" fontSize="8">持仓市值</text>
+        <rect x={padX + 70} y={6} width={12} height={3} fill="#94A3B8" rx={1} />
+        <text x={padX + 86} y={10} fill="#94A3B8" fontSize="8">买入不动</text>
+        <circle cx={padX + 140} cy={8} r={2} fill="#22C55E" />
+        <text x={padX + 146} y={10} fill="#22C55E" fontSize="7">加仓日</text>
+        <circle cx={padX + 180} cy={8} r={2} fill="#EF4444" />
+        <text x={padX + 186} y={10} fill="#EF4444" fontSize="7">减仓日</text>
+      </svg>
+    );
+  };
+
+  const initCap = result.initial_capital || 100000;
+  const finalVal = result.final_portfolio_value || 0;
+  const totalRet = result.tracking_total_return_pct || 0;
+  const actCount = result.tracking_action_count || 0;
+
+  return (
+    <div className="card p-4 space-y-4">
+      <h3 className="text-sm font-bold text-gray-700">逐日追踪结果</h3>
+
+      {/* 汇总卡片区 */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <div className="bg-gray-50 rounded-lg p-2.5">
+          <p className="text-xs text-gray-400">初始资金</p>
+          <p className="text-base font-bold text-gray-700">¥{initCap.toLocaleString('zh-CN', { maximumFractionDigits: 0 })}</p>
+        </div>
+        <div className="bg-gray-50 rounded-lg p-2.5">
+          <p className="text-xs text-gray-400">最终持仓</p>
+          <p className={`text-base font-bold ${finalVal >= initCap ? 'text-red-500' : 'text-green-500'}`}>
+            ¥{finalVal.toLocaleString('zh-CN', { maximumFractionDigits: 0 })}
+          </p>
+        </div>
+        <div className="bg-gray-50 rounded-lg p-2.5">
+          <p className="text-xs text-gray-400">总收益率</p>
+          <p className={`text-base font-bold ${totalRet >= 0 ? 'text-red-500' : 'text-green-500'}`}>
+            {totalRet >= 0 ? '+' : ''}{totalRet.toFixed(2)}%
+          </p>
+        </div>
+        <div className="bg-gray-50 rounded-lg p-2.5">
+          <p className="text-xs text-gray-400">操作次数</p>
+          <p className="text-base font-bold text-brand-500">{actCount}次</p>
+        </div>
+      </div>
+
+      {/* 权益曲线 */}
+      <div className="bg-gray-50 rounded-lg p-3">
+        <p className="text-xs text-gray-400 mb-1">权益曲线（持仓市值 vs 买入不动基准）</p>
+        {renderTrackingCurve()}
+      </div>
+
+      {/* 每日操作表格 */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <h4 className="text-xs font-medium text-gray-600">每日操作日志（共{tracking.length}天）</h4>
+          {totalPages > 1 && (
+            <div className="flex items-center gap-1 text-[10px] text-gray-400">
+              <button
+                onClick={() => setPage(Math.max(0, page - 1))}
+                disabled={page === 0}
+                className="px-1.5 py-0.5 border rounded disabled:opacity-30 hover:bg-gray-50"
+              >上一页</button>
+              <span>{page + 1}/{totalPages}</span>
+              <button
+                onClick={() => setPage(Math.min(totalPages - 1, page + 1))}
+                disabled={page >= totalPages - 1}
+                className="px-1.5 py-0.5 border rounded disabled:opacity-30 hover:bg-gray-50"
+              >下一页</button>
+            </div>
+          )}
+        </div>
+        <div className="overflow-x-auto max-h-72 overflow-y-auto border border-gray-200 rounded-lg">
+          <table className="w-full text-xs text-left">
+            <thead className="bg-gray-50 sticky top-0 z-10">
+              <tr className="text-gray-400">
+                <th className="px-2 py-1.5">日期</th>
+                <th className="px-2 py-1.5">信号</th>
+                <th className="px-2 py-1.5">建议</th>
+                <th className="px-2 py-1.5">操作金额</th>
+                <th className="px-2 py-1.5">当日净值</th>
+                <th className="px-2 py-1.5">持仓市值</th>
+                <th className="px-2 py-1.5">日收益率</th>
+                <th className="px-2 py-1.5">建议原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pagedData.map((r, i) => (
+                <tr key={i} className="border-t border-gray-100 hover:bg-gray-50">
+                  <td className="px-2 py-1 font-mono text-gray-600">{fmtDate(r.date)}</td>
+                  <td className="px-2 py-1">
+                    {r.signal_level ? (
+                      <span className={`px-1 py-0.5 rounded text-[10px] font-bold ${SIGNAL_BG[r.signal_level] || ''}`}>
+                        {r.signal_level}{r.signal_score != null ? `·${SIGNAL_LABELS[r.signal_level] || ''}` : ''}
+                      </span>
+                    ) : (
+                      <span className="text-gray-300 text-[10px]">—(首日)</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-1">
+                    <span className={`text-xs ${
+                      r.action === 'buy' ? 'text-green-600 font-medium' :
+                      r.action === 'sell' ? 'text-red-500 font-medium' :
+                      'text-gray-400'
+                    }`}>
+                      {actionLabel[r.action] || r.action}
+                    </span>
+                  </td>
+                  <td className="px-2 py-1 font-mono">
+                    {r.action === 'buy' ? (
+                      <span className="text-green-600">+{r.action_amount?.toLocaleString('zh-CN')}</span>
+                    ) : r.action === 'sell' ? (
+                      <span className="text-red-500">-{r.action_amount?.toLocaleString('zh-CN')}</span>
+                    ) : (
+                      <span className="text-gray-300">—</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-1 font-mono text-gray-700">{r.nav.toFixed(4)}</td>
+                  <td className="px-2 py-1 font-mono text-gray-600">¥{r.portfolio_value.toLocaleString('zh-CN', { maximumFractionDigits: 0 })}</td>
+                  <td className="px-2 py-1 font-mono">
+                    <span className={
+                      r.daily_return_pct > 0 ? 'text-red-500' :
+                      r.daily_return_pct < 0 ? 'text-green-500' :
+                      'text-gray-400'
+                    }>
+                      {r.daily_return_pct > 0 ? '+' : ''}{r.daily_return_pct.toFixed(2)}%
+                    </span>
+                  </td>
+                  <td className="px-2 py-1 text-gray-400 max-w-[180px] truncate" title={r.reason}>{r.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* 操作汇总文字 */}
+      {result.summary_text && (
+        <div className="bg-brand-50 rounded-lg p-2.5 flex items-center gap-2">
+          <TrendingUp className="w-3.5 h-3.5 text-brand-500 shrink-0" />
+          <p className="text-[11px] text-brand-700 font-medium">{result.summary_text}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 /** ---- 回测结果展示 ---- */
 function BacktestResultPanel({ result }: { result: BacktestResultV5 | null }) {
@@ -737,6 +1107,20 @@ export default function Backtest() {
   const [result, setResult] = useState<BacktestResultV5 | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // 基金选择状态（从 FundBacktestSection 传上来）
+  const [selectedFund, setSelectedFund] = useState<FundSuggestion | null>(null);
+  const [backtestParams, setBacktestParams] = useState<{
+    startDate: string;
+    endDate: string;
+    initialCapital: number;
+    strategyId: number | null;
+  }>({
+    startDate: '2024-01-01',
+    endDate: new Date().toISOString().slice(0, 10),
+    initialCapital: 100000,
+    strategyId: null,
+  });
+
   const activeStrategy = strategies.find(s => s.id === activeId) ?? null;
   const togglePanel = (key: string) => setPanels(prev => ({ ...prev, [key]: !prev[key] }));
 
@@ -745,63 +1129,11 @@ export default function Backtest() {
     setStrategies(prev => prev.map(s => s.id !== activeId ? s : { ...s, params: newParams }));
   };
 
-  /** 运行回测 */
-  const handleRun = async () => {
-    if (!activeStrategy) return;
-    setRunning(true);
-    setError(null);
-
-    // AbortController 实现 30秒超时
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
-
-    try {
-      const p = activeStrategy.params;
-      const data = await runBacktestV5({
-        index_code: 'SH000300',
-        start_date: '2024-01-01',
-        end_date: new Date().toISOString().slice(0, 10),
-        initial_capital: 100000,
-        signal_boundaries: p.signal_boundaries,
-        signal_lag_days: p.signal_lag_days,
-        factor_weights: p.factor_weights,
-        factor_enabled: p.factor_enabled,
-        action_mapping: p.action_mapping,
-        quantile_window: p.quantile_window,
-        sigmoid_k: p.sigmoid_k,
-        composite_method: p.composite_method,
-        neutral_score: p.neutral_score,
-        risk_params: {
-          max_position: p.max_position,
-          min_position: p.min_position,
-          stop_loss: p.stop_loss,
-          stop_loss_threshold: p.stop_loss_threshold,
-          stop_loss_reduce_pct: p.stop_loss_reduce_pct,
-          take_profit: p.take_profit,
-          take_profit_drawdown: p.take_profit_drawdown,
-          overheat_days: p.overheat_days,
-          overheat_factor: p.overheat_factor,
-          pullback_lower: p.pullback_lower,
-          pullback_buy_mult: p.pullback_buy_mult,
-          position_dev_lower: p.position_dev_lower,
-          position_dev_buy_mult: p.position_dev_buy_mult,
-          base_buy_amount: p.base_buy_amount,
-        },
-      });
-      setResult(data);
-    } catch (err: any) {
-      // 增强错误提取：优先从 axios response 中提取服务端错误信息
-      const msg = err?.response?.data?.message || err?.message || '回测运行失败，请重试';
-      setError(msg);
-    } finally {
-      clearTimeout(timeoutId);
-      setRunning(false);
-    }
-  };
-
-  /** 运行基金回测 */
-  const handleRunFundBacktest = async (params: FundBacktestParams) => {
-    const strategy = strategies.find(s => s.id === params.strategyId) ?? activeStrategy;
+  /** 运行回测 — 合并按钮逻辑 */
+  const handleRunBacktest = async () => {
+    // 确定使用哪个策略：如果用户在回测参数中选了方案，用那个；否则用当前活跃方案
+    const strategyId = backtestParams.strategyId || activeId;
+    const strategy = strategies.find(s => s.id === strategyId) ?? activeStrategy;
     if (!strategy) return;
 
     setRunning(true);
@@ -812,12 +1144,15 @@ export default function Backtest() {
 
     try {
       const p = strategy.params;
+      const isFundMode = !!selectedFund;
+
       const data = await runBacktestV5({
-        index_code: params.fundCode,  // 传基金代码给后端
-        fund_code: params.fundCode,   // 显式传fund_code
-        start_date: params.startDate,
-        end_date: params.endDate,
-        initial_capital: params.initialCapital,
+        index_code: 'SH000300',
+        fund_code: isFundMode ? selectedFund!.code : undefined,
+        daily_tracking: isFundMode,     // 基金模式启用逐日追踪
+        start_date: backtestParams.startDate,
+        end_date: backtestParams.endDate,
+        initial_capital: backtestParams.initialCapital,
         signal_boundaries: p.signal_boundaries,
         signal_lag_days: p.signal_lag_days,
         factor_weights: p.factor_weights,
@@ -943,28 +1278,37 @@ export default function Backtest() {
       <FundBacktestSection
         strategies={strategies}
         activeStrategyId={activeId}
-        onRunFundBacktest={handleRunFundBacktest}
-        running={running}
+        selectedFund={selectedFund}
+        onFundSelect={setSelectedFund}
+        backtestParams={backtestParams}
+        onParamsChange={setBacktestParams}
       />
 
-      {/* 运行回测按钮（沪深300） */}
-      <button onClick={handleRun} disabled={running}
-        className={`w-full py-2.5 rounded-lg text-sm font-medium text-white transition-colors ${
+      {/* 合并运行回测按钮 */}
+      <button
+        onClick={handleRunBacktest}
+        disabled={running}
+        className={`w-full py-2.5 rounded-lg text-sm font-medium text-white transition-colors flex items-center justify-center gap-2 ${
           running ? 'bg-gray-400 cursor-not-allowed' : 'bg-brand-500 hover:bg-brand-600'
-        }`}>
-        {running ? '回测运行中...' : '▶ 运行回测'}
+        }`}
+      >
+        {running ? '回测运行中...' : `▶ 运行回测${selectedFund ? `（${selectedFund.name}）` : '（沪深300）'}`}
       </button>
 
       {/* 错误提示 */}
       {error && (
         <div className="card p-4 text-center">
           <p className="text-red-500 text-sm">{error}</p>
-          <button onClick={handleRun} className="mt-2 px-4 py-1.5 text-xs bg-brand-500 text-white rounded-lg hover:bg-brand-600">重试</button>
+          <button onClick={handleRunBacktest} className="mt-2 px-4 py-1.5 text-xs bg-brand-500 text-white rounded-lg hover:bg-brand-600">重试</button>
         </div>
       )}
 
-      {/* 回测结果 */}
-      <BacktestResultPanel result={result} />
+      {/* 回测结果 — 逐日追踪模式 vs 普通模式 */}
+      {result?.daily_tracking && result.daily_tracking.length > 0 ? (
+        <DailyTrackingResultPanel result={result} />
+      ) : (
+        <BacktestResultPanel result={result} />
+      )}
     </div>
   );
 }

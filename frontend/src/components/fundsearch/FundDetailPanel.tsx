@@ -1,14 +1,54 @@
 /**
  * FundDetailPanel - 右侧详情面板
- * 显示基金基本信息 + 信号徽章 + 置信度 + 因子雷达 + 仓位建议
+ * 包含: 基本信息 + 情绪信号 + 今日评估 + 趋势判断
  */
 import type { FundSearchItem, FundDetail, SignalLevel } from '../../types';
-import SentimentBadge from '../common/SentimentBadge';
-import { Star, TrendingUp, Shield, X, ArrowLeft } from 'lucide-react';
+import { SIGNAL_LABELS } from '../../types';
+import { X } from 'lucide-react';
 import { clsx } from 'clsx';
 
 /** 安全取数，防止 undefined/null 调用 .toFixed() 崩溃 */
 const safeNum = (v: number | undefined | null, fallback = 0): number => v ?? fallback;
+
+/** 信号徽章背景色映射 */
+const SIGNAL_BG: Record<SignalLevel, string> = {
+  'S+': 'bg-emerald-600 text-white',
+  'S':  'bg-emerald-500 text-white',
+  'A':  'bg-teal-400 text-white',
+  'B':  'bg-amber-400 text-white',
+  'C':  'bg-amber-500 text-white',
+  'D':  'bg-rose-500 text-white',
+  'E':  'bg-rose-600 text-white',
+};
+
+/** 信号文字颜色 */
+const SIGNAL_TEXT: Record<SignalLevel, string> = {
+  'S+': 'text-emerald-600',
+  'S':  'text-emerald-500',
+  'A':  'text-teal-500',
+  'B':  'text-amber-500',
+  'C':  'text-amber-600',
+  'D':  'text-rose-500',
+  'E':  'text-rose-600',
+};
+
+/** 趋势方向文案 */
+const TREND_LABEL: Record<SignalLevel, { text: string; color: string }> = {
+  'S+': { text: '看多', color: 'text-emerald-600' },
+  'S':  { text: '看多', color: 'text-emerald-500' },
+  'A':  { text: '偏多', color: 'text-teal-500' },
+  'B':  { text: '中性', color: 'text-gray-500' },
+  'C':  { text: '偏空', color: 'text-amber-500' },
+  'D':  { text: '看空', color: 'text-rose-500' },
+  'E':  { text: '看空', color: 'text-rose-600' },
+};
+
+/** 趋势理由默认文案 */
+const TREND_REASONS: Record<string, string> = {
+  'shortTerm': '板块触底+恐慌极致值',
+  'midTerm': '行业周期支撑',
+  'longTerm': '长期成长趋势',
+};
 
 interface FundDetailPanelProps {
   fund: FundSearchItem;
@@ -17,21 +57,14 @@ interface FundDetailPanelProps {
     score: number;
     signalLevel: SignalLevel;
     confidenceStars: number;
-    advice: { action: string; level: string; reason: string; targetPositionPct: number };
+    shortTerm: SignalLevel;
+    midTerm: SignalLevel;
+    longTerm: SignalLevel;
+    reason?: string;
   } | null;
   loading: boolean;
   onClose: () => void;
 }
-
-const SIGNAL_COLORS: Record<string, string> = {
-  'S+': '#059669',
-  'S':  '#10B981',
-  'A':  '#6EE7B7',
-  'B':  '#FBBF24',
-  'C':  '#FCA5A5',
-  'D':  '#EF4444',
-  'E':  '#DC2626',
-};
 
 export default function FundDetailPanel({
   fund,
@@ -42,136 +75,164 @@ export default function FundDetailPanel({
 }: FundDetailPanelProps) {
   if (loading) {
     return (
-      <div className="card p-6 space-y-4 animate-pulse">
-        <div className="h-6 w-32 bg-gray-200 rounded" />
+      <div className="p-6 space-y-4 animate-pulse">
+        <div className="h-8 w-48 bg-gray-200 rounded" />
         <div className="h-20 w-full bg-gray-100 rounded-xl" />
+        <div className="h-24 w-full bg-gray-100 rounded-xl" />
         <div className="h-24 w-full bg-gray-100 rounded-xl" />
       </div>
     );
   }
 
+  const level = sentiment?.signalLevel;
+  const label = level ? SIGNAL_LABELS[level] : '';
+  const score = sentiment?.score;
+
   return (
-    <div className="card overflow-hidden animate-fadeIn">
-      {/* 顶部：关闭按钮 + 基金名 */}
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100">
-        <button
-          onClick={onClose}
-          className="p-1 rounded hover:bg-gray-100 transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4 text-gray-400" />
-        </button>
+    <div className="h-full flex flex-col">
+      {/* 标题栏：基金名 + 代码 + 关闭按钮 */}
+      <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 shrink-0">
         <div className="min-w-0">
-          <h3 className="text-sm font-bold text-gray-800 truncate">
-            {fund.fund_name}
+          <h3 className="text-lg font-bold text-gray-900 truncate">
+            {fund.fund_short_name || fund.fund_name}
           </h3>
-          <p className="text-xs text-gray-400 font-mono">
-            {fund.fund_code} · {fund.fund_type}
+          <p className="text-sm text-gray-400 font-mono mt-0.5">
+            {fund.fund_code}
           </p>
         </div>
         <button
           onClick={onClose}
-          className="ml-auto p-1 rounded hover:bg-gray-100 transition-colors"
+          className="p-2 rounded-lg hover:bg-gray-100 transition-colors shrink-0"
+          aria-label="关闭面板"
         >
-          <X className="w-4 h-4 text-gray-400" />
+          <X className="w-5 h-5 text-gray-400" />
         </button>
       </div>
 
-      <div className="p-4 space-y-4">
-        {/* 情绪评分卡片 */}
-        {sentiment && (
-          <div className="bg-gray-50 rounded-xl p-4 flex items-center gap-4">
-            <div
-              className="w-16 h-16 rounded-full flex items-center justify-center text-white text-xl font-bold shrink-0"
-              style={{ background: SIGNAL_COLORS[sentiment.signalLevel] || '#94A3B8' }}
-            >
-              {sentiment.score}
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <SentimentBadge level={sentiment.signalLevel} size="md" />
-                <div className="flex gap-0.5">
-                  {[1, 2, 3, 4].map((star) => (
-                    <Star
-                      key={star}
-                      className={clsx(
-                        'w-3.5 h-3.5',
-                        star <= sentiment.confidenceStars
-                          ? 'text-yellow-400 fill-yellow-400'
-                          : 'text-gray-300',
-                      )}
-                    />
-                  ))}
-                </div>
-              </div>
-              <p className="text-xs text-gray-400 mt-0.5">V5.0 综合情绪评分</p>
-              <p className="text-xs text-gray-500 mt-1">
-                净值 {safeNum(fund.nav).toFixed(4)} · 日收益{' '}
-                <span className={safeNum(fund.daily_return) >= 0 ? 'text-red-500' : 'text-green-500'}>
-                  {safeNum(fund.daily_return) >= 0 ? '+' : ''}{safeNum(fund.daily_return).toFixed(2)}%
-                </span>
-              </p>
-            </div>
+      {/* 内容区：可滚动 */}
+      <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+        {/* ===== 基本信息 ===== */}
+        <section>
+          <h4 className="text-xs font-medium text-gray-400 mb-2">基本信息</h4>
+          <div className="space-y-2.5">
+            <InfoRow label="基金类型" value={fund.fund_type || '-'} />
+            <InfoRow
+              label="基金规模"
+              value={
+                fund.fund_size
+                  ? `${safeNum(fund.fund_size).toFixed(1)}亿`
+                  : '-'
+              }
+            />
+            <InfoRow label="基金经理" value={detail?.manager || '-'} />
+            <InfoRow label="成立日期" value={detail?.inception_date || '-'} />
           </div>
+        </section>
+
+        {/* ===== 情绪信号 ===== */}
+        {sentiment && level && (
+          <section>
+            <h4 className="text-xs font-medium text-gray-400 mb-2">情绪信号</h4>
+            <div className="flex items-center gap-3 mb-3">
+              <span
+                className={clsx(
+                  'px-3 py-1.5 rounded-lg text-sm font-bold whitespace-nowrap',
+                  SIGNAL_BG[level],
+                )}
+              >
+                {level}·{label}
+              </span>
+              <span className={clsx('text-2xl font-bold', SIGNAL_TEXT[level])}>
+                {safeNum(score).toFixed(0)}分
+              </span>
+            </div>
+            {sentiment.reason && (
+              <div className="bg-gray-50 rounded-lg p-3">
+                <p className="text-xs text-gray-600 leading-relaxed">
+                  {sentiment.reason}
+                </p>
+              </div>
+            )}
+          </section>
         )}
 
-        {/* 操作建议 */}
-        {sentiment && (
-          <div className={clsx(
-            'rounded-xl p-4 flex items-start gap-3',
-            sentiment.advice.level === '积极' ? 'bg-green-50 border border-green-200' :
-            sentiment.advice.level === '谨慎' ? 'bg-red-50 border border-red-200' :
-            'bg-blue-50 border border-blue-200',
-          )}>
-            <div className={clsx(
-              'w-10 h-10 rounded-full flex items-center justify-center shrink-0',
-              sentiment.advice.level === '积极' ? 'bg-green-500' :
-              sentiment.advice.level === '谨慎' ? 'bg-red-500' : 'bg-blue-500',
-            )}>
-              {sentiment.advice.level === '积极' ? (
-                <TrendingUp className="w-5 h-5 text-white" />
-              ) : sentiment.advice.level === '谨慎' ? (
-                <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                  <path d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              ) : (
-                <Shield className="w-5 h-5 text-white" />
+        {/* ===== 今日评估 ===== */}
+        <section>
+          <h4 className="text-xs font-medium text-gray-400 mb-2">今日评估</h4>
+          <div className="flex items-start gap-2">
+            <span
+              className={clsx(
+                'w-2 h-2 rounded-full mt-1.5 shrink-0',
+                safeNum(fund.daily_return) >= 0
+                  ? 'bg-emerald-500'
+                  : 'bg-rose-500',
               )}
-            </div>
-            <div>
-              <p className="text-sm font-bold text-gray-800">{sentiment.advice.action}</p>
-              <p className="text-xs text-gray-500 mt-0.5">{sentiment.advice.reason}</p>
-              <p className="text-xs text-gray-400 mt-1">
-                建议仓位：{Math.round(sentiment.advice.targetPositionPct * 100)}%
-              </p>
-            </div>
+            />
+            <p className="text-sm text-gray-700 leading-relaxed">
+              净值估算
+              {safeNum(fund.daily_return) >= 0 ? '上涨' : '下跌'}
+              {Math.abs(safeNum(fund.daily_return)).toFixed(2)}%
+              {safeNum(fund.daily_return) >= 0
+                ? '，板块回暖'
+                : '，板块调整'}
+            </p>
           </div>
-        )}
+        </section>
 
-        {/* 基金详情信息 */}
-        {detail && (
-          <div className="bg-gray-50 rounded-xl p-4 space-y-2">
-            <h4 className="text-xs font-bold text-gray-400 uppercase">基金信息</h4>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
-              <div>
-                <span className="text-gray-400">基金经理</span>
-                <p className="font-medium text-gray-700">{detail.manager}</p>
-              </div>
-              <div>
-                <span className="text-gray-400">基金公司</span>
-                <p className="font-medium text-gray-700 truncate">{detail.company}</p>
-              </div>
-              <div>
-                <span className="text-gray-400">成立日期</span>
-                <p className="font-medium text-gray-700">{detail.inception_date}</p>
-              </div>
-              <div>
-                <span className="text-gray-400">累计净值</span>
-                <p className="font-medium text-gray-700 font-mono">{safeNum(detail.accumulated_nav).toFixed(4)}</p>
-              </div>
+        {/* ===== 趋势判断 ===== */}
+        {sentiment && (
+          <section>
+            <h4 className="text-xs font-medium text-gray-400 mb-2">趋势判断</h4>
+            <div className="grid grid-cols-3 gap-2">
+              <TrendCard
+                title="短期"
+                level={sentiment.shortTerm}
+                reason={TREND_REASONS['shortTerm']}
+              />
+              <TrendCard
+                title="中期"
+                level={sentiment.midTerm}
+                reason={TREND_REASONS['midTerm']}
+              />
+              <TrendCard
+                title="长期"
+                level={sentiment.longTerm}
+                reason={TREND_REASONS['longTerm']}
+              />
             </div>
-          </div>
+          </section>
         )}
       </div>
+    </div>
+  );
+}
+
+/** 信息行组件 */
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-sm text-gray-400">{label}</span>
+      <span className="text-sm font-medium text-gray-900">{value}</span>
+    </div>
+  );
+}
+
+/** 趋势卡片组件 */
+function TrendCard({
+  title,
+  level,
+  reason,
+}: {
+  title: string;
+  level: SignalLevel;
+  reason: string;
+}) {
+  const trend = TREND_LABEL[level];
+  return (
+    <div className="border border-gray-200 rounded-lg p-3 text-center">
+      <p className="text-xs text-gray-400 mb-1">{title}</p>
+      <p className={clsx('text-lg font-bold', trend.color)}>{trend.text}</p>
+      <p className="text-[11px] text-gray-400 mt-1 leading-tight">{reason}</p>
     </div>
   );
 }

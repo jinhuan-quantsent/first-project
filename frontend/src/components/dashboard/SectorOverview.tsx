@@ -1,15 +1,46 @@
 import { useState, useEffect } from 'react';
 import { fetchSectorHeatmap } from '../../api/market';
-import type { SectorHeatmapItem, GroupSummary } from '../../types';
+import type { SectorHeatmapItem, GroupSummary, SignalLevel } from '../../types';
 import SentimentBadge from '../common/SentimentBadge';
 import LoadingSpinner from '../common/LoadingSpinner';
 import { clsx } from 'clsx';
+
+/**
+ * 信号等级有利度排序权重
+ * 恐惧 = 市场低位 = 买入机会 = 有利 → 排前面
+ * 贪婪 = 市场高位 = 风险 = 不利 → 排后面
+ */
+const SIGNAL_FAVOR_ORDER: Record<SignalLevel, number> = {
+  'S+': 0,  // 极度恐惧 → 最有利
+  'S':  1,  // 恐惧
+  'A':  2,  // 偏恐惧
+  'B':  3,  // 中性
+  'C':  4,  // 偏贪婪
+  'D':  5,  // 贪婪
+  'E':  6,  // 极度贪婪 → 最不利
+};
+
+/** 从旧版 SentimentLabel 映射到有利度排序权重 */
+const LEGACY_LABEL_FAVOR_ORDER: Record<string, number> = {
+  extreme_fear: 0,
+  fear: 1,
+  neutral: 3,
+  greed: 5,
+  extreme_greed: 6,
+};
+
+/** 获取任意信号标签的有利度排序值 */
+function getFavorOrder(label: string): number {
+  if (label in SIGNAL_FAVOR_ORDER) return SIGNAL_FAVOR_ORDER[label as SignalLevel];
+  if (label in LEGACY_LABEL_FAVOR_ORDER) return LEGACY_LABEL_FAVOR_ORDER[label];
+  return 3; // 默认中性
+}
 
 export default function SectorOverview() {
   const [sectors, setSectors] = useState<SectorHeatmapItem[]>([]);
   const [groups, setGroups] = useState<GroupSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [sortBy, setSortBy] = useState<'score' | 'return' | 'momentum'>('score');
+  const [sortBy, setSortBy] = useState<'favor' | 'score' | 'return' | 'momentum'>('favor');
 
   useEffect(() => {
     fetchSectorHeatmap()
@@ -24,6 +55,11 @@ export default function SectorOverview() {
   if (loading) return <LoadingSpinner text="加载板块数据..." />;
 
   const sorted = [...sectors].sort((a, b) => {
+    if (sortBy === 'favor') {
+      const favDiff = getFavorOrder(a.sentiment_label) - getFavorOrder(b.sentiment_label);
+      if (favDiff !== 0) return favDiff;
+      return b.sentiment_score - a.sentiment_score;
+    }
     if (sortBy === 'score') return b.sentiment_score - a.sentiment_score;
     if (sortBy === 'return') return b.sector_return - a.sector_return;
     return b.momentum_5d - a.momentum_5d;
@@ -34,18 +70,18 @@ export default function SectorOverview() {
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-bold text-gray-700">板块情绪速览</h3>
         <div className="flex gap-1">
-          {(['score', 'return', 'momentum'] as const).map((key) => (
+          {(['favor', 'score', 'return', 'momentum'] as const).map((key) => (
             <button
               key={key}
               onClick={() => setSortBy(key)}
               className={clsx(
                 'px-2 py-0.5 text-[10px] rounded transition-colors',
                 sortBy === key
-                  ? 'bg-blue-100 text-blue-600 font-medium'
+                  ? 'bg-brand-500 text-white font-medium'
                   : 'text-gray-400 hover:text-gray-600'
               )}
             >
-              {key === 'score' ? '情绪' : key === 'return' ? '涨跌' : '动量'}
+              {key === 'favor' ? '有利度' : key === 'score' ? '情绪' : key === 'return' ? '涨跌' : '动量'}
             </button>
           ))}
         </div>
