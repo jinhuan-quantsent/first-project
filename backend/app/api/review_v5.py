@@ -518,20 +518,22 @@ def _generate_daily_action(
     根据因子信号生成操作建议 — 完全由因子驱动，无人为干预
 
     核心规则:
-    - buy金额 = initial_capital × ratio，现金不够就买全部现金，没钱就不买(hold)
+    - buy金额 = current_cash × ratio，根据手上现金决定加仓力度
+      - 现金不够 → 全部买入（买到底）
+      - 没钱了 → hold，不买
     - sell金额 = current_position × ratio，按剩余仓位比例卖出
     - C级映射sell而非hold（与backtest.py DEFAULT_ACTION_MAPPING对齐）
     - E级 = 清仓，策略结束
     - 亏完或清仓 → 策略结束，不重建仓位
     """
-    # 信号→操作映射: (action, pct_ratio)
-    # buy: ratio相对于initial_capital（加仓力度恒定，不受持仓变化影响）
+    # 信号→操作映射: (action, pct_ratio, is_clear)
+    # buy: ratio相对于current_cash（根据手上现金决定加仓多少）
     # sell: ratio相对于current_position（按剩余仓位比例减仓）
     # E: 清仓
     action_map: dict[str, tuple[str, float, bool]] = {
-        "S+": ("buy",  0.20, False),   # 极度恐惧 → 加仓20% of initial
-        "S":  ("buy",  0.15, False),   # 恐惧 → 加仓15%
-        "A":  ("buy",  0.08, False),   # 偏恐惧 → 加仓8%
+        "S+": ("buy",  0.30, False),   # 极度恐惧 → 加仓30% of cash
+        "S":  ("buy",  0.20, False),   # 恐惧 → 加仓20% of cash
+        "A":  ("buy",  0.10, False),   # 偏恐惧 → 加仓10% of cash
         "B":  ("hold", 0,    False),   # 中性 → 持有
         "C":  ("sell", 0.10, False),   # 偏贪婪 → 减仓10% of position
         "D":  ("sell", 0.20, False),   # 贪婪 → 减仓20% of position
@@ -558,20 +560,25 @@ def _generate_daily_action(
         reason = f"{signal_level}级({meaning})分数{safe_score} → 持有"
 
     elif action == "buy":
-        # 加仓金额 = initial_capital × ratio
-        target_amount = round(initial_capital * ratio)
+        # 加仓金额 = current_cash × ratio（根据手上现金决定）
+        target_amount = round(current_cash * ratio)
         if current_cash <= 0:
             # 没钱了，不买
             action = "hold"
             amount = 0
-            reason = f"{signal_level}级({meaning})分数{safe_score} → 建议加仓{target_amount}元，现金已耗尽，持有"
-        elif current_cash < target_amount:
-            # 现金不够，全部买入
+            reason = f"{signal_level}级({meaning})分数{safe_score} → 建议加仓，现金已耗尽，持有"
+        elif target_amount <= 0:
+            # 金额太小（现金极少），全部买入
             amount = round(current_cash)
-            reason = f"{signal_level}级({meaning})分数{safe_score} → 建议加仓{target_amount}元，现金不足，全部买入{amount}元"
+            if amount <= 0:
+                action = "hold"
+                amount = 0
+                reason = f"{signal_level}级({meaning})分数{safe_score} → 建议加仓，现金不足，持有"
+            else:
+                reason = f"{signal_level}级({meaning})分数{safe_score} → 现金不足，全部买入{amount}元"
         else:
             amount = target_amount
-            reason = f"{signal_level}级({meaning})分数{safe_score} → 加仓{amount}元"
+            reason = f"{signal_level}级({meaning})分数{safe_score} → 加仓{amount}元({ratio*100:.0f}%现金)"
 
     elif action == "sell":
         if is_clear:
