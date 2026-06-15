@@ -207,48 +207,97 @@ async def _get_fund_price_data(
     start_date: str,
     end_date: str,
 ) -> list[dict]:
-    """从Tushare获取基金净值作为价格数据（用于单基金回测）"""
-    from app.utils.eastmoney import code_to_tushare, get_fund_nav_history
+    """从Tushare获取基金净值作为价格数据（用于单基金回测）
+    
+    使用Tushare fund_nav直接按日期范围查询，支持历史回测
+    """
+    ts_code = _convert_fund_code(fund_code)
 
-    ts_code = code_to_tushare(fund_code)
-
-    # 计算需要的天数（加10天缓冲）
-    try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-        days = (end_dt - start_dt).days + 10
-    except Exception:
-        days = 365
-
-    # 确保最少取60天数据
-    days = max(days, 60)
-
-    nav_history = await get_fund_nav_history(ts_code, days=days)
-
-    if not nav_history:
-        return []
-
-    # 将净值数据转换为回测引擎需要的格式
     start_dt_str = start_date.replace("-", "")
     end_dt_str = end_date.replace("-", "")
 
-    result = []
-    for h in nav_history:
-        date_str = str(h.get("date", ""))
-        if date_str >= start_dt_str and date_str <= end_dt_str:
-            nav_val = float(h.get("nav", 0) or 0)
-            daily_ret = float(h.get("daily_return", 0) or 0)
-            if nav_val <= 0:
-                continue
-            result.append({
-                "date": date_str,
-                "close": nav_val,
-                "pct_chg": daily_ret,
-                "volume": 0,
-                "signal_level": "B",  # 默认中性，后面会从市场情绪覆盖
-            })
+    try:
+        if not data_source._tushare_pro:
+            return []
 
-    return result
+        # 尝试不同后缀（场外.OF / 场内.SH/.SZ）
+        base_code = ts_code.split(".")[0] if "." in ts_code else ts_code
+        suffix = ts_code.split(".")[-1] if "." in ts_code else "OF"
+        suffixes = [suffix]
+        if suffix == "OF":
+            suffixes.extend(["SH", "SZ"])
+        elif suffix in ("SH", "SZ"):
+            suffixes.append("OF")
+
+        for suf in suffixes:
+            try_code = f"{base_code}.{suf}"
+            try:
+                # 直接用日期范围查询，不受"最近N天"限制
+                df = data_source._tushare_pro.fund_nav(
+                    ts_code=try_code,
+                    start_date=start_dt_str,
+                    end_date=end_dt_str,
+                )
+                if df is None or df.empty:
+                    continue
+
+                df = df.sort_values("nav_date", ascending=True)
+
+                result = []
+                for _, row in df.iterrows():
+                    unit_nav = float(row.get("unit_nav", 0) or 0)
+                    adj_nav = float(row.get("adj_nav", 0) or 0)
+                    nav_date = str(row.get("nav_date", ""))
+
+                    # 计算日收益率
+                    daily_ret = 0.0
+                    if len(result) > 0 and adj_nav > 0 and result[-1].get("_adj_nav", 0) > 0:
+                        prev_adj = result[-1]["_adj_nav"]
+                        daily_ret = round((adj_nav / prev_adj - 1) * 100, 2)
+
+                    # 使用复权净值作为close（更准确反映收益）
+                    close_val = adj_nav if adj_nav > 0 else unit_nav
+                    if close_val <= 0:
+                        continue
+
+                    result.append({
+                        "date": nav_date,
+                        "close": close_val,
+                        "pct_chg": daily_ret,
+                        "volume": 0,
+                        "signal_level": "B",
+                        "_adj_nav": adj_nav,  # 内部用，计算收益率
+                    })
+
+                # 清理内部字段
+                for item in result:
+                    item.pop("_adj_nav", None)
+
+                return result
+
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).debug("fund_nav %s 尝试失败: %s", try_code, e)
+                continue
+
+        return []
+
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("基金净值获取失败(%s): %s", ts_code, e)
+        return []
+
+
+def _convert_fund_code(code: str) -> str:
+    """6位基金代码 → Tushare格式（与eastmoney.code_to_tushare相同逻辑）"""
+    code = code.strip()
+    if "." in code:
+        return code
+    if code.startswith(("51", "52", "56", "58", "50")):
+        return f"{code}.SH"
+    if code.startswith(("15", "16", "18")):
+        return f"{code}.SZ"
+    return f"{code}.OF"
 
 
 def _generate_mock_price_data(
