@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Optional
 
 from app.engine.factor_engine.base import FactorSigmoidResult, CompositeScore
+from app.engine.divergence_detector import DivergenceDetector
 from app.core.config import settings
 
 
@@ -19,12 +20,17 @@ class ConfidenceEngine:
     DEFENSE_PRICE_DIVERGENCE = settings.V5_DEFENSE_PRICE_DIVERGENCE
     DEFENSE_FACTOR_STD = settings.V5_DEFENSE_FACTOR_STD
 
+    # 防线3背离检测器
+    _divergence_detector = DivergenceDetector()
+
     def calculate(
         self,
         sigmoid_results: list[FactorSigmoidResult],
         signal_level: str,
         regime: str,
         macd_data: Optional[dict] = None,
+        price_series: Optional[list[float]] = None,
+        sentiment_series: Optional[list[float]] = None,
     ) -> tuple[int, dict, list[str]]:
         """
         计算置信度
@@ -60,6 +66,8 @@ class ConfidenceEngine:
         # 四道防线检查
         triggered = self._check_defenses(
             sigmoid_results, signal_level, regime, detail,
+            price_series=price_series,
+            sentiment_series=sentiment_series,
         )
 
         return stars, detail, triggered
@@ -127,6 +135,8 @@ class ConfidenceEngine:
         level: str,
         regime: str,
         detail: dict,
+        price_series: Optional[list[float]] = None,
+        sentiment_series: Optional[list[float]] = None,
     ) -> list[str]:
         """四道假信号防线"""
         triggered = []
@@ -140,14 +150,20 @@ class ConfidenceEngine:
 
         # 防线2：信号跳变 > 15分
         if self.DEFENSE_JUMP_GT_15:
-            # 需要对比前一天的分数，这里简化：检查 factor_std
             if detail.get("factor_consistency", 100) < 40:
                 triggered.append("jump_gt_15")
 
-        # 防线3：价格-情绪背离（需要价格数据，这里简化）
+        # 防线3：价格-情绪背离
         if self.DEFENSE_PRICE_DIVERGENCE:
-            # TODO：实际实现需要传入价格数据
-            pass
+            if price_series and sentiment_series:
+                div_result = self._divergence_detector.detect(price_series, sentiment_series)
+                if div_result["divergence_type"] == "bearish" and div_result["strength"] > 40:
+                    # 强看跌背离：价格涨+情绪跌 → 触发防线
+                    triggered.append("price_bearish_divergence")
+                    detail["divergence"] = div_result
+                elif div_result["divergence_type"] == "bullish" and div_result["strength"] > 40:
+                    # 强看涨背离：价格跌+情绪涨 → 也记录（但不像bearish那样降低置信度）
+                    detail["divergence"] = div_result
 
         # 防线4：因子分歧度 > 阈值
         if self.DEFENSE_FACTOR_STD:

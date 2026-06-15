@@ -9,6 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Query, Depends
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
@@ -23,6 +24,7 @@ from app.engine.aggregator_v5 import AggregatorV5
 from app.engine.signal_mapper import SignalMapper
 from app.engine.confidence import ConfidenceEngine
 from app.engine.position_v5 import PositionEngineV5
+from app.engine.sentiment_macd import SentimentMACD
 
 router = APIRouter(prefix="/api/v5")
 
@@ -125,9 +127,54 @@ async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_se
     # 信号映射
     signal_level, jump_blocked = signal_mapper.map(composite.score)
 
-    # 置信度计算
+    # 情绪MACD计算（需要历史composite_score序列）
+    macd_data = None
+    sentiment_history = []
+    price_history = []
+    try:
+        from app.engine.factor_history import FactorHistoryStore
+        history_store = FactorHistoryStore()
+        sentiment_history = await history_store.get_series(
+            db_session, index_code, "COMPOSITE", lookback_days=60,
+        )
+        # 加入今天的分数
+        score_series_for_macd = sentiment_history + [composite.score]
+        macd_engine = SentimentMACD()
+        macd_data = macd_engine.compute(score_series_for_macd)
+
+        # 获取价格历史（用于背离检测）
+        price_history = await history_store.get_series(
+            db_session, index_code, "CLOSE", lookback_days=60,
+        )
+        # 加入今天的价格
+        today_close = index_data.get("close")
+        if today_close:
+            price_history.append(float(today_close))
+    except Exception:
+        macd_data = None
+
+    # 存储今日composite_score到factor_history（供MACD后续使用）
+    try:
+        from app.engine.factor_history import FactorHistoryStore
+        history_store = FactorHistoryStore()
+        await history_store.insert(
+            db_session, index_code, "COMPOSITE", trade_date, composite.score,
+        )
+        # 同时存储今日收盘价（供背离检测使用）
+        today_close = index_data.get("close")
+        if today_close:
+            await history_store.insert(
+                db_session, index_code, "CLOSE", trade_date, float(today_close),
+            )
+    except Exception:
+        pass  # 非关键路径，失败不影响主流程
+
+    # 置信度计算（传入MACD数据+价格/情绪序列）
     confidence_stars, confidence_detail, defenses = confidence_engine.calculate(
         sigmoid_results, signal_level, composite.divergence.regime,
+        macd_data=macd_data,
+        price_series=price_history if len(price_history) >= 5 else None,
+        sentiment_series=sentiment_history + [composite.score] if len(sentiment_history) >= 4 else None,
     )
 
     return {
@@ -142,6 +189,7 @@ async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_se
         "confidence_stars": confidence_stars,
         "confidence_detail": confidence_detail,
         "defenses_triggered": defenses,
+        "macd": macd_data,
         "factor_details": sigmoid_results,
         "updated_at": datetime.now().isoformat(),
     }
@@ -198,14 +246,43 @@ async def get_v5_multi_index(
             "regime": result["regime"],
         })
 
-    # 综合情绪（取第一个指数为主）
-    main = items[0] if items else None
+    # 综合情绪（市值加权：上证0.25 + 沪深300 0.30 + 深证0.25 + 创业板0.20）
+    WEIGHT_MAP = {
+        "SH000001": 0.25,   # 上证指数
+        "SH000300": 0.30,   # 沪深300
+        "SZ399001": 0.25,   # 深证成指
+        "SZ399006": 0.20,   # 创业板指
+    }
+    weighted_score = 0.0
+    total_weight = 0.0
+    for item in items:
+        w = WEIGHT_MAP.get(item["index_code"], 0.0)
+        if w > 0:
+            weighted_score += item["composite_score"] * w
+            total_weight += w
+
+    composite_score = round(weighted_score / total_weight, 2) if total_weight > 0 else 50.0
+
+    # 综合信号：基于加权分数重新映射
+    _signal_mapper = SignalMapper()
+    composite_signal = _signal_mapper.map(composite_score)[0] if total_weight > 0 else "B"
+
+    # 综合体制：取多数体制
+    regime_counts: dict[str, int] = {}
+    for item in items:
+        r = item.get("regime", "sideways")
+        regime_counts[r] = regime_counts.get(r, 0) + 1
+    composite_regime = max(regime_counts, key=regime_counts.get) if regime_counts else "sideways"
 
     return {
         "code": 0,
         "data": {
             "indexes": items,
-            "composite": main,
+            "composite": {
+                "composite_score": composite_score,
+                "signal_level": composite_signal,
+                "regime": composite_regime,
+            },
             "updated_at": datetime.now().isoformat(),
         },
         "message": "ok",
@@ -277,6 +354,7 @@ async def get_v5_position_advice(
 
     signal_level = result["signal_level"]
     confidence_stars = result["confidence_stars"]
+    regime = result.get("regime", "sideways")
 
     # 计算仓位建议
     position_engine = PositionEngineV5(session)
@@ -286,6 +364,7 @@ async def get_v5_position_advice(
         current_position_pct=req.current_position_pct,
         signal_level=signal_level,
         confidence_stars=confidence_stars,
+        regime=regime,
     )
 
     return {
@@ -307,12 +386,32 @@ async def execute_v5_position(
     记录执行日志，更新用户持仓
     """
     from app.models.position_execution import PositionExecution
+    from app.models.user_portfolio import UserPortfolio
+
+    # 从DB查询用户实际持仓占比
+    from_position_pct = 0.0
+    try:
+        stmt = (
+            select(UserPortfolio)
+            .where(
+                UserPortfolio.user_id == user_id,
+                UserPortfolio.fund_code == req.fund_code,
+            )
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        portfolio = result.scalar_one_or_none()
+        if portfolio and portfolio.market_value and portfolio.holding_shares > 0:
+            # 简化：用持仓市值占比估算（需要用户总资产，此处暂用持仓比例）
+            from_position_pct = round(portfolio.market_value / max(portfolio.holding_shares * portfolio.current_nav, 1.0), 4)
+    except Exception:
+        pass
 
     execution = PositionExecution(
         user_id=user_id,
         fund_code=req.fund_code,
         execute_date=date.today(),
-        from_position_pct=0.0,  # TODO: 从持仓获取
+        from_position_pct=from_position_pct,
         to_position_pct=req.target_position_pct,
         signal_level=req.signal_level,
         confidence_stars=req.confidence_stars,
@@ -331,7 +430,9 @@ async def execute_v5_position(
 
 
 @router.get("/market/snapshot")
-async def get_v5_market_snapshot() -> dict:
+async def get_v5_market_snapshot(
+    session: AsyncSession = Depends(get_session),
+) -> dict:
     """
     市场快照（顶部状态条数据）
 
@@ -345,7 +446,7 @@ async def get_v5_market_snapshot() -> dict:
             continue
         data = index_data[code]
         # 简化版：直接从数据源返回，不再走V1 compatibility
-        result = await _run_v5_pipeline(code)
+        result = await _run_v5_pipeline(code, db_session=session)
         items.append({
             "index_code": code,
             "index_name": data.get("index_name", code),
@@ -362,6 +463,7 @@ async def get_v5_market_snapshot() -> dict:
         "code": 0,
         "data": {
             "indexes": items,
+            "composite_score": main.get("composite_score", 50.0) if main else 50.0,
             "global_sentiment": main.get("sentiment_label", "B") if main else "B",
             "global_score": main.get("composite_score", 50.0) if main else 50.0,
             "updated_at": datetime.now().isoformat(),

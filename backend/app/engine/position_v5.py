@@ -39,6 +39,7 @@ class PositionEngineV5:
         current_position_pct: float,
         signal_level: str,
         confidence_stars: int,
+        regime: str = "sideways",
     ) -> dict:
         """
         计算仓位调整建议
@@ -65,9 +66,12 @@ class PositionEngineV5:
         else:
             adjusted_pct = target_pct
 
-        # 4. 市场体制修正（简化：牛市可稍激进，熊市更保守）
-        # TODO：从 composite 获取 regime
-        # adjusted_pct = self._apply_regime_adj(adjusted_pct, regime)
+        # 4. 市场体制修正
+        # 牛市可稍激进（+10%），熊市更保守（-15%），极端波动极保守（-30%）
+        regime_adj = self._calc_regime_adj(regime)
+        if regime_adj != 1.0:
+            delta = adjusted_pct - current_pct
+            adjusted_pct = current_pct + delta * regime_adj
 
         # 5. 交易成本校验
         cost_rejected = False
@@ -112,7 +116,7 @@ class PositionEngineV5:
                 "current_idx": current_idx,
             },
             "confidence_adj_factor": conf_factor,
-            "regime_adj_factor": 1.0,  # TODO
+            "regime_adj_factor": regime_adj,
             "cost_rejected": cost_rejected,
             "frequency_blocked": frequency_blocked,
             "reason": reason,
@@ -129,6 +133,20 @@ class PositionEngineV5:
         if pct < 0.875:
             return "heavy"
         return "full"
+
+    def _calc_regime_adj(self, regime: str) -> float:
+        """市场体制修正系数
+        bull → 1.10（稍激进，加仓幅度×1.1）
+        bear → 0.85（保守，调整幅度×0.85）
+        extreme_volatility → 0.70（极保守，调整幅度×0.7）
+        sideways → 1.00（中性）
+        """
+        return {
+            "bull": 1.10,
+            "bear": 0.85,
+            "extreme_volatility": 0.70,
+            "sideways": 1.00,
+        }.get(regime, 1.00)
 
     def _signal_to_idx(self, level: str) -> int:
         """信号等级 → 列索引"""
