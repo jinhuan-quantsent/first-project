@@ -442,35 +442,48 @@ async def _compute_signals_from_index(
         start_dt_str = start_date.replace("-", "")
         metrics = calc_20day_metrics(closes, dates, start_dt_str)
 
-        # 综合分数计算
-        # 恐惧(高分数) = 低RSI + 跌得多 + 高波动
-        # 贪婪(低分数) = 高RSI + 涨得多 + 低波动
+        # 综合分数计算（放大灵敏度，避免全是B级）
+        # 恐惧(高分数) = 低RSI + 跌得多 + 高波动 + 价格低于均线
+        # 贪婪(低分数) = 高RSI + 涨得多 + 低波动 + 价格高于均线
         signals = {}
         for date_str, m in metrics.items():
-            # RSI反转映射: RSI=0→100分(极度恐惧), RSI=100→0分(极度贪婪)
-            rsi_score = 100 - m["rsi"]
+            # RSI反转映射: RSI=0→100(极度恐惧), RSI=50→50(中性), RSI=100→0(极度贪婪)
+            # 放大偏离度: (RSI-50)*1.5 → 更灵敏
+            rsi_dev = (m["rsi"] - 50) * 1.5
+            rsi_score = max(0, min(100, 50 - rsi_dev))
 
-            # 近20日涨跌幅映射: 大跌→高分数(恐惧), 大涨→低分数(贪婪)
-            # 用倒U型映射: 0%→50分, -10%→80分, +10%→20分
-            ret_score = max(0, min(100, 50 - m["ret_20"] * 3))
+            # 近20日涨跌幅映射: 放大到5x灵敏度
+            # -5%→75(恐惧), +5%→25(贪婪), 0%→50(中性)
+            ret_score = max(0, min(100, 50 - m["ret_20"] * 5))
 
-            # 波动率映射: 低波动→50分, 高波动→80分(恐惧加剧)
-            vol_score = max(0, min(100, 50 + (m["vol_20"] - 20) * 1.5))
+            # 波动率映射: 15%波动→50分, 25%→75分, 35%→100分
+            vol_score = max(0, min(100, 50 + (m["vol_20"] - 15) * 2.5))
 
-            # 近5日动量: 大跌→高分数
-            mom_score = max(0, min(100, 50 - m["ret_5"] * 5))
+            # 近5日动量: 放大到8x灵敏度
+            mom_score = max(0, min(100, 50 - m["ret_5"] * 8))
 
-            # 加权聚合
-            composite = rsi_score * 0.35 + ret_score * 0.25 + vol_score * 0.20 + mom_score * 0.20
+            # 趋势检测: 价格与20日均线的关系
+            # 找到当前close对应的索引
+            date_idx = dates.index(date_str) if date_str in dates else -1
+            trend_bonus = 0
+            if date_idx >= 20:
+                ma20 = sum(closes[date_idx-19:date_idx+1]) / 20
+                current_close = closes[date_idx]
+                # 价格低于均线 → 恐惧加分(最多±15)
+                dev_pct = (current_close / ma20 - 1) * 100
+                trend_bonus = max(-15, min(15, -dev_pct * 2))
 
-            # 分数→信号等级
+            # 加权聚合 + 趋势修正
+            composite = rsi_score * 0.30 + ret_score * 0.25 + vol_score * 0.15 + mom_score * 0.20 + trend_bonus * 0.10
+
+            # 分数→信号等级（放宽阈值，更容易产生极端信号）
             def _score_to_signal(s: float) -> str:
-                if s >= 90: return "S+"
-                elif s >= 80: return "S"
-                elif s >= 65: return "A"
-                elif s >= 40: return "B"
-                elif s >= 25: return "C"
-                elif s >= 10: return "D"
+                if s >= 82: return "S+"
+                elif s >= 72: return "S"
+                elif s >= 60: return "A"
+                elif s >= 38: return "B"
+                elif s >= 22: return "C"
+                elif s >= 12: return "D"
                 else: return "E"
 
             signal_level = _score_to_signal(composite)
