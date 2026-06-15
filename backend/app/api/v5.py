@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.utils.data_source import data_source, DEFAULT_INDEX_CODES
 from app.engine.factor_engine import FACTOR_NAMES, FACTOR_CLASSES
 from app.engine.quantile import QuantileNorm
+from app.utils.eastmoney import get_sector_list, get_sector_detail
 from app.engine.sigmoid import SigmoidMapper
 from app.engine.factor_engine.base import FactorSigmoidResult
 from app.engine.aggregator_v5 import AggregatorV5
@@ -496,5 +497,61 @@ async def get_v5_factor_heatmap(
             "factors": result["factor_details"],
             "updated_at": datetime.now().isoformat(),
         },
+        "message": "ok",
+    }
+
+
+# ============================================================
+# 板块行情接口
+# ============================================================
+@router.get("/market/sectors")
+async def get_v5_sectors(
+    sector_type: str = Query("concept", description="板块类型: concept=概念, industry=行业"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页条数"),
+    sort_by: str = Query("change_pct", description="排序字段: change_pct/main_net_inflow/main_pct"),
+    sort_order: str = Query("desc", description="排序方向: asc/desc"),
+):
+    """
+    获取板块行情列表（概念板块或行业板块）
+
+    数据来源：东方财富 push2 API
+    返回板块涨跌幅、主力净流入、大单/小单流向等
+    """
+    if sector_type not in ("concept", "industry"):
+        return {"code": 400, "data": None, "message": "sector_type must be 'concept' or 'industry'"}
+
+    result = await get_sector_list(
+        sector_type=sector_type,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+
+    return {
+        "code": 0,
+        "data": result,
+        "message": "ok",
+    }
+
+
+@router.get("/market/sector/{code}")
+async def get_v5_sector_detail(
+    code: str,
+):
+    """
+    获取单个板块的成分股详情
+
+    返回板块内个股涨跌、主力净流入，以及涨幅前5/跌幅前5
+    """
+    result = await get_sector_detail(code)
+
+    if result is None:
+        return {"code": 404, "data": None, "message": f"板块 {code} 未找到"}
+
+    return {
+        "code": 0,
+        "data": result,
         "message": "ok",
     }

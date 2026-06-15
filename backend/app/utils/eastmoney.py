@@ -1,8 +1,8 @@
 """
 东方财富数据源模块 V5.0
-提供基金搜索、实时估值、净值历史、持仓等数据
+提供基金搜索、实时估值、净值历史、持仓、板块行情、资金流向等数据
 
-数据源优先级：东方财富(搜索+估值) → Tushare(净值历史+基础信息) → Mock
+数据源优先级：东方财富(搜索+估值+板块) → Tushare(净值历史+基础信息) → Mock
 
 可用接口：
 1. 基金搜索: fundsuggest.eastmoney.com (关键词搜索，支持代码/名称/拼音)
@@ -10,6 +10,8 @@
 3. 基金详情: fund.eastmoney.com/pingzhongdata (持仓、费率、净值等)
 4. 净值历史: Tushare fund_nav (精确历史净值)
 5. 基础信息: Tushare fund_basic (基金类型、成立日、基准等)
+6. 概念板块行情: 腾讯行情API + Tushare行业分类 (31个申万一级行业 + 热门概念板块)
+7. 行业板块行情: 腾讯行情API (中证行业指数实时涨跌+成交量)
 """
 import asyncio
 import json
@@ -675,3 +677,291 @@ async def get_fund_detail_combined(code: str) -> Optional[dict]:
                 )
 
     return result
+
+
+# ============================================================
+# 9. 板块行情：Tushare行业分类 + 腾讯实时行情
+# ============================================================
+# 申万一级行业 → 中证行业指数代码映射（腾讯可查）
+_SW_INDUSTRY_TO_CSI = {
+    "801010.SI": ("sz399814", "农林牧渔"),
+    "801030.SI": ("sz399813", "基础化工"),
+    "801040.SI": ("sh000932", "钢铁"),
+    "801050.SI": ("sh000819", "有色金属"),
+    "801080.SI": ("sz399811", "电子"),
+    "801880.SI": ("sz399932", "汽车"),
+    "801110.SI": ("sz399989", "家用电器"),
+    "801120.SI": ("sz399971", "食品饮料"),  # 用中证传媒近似
+    "801130.SI": ("sz399970", "纺织服饰"),
+    "801140.SI": ("sz399816", "轻工制造"),
+    "801150.SI": ("sz399975", "医药生物"),
+    "801160.SI": ("sh000935", "公用事业"),
+    "801170.SI": ("sz399817", "交通运输"),
+    "801180.SI": ("sz399986", "银行"),
+    "801200.SI": ("sh000934", "房地产"),
+    "801210.SI": ("sz399950", "非银金融"),
+    "801230.SI": ("sz399971", "综合"),
+    "801710.SI": ("sz399812", "建筑材料"),
+    "801720.SI": ("sz399809", "建筑装饰"),
+    "801730.SI": ("sz399810", "通信"),
+    "801740.SI": ("sh000933", "计算机"),
+    "801750.SI": ("sz399989", "传媒"),  # 用中证传媒
+    "801760.SI": ("sh000937", "国防军工"),
+    "801770.SI": ("sz399815", "电力设备"),
+    "801780.SI": ("sz399818", "环保"),
+    "801790.SI": ("sz399819", "机械设备"),
+    "801890.SI": ("sh000929", "煤炭"),
+    "801950.SI": ("sh000930", "石油石化"),
+    "801960.SI": ("sz399810", "商贸零售"),
+    "801970.SI": ("sz399813", "社会服务"),
+    "801980.SI": ("sz399970", "美容护理"),
+}
+
+# 热门概念板块 → 腾讯可查指数代码
+_CONCEPT_SECTORS = {
+    "白酒": "sz399997",
+    "新能源车": "sz399976",
+    "锂电池": "sz399928",
+    "半导体": "sz399959",
+    "人工智能": "sh000938",
+    "光伏": "sz399808",
+    "军工": "sz399967",
+    "医药": "sz399975",
+    "消费": "sz399932",
+    "芯片": "sz399959",
+    "5G": "sz399941",
+    "碳中和": "sh000960",
+    "稀土": "sz399810",
+    "医美": "sz399970",
+    "机器人": "sz399997",
+    "数字经济": "sh000938",
+    "元宇宙": "sz399971",
+    "储能": "sz399808",
+    "氢能源": "sz399808",
+    "CRO": "sz399975",
+}
+
+
+def _safe_float(val) -> Optional[float]:
+    """安全转换为float"""
+    if val is None or val == "-":
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_tencent_quote(raw: str) -> Optional[dict]:
+    """
+    解析腾讯行情数据
+    格式: v_code="1~名称~代码~当前价~昨收~今开~成交量~..."
+    字段用~分隔，第4=当前价, 第5=昨收, 第32=涨跌额, 第33=涨跌幅, 第34=最高, 第35=最低
+    """
+    if not raw or '="' not in raw:
+        return None
+
+    # 去掉变量名部分
+    parts = raw.split('="', 1)
+    if len(parts) < 2:
+        return None
+    content = parts[1].rstrip('";')
+
+    if content in ("", "0", "1"):
+        return None
+
+    fields = content.split("~")
+    if len(fields) < 40:
+        return None
+
+    try:
+        name = fields[1]
+        code = fields[2]
+        current = _safe_float(fields[3])
+        prev_close = _safe_float(fields[4])
+        open_price = _safe_float(fields[5])
+        volume = _safe_float(fields[6])  # 手
+        amount = _safe_float(fields[37]) if len(fields) > 37 else None  # 万元
+        change_amt = _safe_float(fields[31])
+        change_pct = _safe_float(fields[32])
+        high = _safe_float(fields[33])
+        low = _safe_float(fields[34])
+        turnover = _safe_float(fields[38]) if len(fields) > 38 else None  # 换手率%
+
+        return {
+            "name": name,
+            "code": code,
+            "price": current,
+            "prev_close": prev_close,
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "change_amt": change_amt,
+            "change_pct": change_pct,
+            "volume": volume,
+            "amount": amount,
+            "turnover": turnover,
+        }
+    except (IndexError, ValueError) as e:
+        logger.debug("腾讯行情解析失败: %s", e)
+        return None
+
+
+async def get_sector_list(
+    sector_type: str = "industry",
+    page: int = 1,
+    page_size: int = 20,
+    sort_by: str = "change_pct",
+    sort_order: str = "desc",
+) -> dict:
+    """
+    获取板块行情列表
+
+    数据源：Tushare行业分类 + 腾讯实时行情
+    - industry: 31个申万一级行业
+    - concept: 热门概念板块
+
+    Args:
+        sector_type: "industry" 或 "concept"
+        page: 页码(1-based)
+        page_size: 每页条数
+        sort_by: 排序字段 change_pct
+        sort_order: asc/desc
+    """
+    cache_k = _cache_key("sector_list", sector_type, str(page), str(page_size), sort_by, sort_order)
+    cached = await cache_get(cache_k)
+    if cached is not None:
+        return cached
+
+    # 选择数据源
+    if sector_type == "industry":
+        sector_map = _SW_INDUSTRY_TO_CSI
+    else:
+        sector_map = {f"CONC_{k}": (v, k) for k, v in _CONCEPT_SECTORS.items()}
+
+    # 批量获取腾讯实时行情（每次最多30个）
+    tencent_codes = []
+    name_map = {}
+    for sw_code, (tencent_code, name) in sector_map.items():
+        tencent_codes.append(tencent_code)
+        name_map[tencent_code] = {"name": name, "sw_code": sw_code}
+
+    items = []
+    # 分批查询
+    batch_size = 30
+    for i in range(0, len(tencent_codes), batch_size):
+        batch = tencent_codes[i:i + batch_size]
+        query = ",".join(batch)
+        try:
+            async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "Mozilla/5.0"}) as client:
+                resp = await client.get(f"http://qt.gtimg.cn/q={query}")
+                text = resp.text
+
+            for line in text.strip().split(";"):
+                line = line.strip()
+                if not line:
+                    continue
+                parsed = _parse_tencent_quote(line)
+                if parsed:
+                    tencent_code = parsed["code"]
+                    meta = name_map.get(tencent_code, {})
+                    items.append({
+                        "code": meta.get("sw_code", tencent_code),
+                        "name": meta.get("name", parsed["name"]),
+                        "price": parsed["price"],
+                        "change_pct": parsed["change_pct"],
+                        "change_amt": parsed["change_amt"],
+                        "volume": parsed["volume"],
+                        "amount": parsed["amount"],
+                        "turnover": parsed["turnover"],
+                        "high": parsed["high"],
+                        "low": parsed["low"],
+                    })
+        except Exception as e:
+            logger.warning("腾讯行情批量获取失败: %s", e)
+
+    # 排序
+    reverse = sort_order == "desc"
+    if sort_by == "change_pct":
+        items.sort(key=lambda x: x.get("change_pct") or 0, reverse=reverse)
+    elif sort_by == "amount":
+        items.sort(key=lambda x: x.get("amount") or 0, reverse=reverse)
+
+    # 分页
+    total = len(items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paged = items[start:end]
+
+    result = {
+        "items": paged,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "sector_type": sector_type,
+    }
+
+    # 缓存60秒（盘中频繁刷新）
+    await cache_set(cache_k, result, ttl=60)
+    return result
+
+
+async def get_sector_detail(code: str) -> Optional[dict]:
+    """
+    获取单个板块的实时行情详情
+
+    Args:
+        code: 行业指数代码(如 sz399986) 或板块代码(如 801180.SI)
+
+    Returns:
+        {"code": str, "name": str, "price": float, ...}
+    """
+    cache_k = _cache_key("sector_detail", code)
+    cached = await cache_get(cache_k)
+    if cached is not None:
+        return cached
+
+    # 查找腾讯代码
+    tencent_code = code
+    name = ""
+
+    # 如果是申万代码，映射到腾讯代码
+    if code in _SW_INDUSTRY_TO_CSI:
+        tencent_code, name = _SW_INDUSTRY_TO_CSI[code]
+    elif code.startswith("CONC_"):
+        concept_name = code[5:]
+        if concept_name in _CONCEPT_SECTORS:
+            tencent_code = _CONCEPT_SECTORS[concept_name]
+            name = concept_name
+
+    try:
+        async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            resp = await client.get(f"http://qt.gtimg.cn/q={tencent_code}")
+            parsed = _parse_tencent_quote(resp.text)
+
+        if not parsed:
+            return None
+
+        result = {
+            "code": code,
+            "tencent_code": tencent_code,
+            "name": name or parsed["name"],
+            "price": parsed["price"],
+            "prev_close": parsed["prev_close"],
+            "open": parsed["open"],
+            "high": parsed["high"],
+            "low": parsed["low"],
+            "change_amt": parsed["change_amt"],
+            "change_pct": parsed["change_pct"],
+            "volume": parsed["volume"],
+            "amount": parsed["amount"],
+            "turnover": parsed["turnover"],
+        }
+
+        # 缓存5分钟
+        await cache_set(cache_k, result, ttl=300)
+        return result
+
+    except Exception as e:
+        logger.warning("板块详情获取失败(%s): %s", code, e)
+        return None
