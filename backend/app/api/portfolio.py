@@ -301,15 +301,60 @@ async def get_advice_history(
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """获取仓位建议历史（Stub - 返回空列表）"""
+    """获取仓位建议历史（从 advice_log 表读取真实数据）"""
+    from app.models.advice_log import AdviceLog
+
+    page_size = 20
+    offset = (page - 1) * page_size
+
+    # 构建查询
+    stmt = select(AdviceLog).where(AdviceLog.user_id == user_id)
+    count_stmt = select(func.count(AdviceLog.id)).where(AdviceLog.user_id == user_id)
+
+    if fund_code:
+        stmt = stmt.where(AdviceLog.index_code == fund_code)
+        count_stmt = count_stmt.where(AdviceLog.index_code == fund_code)
+
+    # 获取总数
+    total_result = await session.execute(count_stmt)
+    total = total_result.scalar() or 0
+
+    # 获取分页数据
+    stmt = stmt.order_by(AdviceLog.trade_date.desc()).offset(offset).limit(page_size)
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+
+    items = []
+    for row in rows:
+        items.append({
+            "id": row.id,
+            "date": row.trade_date.strftime("%Y-%m-%d %H:%M") if row.trade_date else "",
+            "signal_level": row.signal_level or row.sentiment_label,
+            "confidence_stars": row.confidence_stars,
+            "advice_type": row.advice_type,
+            "advice_content": row.advice_content,
+            "suggested_position": row.suggested_position,
+            "is_executed": bool(row.is_executed) or row.is_executed_at is not None,
+            "is_verified": bool(row.is_verified),
+            "actual_result": row.actual_result,
+            "accuracy_score": row.accuracy_score,
+        })
+
+    # 计算胜率
+    verified = [r for r in rows if r.is_verified]
+    correct = [r for r in verified if r.accuracy_score > 0.5]
+    win_rate = round(len(correct) / len(verified) * 100, 1) if verified else 0
+
     return {
         "code": 0,
         "data": {
-            "items": [],
+            "items": items,
             "stats": {
-                "total_advice": 0,
-                "executed": 0,
-                "pending": 0,
+                "total_advice": total,
+                "executed": sum(1 for r in rows if r.is_executed or r.is_executed_at),
+                "pending": sum(1 for r in rows if not r.is_executed and not r.is_executed_at),
+                "win_rate": win_rate,
+                "verified_count": len(verified),
             },
         },
         "message": "ok",
@@ -323,11 +368,59 @@ async def get_trade_records(
     user_id: str = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """获取交易记录（Stub - 返回空列表）"""
+    """获取交易记录（从 position_execution 表读取真实数据）"""
+    from app.models.position_execution import PositionExecution
+
+    page_size = 20
+    offset = (page - 1) * page_size
+
+    # 构建查询
+    stmt = select(PositionExecution).where(PositionExecution.user_id == user_id)
+    count_stmt = select(func.count(PositionExecution.id)).where(PositionExecution.user_id == user_id)
+
+    if fund_code:
+        stmt = stmt.where(PositionExecution.fund_code == fund_code)
+        count_stmt = count_stmt.where(PositionExecution.fund_code == fund_code)
+
+    # 获取总数
+    total_result = await session.execute(count_stmt)
+    total = total_result.scalar() or 0
+
+    # 获取分页数据
+    stmt = stmt.order_by(PositionExecution.execute_date.desc()).offset(offset).limit(page_size)
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+
+    items = []
+    for row in rows:
+        # 判断交易类型
+        if row.to_position_pct > row.from_position_pct:
+            trade_type = "买入"
+        elif row.to_position_pct < row.from_position_pct:
+            trade_type = "卖出"
+        else:
+            trade_type = "调仓"
+
+        items.append({
+            "id": row.id,
+            "date": row.execute_date.strftime("%Y-%m-%d") if row.execute_date else "",
+            "fund_code": row.fund_code,
+            "type": trade_type,
+            "amount": row.amount or 0,
+            "from_pct": row.from_position_pct,
+            "to_pct": row.to_position_pct,
+            "signal_level": row.signal_level,
+            "confidence_stars": row.confidence_stars,
+            "reason": row.reason or "",
+            "nav": 0,  # 净值需要额外查询，暂留0
+            "fee": 0,  # 费用暂无数据
+        })
+
     return {
         "code": 0,
         "data": {
-            "items": [],
+            "items": items,
+            "total": total,
         },
         "message": "ok",
     }

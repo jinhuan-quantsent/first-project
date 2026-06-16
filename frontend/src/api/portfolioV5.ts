@@ -49,6 +49,17 @@ export async function executePositionV5(params: {
   return res.data.data;
 }
 
+/** 更新持仓市值（行内编辑用） */
+export async function updatePortfolioMarketValue(
+  itemId: number,
+  marketValue: number,
+): Promise<{ id: number; market_value: number; current_nav: number; total_return: number; return_rate: number }> {
+  const res = await client.patch<ApiResponse<{ id: number; market_value: number; current_nav: number; total_return: number; return_rate: number }>>(`/api/v5/portfolio/${itemId}/market-value`, {
+    market_value: marketValue,
+  });
+  return res.data.data;
+}
+
 /** 获取历史建议 */
 export async function fetchAdviceHistoryV5(
   fundCode?: string,

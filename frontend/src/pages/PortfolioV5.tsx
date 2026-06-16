@@ -3,17 +3,21 @@
  * 总览头部 + 列表行 + 详情展开面板
  * 对齐设计稿 Image4 + Image5
  */
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type { PortfolioItem, PortfolioSummary, SignalLevel } from '../types';
 import { SIGNAL_LABELS } from '../types';
 import PositionDetailPanel, { type PositionDetailData } from '../components/portfolio/PositionDetailPanel';
-import { Briefcase, Pencil, ChevronDown, ChevronUp } from 'lucide-react';
+import { Briefcase, Pencil, Check, X, ChevronDown, ChevronUp } from 'lucide-react';
 import { clsx } from 'clsx';
 import {
   fetchPortfolioV5,
   executePositionV5,
+  updatePortfolioMarketValue,
+  fetchAdviceHistoryV5,
+  fetchTradeRecordsV5,
 } from '../api/portfolioV5';
 import { fetchV5Sentiment } from '../api/marketV5';
+import { toast } from '../components/common/Toast';
 import client from '../api/client';
 
 /* ============================================================
@@ -73,6 +77,8 @@ function buildRealDetailData(
   topStocks: { name: string; pct: number; change: number }[] | undefined,
   evaluation: any | undefined,
   sentimentDetail: any | undefined,
+  adviceData?: { items: any[]; stats: any } | undefined,
+  tradeRecords?: any[] | undefined,
 ): PositionDetailData {
   const signalLevel = signal?.signalLevel ?? 'B';
   const signalLabel = SIGNAL_LABELS[signalLevel] ?? '中性';
@@ -138,11 +144,27 @@ function buildRealDetailData(
     recommendationReason,
     updateNote: `更新市值${formatMoney(item.market_value)}（${item.return_rate >= 0 ? '涨' : '跌'}${Math.abs(item.return_rate).toFixed(1)}%）`,
 
-    winRate: 0,  // 暂无真实数据
-    winRateDetail: '',
-    performanceRecords: [],  // 暂无真实数据，显示空列表
+    winRate: adviceData?.stats?.win_rate ?? 0,
+    winRateDetail: adviceData?.stats?.verified_count
+      ? `${adviceData.stats.verified_count}条已验证`
+      : '',
+    performanceRecords: (adviceData?.items || []).slice(0, 10).map((a: any) => ({
+      date: a.date?.slice(0, 10) || '',
+      signal: a.signal_level || '',
+      operation: a.advice_type === 'buy' ? '买入' : a.advice_type === 'reduce' ? '减仓' : a.advice_type === 'hold' ? '持有' : '观望',
+      correctUp: a.is_verified && a.actual_result > 0,
+      correctDown: a.is_verified && a.actual_result < 0,
+      returnPct: a.actual_result || 0,
+      reason: a.advice_content || '',
+    })),
 
-    tradeRecords: [],  // 暂无真实数据，显示空列表
+    tradeRecords: (tradeRecords || []).slice(0, 10).map((t: any) => ({
+      date: t.date || '',
+      type: t.type || '调仓',
+      amount: t.amount || 0,
+      nav: t.nav || 0,
+      fee: t.fee || 0,
+    })),
 
     navHistory: navHistory?.map((nav, i) => ({
       date: new Date(Date.now() - (navHistory.length - i) * 86400000).toISOString().slice(0, 10),
@@ -233,25 +255,52 @@ function PortfolioHeader({ summary }: { summary: PortfolioSummary | null }) {
 }
 
 /* ============================================================
-   持仓列表行组件
+   持仓列表行组件（支持行内编辑市值）
    ============================================================ */
 function PositionRow({
   item,
   expanded,
   onToggle,
   signal,
+  editingCode,
+  editValue,
+  onStartEdit,
+  onCancelEdit,
+  onSaveEdit,
+  onEditValueChange,
 }: {
   item: PortfolioItem;
   expanded: boolean;
   onToggle: () => void;
   signal: { signalLevel: SignalLevel; confidenceStars: number } | undefined;
+  editingCode: string | null;
+  editValue: string;
+  onStartEdit: (fundCode: string) => void;
+  onCancelEdit: () => void;
+  onSaveEdit: (fundCode: string) => void;
+  onEditValueChange: (val: string) => void;
 }) {
+  const inputRef = useRef<HTMLInputElement>(null);
   const fundShortName = (item as any).fund_short_name || item.fund_name;
   const daily = formatChangeValue(item.daily_return);
   const holding = formatChangeValue(item.total_return);
   const holdingRate = formatChangeRate(item.return_rate);
   const signalLevel = signal?.signalLevel;
   const signalLabel = signalLevel ? SIGNAL_LABELS[signalLevel] : '';
+  const isEditing = editingCode === item.fund_code;
+
+  // 自动聚焦输入框
+  useEffect(() => {
+    if (isEditing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [isEditing]);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') onSaveEdit(item.fund_code);
+    if (e.key === 'Escape') onCancelEdit();
+  };
 
   return (
     <div className={clsx(
@@ -270,15 +319,44 @@ function PositionRow({
         </div>
 
         {/* 中间偏左：持仓市值+编辑 (~20%) */}
-        <div className="shrink-0 flex items-center gap-1 min-w-[100px]">
-          <span className="text-sm font-bold text-gray-800 font-mono">{formatMoney(item.market_value)}</span>
-          <button
-            onClick={(e) => { e.stopPropagation(); }}
-            className="text-gray-300 hover:text-[var(--brand-cyan)] transition-colors"
-            title="编辑持仓"
-          >
-            <Pencil className="w-3 h-3" />
-          </button>
+        <div className="shrink-0 flex items-center gap-1 min-w-[100px]" onClick={(e) => e.stopPropagation()}>
+          {isEditing ? (
+            <div className="flex items-center gap-1">
+              <span className="text-xs text-gray-400">¥</span>
+              <input
+                ref={inputRef}
+                type="text"
+                value={editValue}
+                onChange={(e) => onEditValueChange(e.target.value)}
+                onKeyDown={handleKeyDown}
+                onBlur={() => onSaveEdit(item.fund_code)}
+                className="w-20 text-sm font-bold text-gray-800 font-mono border border-[var(--brand-cyan)] rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-cyan)]"
+              />
+              <button
+                onClick={() => onSaveEdit(item.fund_code)}
+                className="text-green-500 hover:text-green-600 transition-colors"
+              >
+                <Check className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onCancelEdit(); }}
+                className="text-gray-400 hover:text-gray-500 transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : (
+            <>
+              <span className="text-sm font-bold text-gray-800 font-mono">{formatMoney(item.market_value)}</span>
+              <button
+                onClick={(e) => { e.stopPropagation(); onStartEdit(item.fund_code); }}
+                className="text-gray-300 hover:text-[var(--brand-cyan)] transition-colors"
+                title="编辑持仓"
+              >
+                <Pencil className="w-3 h-3" />
+              </button>
+            </>
+          )}
         </div>
 
         {/* 中间：昨收+持有 (~25%) */}
@@ -328,15 +406,76 @@ export default function PortfolioV5() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // 行内编辑状态
+  const [editingCode, setEditingCode] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
+  const [saving, setSaving] = useState(false);
+
   // 增强数据
   const [navHistories, setNavHistories] = useState<Record<string, number[]>>({});
   const [topStocksMap, setTopStocksMap] = useState<Record<string, { name: string; pct: number; change: number }[]>>({});
   const [evaluationsMap, setEvaluationsMap] = useState<Record<string, any>>({});
   const [sentimentDetailsMap, setSentimentDetailsMap] = useState<Record<string, any>>({});
 
+  // 建议记录 + 交易记录
+  const [adviceMap, setAdviceMap] = useState<Record<string, { items: any[]; stats: any }>>({});
+  const [tradeMap, setTradeMap] = useState<Record<string, any[]>>({});
+
   const toggleExpand = useCallback((id: number) => {
     setExpandedId(prev => prev === id ? null : id);
   }, []);
+
+  /** 开始编辑市值 */
+  const handleStartEdit = useCallback((fundCode: string) => {
+    const item = items.find(i => i.fund_code === fundCode);
+    if (item) {
+      setEditingCode(fundCode);
+      setEditValue(String(Math.round(item.market_value)));
+    }
+  }, [items]);
+
+  /** 取消编辑 */
+  const handleCancelEdit = useCallback(() => {
+    setEditingCode(null);
+    setEditValue('');
+  }, []);
+
+  /** 保存市值编辑 */
+  const handleSaveEdit = useCallback(async (fundCode: string) => {
+    if (saving) return;
+    const numVal = parseFloat(editValue);
+    if (isNaN(numVal) || numVal <= 0) {
+      toast.error('请输入有效的金额');
+      return;
+    }
+
+    const item = items.find(i => i.fund_code === fundCode);
+    if (!item) return;
+
+    setSaving(true);
+    try {
+      const result = await updatePortfolioMarketValue(item.id, numVal);
+      // 更新本地数据
+      setItems(prev => prev.map(i =>
+        i.fund_code === fundCode
+          ? {
+              ...i,
+              market_value: result.market_value ?? numVal,
+              current_nav: result.current_nav ?? i.current_nav,
+              total_return: result.total_return ?? i.total_return,
+              return_rate: result.return_rate ?? i.return_rate,
+            }
+          : i
+      ));
+      setEditingCode(null);
+      setEditValue('');
+      toast.success('持仓市值已更新');
+    } catch (err: any) {
+      toast.error(err?.response?.data?.message || '更新失败');
+    } finally {
+      setSaving(false);
+    }
+  }, [editValue, items, saving]);
 
   /** 加载持仓数据 */
   useEffect(() => {
@@ -454,6 +593,48 @@ export default function PortfolioV5() {
         setTopStocksMap(realTopStocks);
         setEvaluationsMap(realEvaluations);
         setSentimentDetailsMap(realSentimentDetails);
+
+        // 并行获取建议历史 + 交易记录
+        try {
+          const [adviceEntries, tradeEntries] = await Promise.all([
+            Promise.all(
+              safeItems.map(async (item) => {
+                try {
+                  const adviceData = await fetchAdviceHistoryV5(item.fund_code);
+                  return [item.fund_code, adviceData] as [string, any];
+                } catch {
+                  return null;
+                }
+              }),
+            ),
+            Promise.all(
+              safeItems.map(async (item) => {
+                try {
+                  const tradeData = await fetchTradeRecordsV5(item.fund_code);
+                  return [item.fund_code, tradeData.items || []] as [string, any[]];
+                } catch {
+                  return null;
+                }
+              }),
+            ),
+          ]);
+
+          if (cancelled) return;
+
+          const realAdviceMap: Record<string, { items: any[]; stats: any }> = {};
+          adviceEntries.forEach((entry) => {
+            if (entry) realAdviceMap[entry[0]] = entry[1];
+          });
+          setAdviceMap(realAdviceMap);
+
+          const realTradeMap: Record<string, any[]> = {};
+          tradeEntries.forEach((entry) => {
+            if (entry) realTradeMap[entry[0]] = entry[1];
+          });
+          setTradeMap(realTradeMap);
+        } catch {
+          // 非关键数据，静默失败
+        }
       } catch (err: any) {
         if (!cancelled) {
           setError(err?.message || '加载持仓数据失败');
@@ -531,6 +712,8 @@ export default function PortfolioV5() {
               topStocksMap[item.fund_code],
               evaluationsMap[item.fund_code],
               { factors: signals[item.fund_code]?.factorDetails },
+              adviceMap[item.fund_code],
+              tradeMap[item.fund_code],
             );
 
             return (
@@ -541,6 +724,12 @@ export default function PortfolioV5() {
                   expanded={isExpanded}
                   onToggle={() => toggleExpand(item.id)}
                   signal={signals[item.fund_code]}
+                  editingCode={editingCode}
+                  editValue={editValue}
+                  onStartEdit={handleStartEdit}
+                  onCancelEdit={handleCancelEdit}
+                  onSaveEdit={handleSaveEdit}
+                  onEditValueChange={setEditValue}
                 />
 
                 {/* 展开详情面板 */}
@@ -548,6 +737,14 @@ export default function PortfolioV5() {
                   <PositionDetailPanel
                     data={detailData}
                     onCollapse={() => setExpandedId(null)}
+                    onExecute={async () => {
+                      try {
+                        await handleExecute(item);
+                        toast.success('仓位调整已执行');
+                      } catch (err: any) {
+                        toast.error(err?.response?.data?.message || '执行失败');
+                      }
+                    }}
                   />
                 )}
               </div>

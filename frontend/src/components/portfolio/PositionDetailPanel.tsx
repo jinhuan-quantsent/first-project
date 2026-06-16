@@ -1,11 +1,11 @@
 /**
  * PositionDetailPanel - 持仓详情展开面板
- * 包含：合规星级+推荐理由 / 绩效记录 / 交易记录 / 走势图 / 重仓股 / 基础评级 / 今日评估
+ * 包含：合规星级+推荐理由 / 操作建议 / 绩效记录 / 交易记录 / 走势图 / 重仓股 / 基础评级 / 今日评估
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import type { SignalLevel } from '../../types';
 import SentimentBadge from '../common/SentimentBadge';
-import { Star, TrendingUp, ChevronUp, BarChart3, Activity, FileText, Award } from 'lucide-react';
+import { Star, TrendingUp, ChevronUp, BarChart3, Activity, FileText, Award, Play, Shield } from 'lucide-react';
 import { clsx } from 'clsx';
 
 /* ============================================================
@@ -75,6 +75,7 @@ export interface PositionDetailData {
 interface PositionDetailPanelProps {
   data: PositionDetailData;
   onCollapse: () => void;
+  onExecute?: () => Promise<void>;
 }
 
 /* ============================================================
@@ -217,10 +218,41 @@ function StarRating({ value, max = 5 }: { value: number; max?: number }) {
 /* ============================================================
    主组件
    ============================================================ */
-export default function PositionDetailPanel({ data, onCollapse }: PositionDetailPanelProps) {
+export default function PositionDetailPanel({ data, onCollapse, onExecute }: PositionDetailPanelProps) {
   const daily = formatChange(data.dailyReturn);
   const holding = formatChange(data.holdingReturn);
   const holdingRate = formatChange(data.holdingReturnRate, true);
+
+  // 仓位建议执行
+  const [executeAmount, setExecuteAmount] = useState('');
+  const [executing, setExecuting] = useState(false);
+  const [dailyExecCount, setDailyExecCount] = useState(() => {
+    // 从 localStorage 读取当日执行次数
+    const key = `exec_count_${data.fundCode}_${new Date().toISOString().slice(0, 10)}`;
+    return parseInt(localStorage.getItem(key) || '0', 10);
+  });
+
+  const DAILY_LIMIT = 3;
+  const canExecute = dailyExecCount < DAILY_LIMIT;
+
+  const handleExecute = async () => {
+    if (!executeAmount || parseFloat(executeAmount) <= 0) return;
+    if (!canExecute) return;
+    if (!onExecute) return;
+
+    setExecuting(true);
+    try {
+      await onExecute();
+      // 更新执行计数
+      const key = `exec_count_${data.fundCode}_${new Date().toISOString().slice(0, 10)}`;
+      const newCount = dailyExecCount + 1;
+      localStorage.setItem(key, String(newCount));
+      setDailyExecCount(newCount);
+      setExecuteAmount('');
+    } finally {
+      setExecuting(false);
+    }
+  };
 
   return (
     <div className="bg-white border-t border-gray-100 animate-fadeIn">
@@ -291,6 +323,53 @@ export default function PositionDetailPanel({ data, onCollapse }: PositionDetail
             <p className="text-[10px] text-gray-400">{data.updateNote}</p>
           )}
         </div>
+
+        {/* ====== 子区2.5: 操作建议执行 ====== */}
+        {onExecute && (
+          <div className="bg-gradient-to-r from-cyan-50 to-teal-50 rounded-lg p-3 space-y-2 border border-cyan-100/50">
+            <div className="flex items-center gap-2">
+              <Shield className="w-3.5 h-3.5 text-[var(--brand-cyan)]" />
+              <span className="text-xs font-medium text-gray-700">操作建议执行</span>
+              <span className={`text-[10px] ml-auto ${canExecute ? 'text-gray-400' : 'text-red-400'}`}>
+                今日已执行 {dailyExecCount}/{DAILY_LIMIT} 次
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-500 shrink-0">
+                {data.operationTag === '加仓' || data.operationTag === '买入' ? '买入' : '卖出'}金额
+              </span>
+              <div className="flex-1 flex items-center gap-1">
+                <span className="text-xs text-gray-400">¥</span>
+                <input
+                  type="text"
+                  value={executeAmount}
+                  onChange={(e) => setExecuteAmount(e.target.value.replace(/[^\d.]/g, ''))}
+                  placeholder={data.operationTag === '持有' ? '暂无操作' : '输入金额'}
+                  disabled={!canExecute || data.operationTag === '持有'}
+                  className="flex-1 text-sm font-mono border border-cyan-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-[var(--brand-cyan)] disabled:bg-gray-100 disabled:text-gray-400"
+                />
+              </div>
+              <button
+                onClick={handleExecute}
+                disabled={!canExecute || !executeAmount || parseFloat(executeAmount) <= 0 || executing || data.operationTag === '持有'}
+                className={clsx(
+                  'flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
+                  canExecute && executeAmount && parseFloat(executeAmount) > 0 && !executing && data.operationTag !== '持有'
+                    ? 'bg-[var(--brand-cyan)] text-white hover:bg-[var(--brand-cyan-dark)] shadow-sm'
+                    : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                )}
+              >
+                <Play className="w-3 h-3" />
+                {executing ? '执行中...' : '执行'}
+              </button>
+            </div>
+
+            {!canExecute && (
+              <p className="text-[10px] text-red-400">今日执行次数已达上限，请明日再试</p>
+            )}
+          </div>
+        )}
 
         {/* ====== 子区3: 绩效记录 ====== */}
         <div>

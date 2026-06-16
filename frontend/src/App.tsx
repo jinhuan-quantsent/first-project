@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import AppLayout from './components/layout/AppLayout';
+import ToastContainer from './components/common/Toast';
 import Dashboard from './pages/DashboardV5';
 import FundSearch from './pages/FundSearchV5';
 import Watchlist from './pages/WatchlistV5';
@@ -19,6 +20,7 @@ function App() {
 
   return (
     <BrowserRouter>
+      <ToastContainer />
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />

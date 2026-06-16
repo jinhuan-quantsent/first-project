@@ -589,6 +589,56 @@ async def execute_v5_position(
     }
 
 
+@router.patch("/portfolio/{item_id}/market-value")
+async def update_portfolio_market_value(
+    item_id: int,
+    payload: dict,
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    更新持仓市值（行内编辑用）
+
+    仅更新 market_value 字段，自动重算 total_return / return_rate
+    """
+    from app.models.user_portfolio import UserPortfolio
+
+    new_market_value = payload.get("market_value")
+    if new_market_value is None or float(new_market_value) <= 0:
+        return {"code": 400, "data": None, "message": "市值必须大于0"}
+
+    stmt = select(UserPortfolio).where(
+        UserPortfolio.id == item_id, UserPortfolio.user_id == user_id
+    )
+    result = await session.execute(stmt)
+    existing = result.scalar_one_or_none()
+
+    if not existing:
+        return {"code": 404, "data": None, "message": f"持仓 {item_id} 不存在"}
+
+    existing.market_value = round(float(new_market_value), 2)
+
+    # 重算收益
+    if existing.holding_shares > 0 and existing.cost_nav > 0:
+        existing.current_nav = round(existing.market_value / existing.holding_shares, 4)
+        existing.total_return = round(existing.market_value - existing.cost_nav * existing.holding_shares, 2)
+        existing.return_rate = round((existing.current_nav / existing.cost_nav - 1) * 100, 2) if existing.cost_nav > 0 else 0
+
+    await session.commit()
+
+    return {
+        "code": 0,
+        "data": {
+            "id": existing.id,
+            "market_value": existing.market_value,
+            "current_nav": existing.current_nav,
+            "total_return": existing.total_return,
+            "return_rate": existing.return_rate,
+        },
+        "message": "更新成功",
+    }
+
+
 @router.get("/market/snapshot")
 async def get_v5_market_snapshot(
     session: AsyncSession = Depends(get_session),

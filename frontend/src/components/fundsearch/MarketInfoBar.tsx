@@ -10,6 +10,8 @@ interface MarketInfoBarProps {
   indexes: IndexSnapshot[];
   globalLabel?: SentimentLabel | null;
   globalScore?: number | null;
+  /** 因子推荐理由，如"波动率82分+北向资金78分触发恐慌信号" */
+  reason?: string | null;
   loading?: boolean;
 }
 
@@ -46,6 +48,7 @@ export default function MarketInfoBar({
   indexes = DUMMY_INDEXES,
   globalLabel = null,
   globalScore = null,
+  reason = null,
   loading = false,
 }: MarketInfoBarProps) {
   if (loading) {
@@ -96,6 +99,13 @@ export default function MarketInfoBar({
               {String(globalLabel).replace('_', ' ')}
             </span>
           )}
+        </div>
+      )}
+
+      {/* 推荐理由 */}
+      {reason && (
+        <div className="ml-auto text-xs text-gray-400 italic max-w-xs text-right" style={{ lineHeight: 1.4 }}>
+          {reason}
         </div>
       )}
     </div>

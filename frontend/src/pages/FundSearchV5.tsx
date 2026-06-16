@@ -4,7 +4,7 @@
  *          SectorCards · OpportunityRadar · FundDetailPanel(右侧面板)
  * 布局：左右分栏 — 左侧搜索结果 + 右侧详情面板(条件渲染)
  */
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, X } from 'lucide-react';
 import { clsx } from 'clsx';
@@ -18,9 +18,11 @@ import OpportunityRadarPanel from '../components/fundsearch/OpportunityRadarPane
 import FundDetailPanel from '../components/fundsearch/FundDetailPanel';
 
 import { searchFunds, fetchFundDetail } from '../api/fund';
-import { fetchV5Sentiment } from '../api/marketV5';
+import { fetchV5Sentiment, fetchV5MultiIndex } from '../api/marketV5';
+import type { V5MultiIndexItem, V5FactorDetail } from '../api/marketV5';
 import { addWatchlistV5 } from '../api/watchlistV5';
 import { addPortfolioV5 } from '../api/portfolioV5';
+import { toast } from '../components/common/Toast';
 import type {
   FundSearchItem,
   FundDetail,
@@ -96,6 +98,39 @@ export default function FundSearchV5() {
 
   // —— 右侧面板打开/关闭 ———
   const [panelOpen, setPanelOpen] = useState(false);
+
+  // —— 大盘数据（MarketInfoBar用） ——
+  const [marketIndexes, setMarketIndexes] = useState<V5MultiIndexItem[]>([]);
+  const [marketReason, setMarketReason] = useState<string | null>(null);
+  const [marketScore, setMarketScore] = useState<number | null>(null);
+  const [marketSignal, setMarketSignal] = useState<SignalLevel | null>(null);
+
+  /** 加载大盘数据 */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await fetchV5MultiIndex();
+        if (cancelled) return;
+        setMarketIndexes(data.indexes);
+        if (data.composite) {
+          setMarketScore(data.composite.composite_score);
+          setMarketSignal(toSignalLevel(data.composite.signal_level));
+          // 从沪深300获取因子明细构建推荐理由
+          try {
+            const sh300 = data.indexes.find(i => i.index_code === 'SH000300');
+            if (sh300) {
+              const detail = await fetchV5Sentiment('SH000300');
+              if (!cancelled && detail.factor_details) {
+                setMarketReason(buildReasonFromFactors(detail.factor_details, toSignalLevel(detail.signal_level)));
+              }
+            }
+          } catch { /* 推荐理由非关键，失败不影响 */ }
+        }
+      } catch { /* 静默降级 */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   /** 构造传给子组件的 sentimentMap */
   const sentimentMap = useMemo(() => {
@@ -188,10 +223,10 @@ export default function FundSearchV5() {
   const handleAddWatchlist = useCallback(async (fund: FundSearchItem) => {
     try {
       await addWatchlistV5({ fund_code: fund.fund_code });
-      alert(`已将 ${fund.fund_short_name || fund.fund_name} 添加到自选`);
+      toast.success(`已将 ${fund.fund_short_name || fund.fund_name} 添加到自选`);
     } catch (err: any) {
       const msg = err?.response?.data?.message || err?.message || '添加自选失败';
-      alert(msg);
+      toast.error(msg);
     }
   }, []);
 
@@ -204,10 +239,10 @@ export default function FundSearchV5() {
         fund_type: fund.fund_type,
         current_nav: fund.nav,
       });
-      alert(`已将 ${fund.fund_short_name || fund.fund_name} 添加到持仓`);
+      toast.success(`已将 ${fund.fund_short_name || fund.fund_name} 添加到持仓`);
     } catch (err: any) {
       const msg = err?.response?.data?.message || err?.message || '添加持仓失败';
-      alert(msg);
+      toast.error(msg);
     }
   }, []);
 
@@ -227,7 +262,20 @@ export default function FundSearchV5() {
       </div>
 
       {/* ======== 3. 大盘信息栏 ======= */}
-      <MarketInfoBar indexes={[]} loading={false} />
+      <MarketInfoBar
+        indexes={marketIndexes.map(idx => ({
+          index_code: idx.index_code,
+          index_name: idx.index_name,
+          close: 0,
+          change_pct: 0,
+          composite_score: idx.composite_score,
+          sentiment_label: idx.signal_level as any,
+        }))}
+        globalScore={marketScore}
+        globalLabel={marketSignal ? (marketSignal === 'S+' ? 'extreme_fear' : marketSignal === 'S' ? 'fear' : marketSignal === 'A' ? 'fear' : marketSignal === 'B' ? 'neutral' : marketSignal === 'C' ? 'greed' : marketSignal === 'D' ? 'greed' : 'extreme_greed') as any : null}
+        reason={marketReason}
+        loading={false}
+      />
 
       {/* ======== 4. 搜索框 ======= */}
       <SearchBox

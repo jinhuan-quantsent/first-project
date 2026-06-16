@@ -31,6 +31,7 @@ import { fetchV5Sentiment } from '../api/marketV5';
 import { fetchFundDetailV5 } from '../api/fundSearchV5';
 import { fetchFundDetail } from '../api/fund';
 import SignalBadge from '../components/common/SentimentBadge';
+import SignalRibbon from '../components/fundsearch/SignalRibbon';
 
 /* ============================================================
    工具函数
@@ -795,6 +796,9 @@ export default function WatchlistV5() {
   /* ---- Main ---- */
   return (
     <div className="max-w-5xl mx-auto space-y-4">
+      {/* 7级信号色带 */}
+      <SignalRibbon activeLevel={selectedItem ? (sentimentCache[selectedItem.fund_code]?.signalLevel ?? null) : null} height={8} />
+
       {/* 页面标题 */}
       <div>
         <h1 className="text-xl font-bold text-gray-800">我的自选 V5.0</h1>
