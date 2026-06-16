@@ -11,7 +11,7 @@ class PcrFactor(BaseFactor):
     name = "PCR"
     label = "认沽认购比"
     direction = "fear"
-    weight = 0.04
+    weight = 0.02
     sigmoid_c = 0.30  # 左移中点
     sigmoid_k = 4.0   # 高敏感
 

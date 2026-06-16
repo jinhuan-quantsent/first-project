@@ -36,7 +36,7 @@ V5_FACTOR_META: list[dict] = [
     {"name": "TURN", "label": "换手率", "direction": "fear", "weight": 0.08, "source": "index_dailybasic"},
     {"name": "POS",  "label": "基金仓位", "direction": "greed", "weight": 0.08, "source": "fund_portfolio"},
     {"name": "NBF",  "label": "北向资金", "direction": "greed", "weight": 0.06, "source": "moneyflow_hsgt"},
-    {"name": "PCR",  "label": "认沽认购比", "direction": "fear", "weight": 0.04, "source": "opt_daily"},
+    {"name": "PCR",  "label": "认沽认购比", "direction": "fear", "weight": 0.02, "source": "opt_daily"},
     {"name": "NEWF", "label": "新发基金热度", "direction": "greed", "weight": 0.04, "source": "fund_basic"},
 ]
 
