@@ -27,6 +27,7 @@ from app.engine.signal_mapper import SignalMapper
 from app.engine.confidence import ConfidenceEngine
 from app.engine.position_v5 import PositionEngineV5
 from app.engine.sentiment_macd import SentimentMACD
+from app.engine.sector_scorer import score_sectors
 
 router = APIRouter(prefix="/api/v5")
 
@@ -765,13 +766,13 @@ async def get_v5_sectors(
     """
     获取板块行情列表（概念板块或行业板块）
 
-    数据来源：东方财富 push2 API
-    返回板块涨跌幅、主力净流入、大单/小单流向等
+    数据来源：东方财富 push2 API → sector_scorer V5.0 增强评分
+    返回板块涨跌幅、主力净流入、情绪评分、信号等级、结构化理由等
     """
     if sector_type not in ("concept", "industry"):
         return {"code": 400, "data": None, "message": "sector_type must be 'concept' or 'industry'"}
 
-    result = await get_sector_list(
+    raw = await get_sector_list(
         sector_type=sector_type,
         page=page,
         page_size=page_size,
@@ -779,9 +780,25 @@ async def get_v5_sectors(
         sort_order=sort_order,
     )
 
+    # 通过 sector_scorer V5.0 增强评分（6因子+信号等级+结构化理由）
+    items = raw.get("items", []) if isinstance(raw, dict) else []
+    if items:
+        scored = await score_sectors(items)
+        # 保留分页信息
+        pagination = raw.get("pagination", {}) if isinstance(raw, dict) else {}
+        return {
+            "code": 0,
+            "data": {
+                "items": scored,
+                "pagination": pagination,
+            },
+            "message": "ok",
+        }
+
+    # 降级：原始数据无 items 时直接返回
     return {
         "code": 0,
-        "data": result,
+        "data": raw,
         "message": "ok",
     }
 
