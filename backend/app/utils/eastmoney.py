@@ -561,7 +561,7 @@ async def get_fund_detail_combined(code: str) -> Optional[dict]:
 
     1. 东方财富实时估值（盘中估算净值）
     2. Tushare fund_basic（基金基础信息）
-    3. Tushare fund_nav（净值历史30天）
+    3. Tushare fund_nav（净值历史400天，前端展示30天）
     4. 东方财富持仓信息（重仓股代码）
 
     Returns:
@@ -572,7 +572,7 @@ async def get_fund_detail_combined(code: str) -> Optional[dict]:
     # 并行获取
     realtime_task = get_fund_realtime(code)
     basic_task = get_fund_basic_tushare(ts_code)
-    nav_task = get_fund_nav_history(ts_code, days=30)
+    nav_task = get_fund_nav_history(ts_code, days=400)  # B3: fetch 400 days for year_return
     holdings_task = get_fund_holdings(code)
 
     realtime, basic, nav_history, holdings = await asyncio.gather(
@@ -675,6 +675,17 @@ async def get_fund_detail_combined(code: str) -> Optional[dict]:
                 result["month_return"] = round(
                     (latest["adj_nav"] / month_ago["adj_nav"] - 1) * 100, 2
                 )
+
+        # 年收益: 约1年前（241个交易日≈1年，B3 fix）
+        if len(nav_history) >= 241:
+            year_ago = nav_history[-241]
+            if year_ago.get("adj_nav", 0) > 0 and latest.get("adj_nav", 0) > 0:
+                result["year_return"] = round(
+                    (latest["adj_nav"] / year_ago["adj_nav"] - 1) * 100, 2
+                )
+
+    # B3 fix: trim nav_history to 30 days for frontend display
+    result["nav_history"] = (nav_history or [])[-30:]
 
     return result
 

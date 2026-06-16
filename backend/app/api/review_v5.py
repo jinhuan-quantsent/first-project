@@ -30,8 +30,34 @@ from app.engine.backtest import (
 from app.models.factor_history import FactorHistory
 from app.models.market_sentiment import MarketSentiment
 from app.utils.data_source import data_source
+import json
+from pathlib import Path
+
+# 方案持久化：JSON 文件存储
+_STRATEGY_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "backtest_strategies.json"
+
+
+def _load_strategies() -> dict:
+    """加载方案列表（线程安全：每次重新读取）"""
+    if not _STRATEGY_FILE.exists():
+        return {"strategies": [], "next_id": 1}
+    try:
+        with open(_STRATEGY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"strategies": [], "next_id": 1}
+
+
+def _save_strategies(data: dict):
+    """保存方案列表"""
+    _STRATEGY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(_STRATEGY_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
 
 router = APIRouter(prefix="/api/v5/backtest")
+
+
 
 
 # ============================================================
@@ -349,6 +375,9 @@ async def _compute_signals_from_index(
     index_code: str,
     start_date: str,
     end_date: str,
+    factor_weights: dict[str, float] | None = None,
+    factor_enabled: dict[str, bool] | None = None,
+    signal_boundaries: list[float] | None = None,
 ) -> dict[str, dict]:
     """
     从指数历史日线实时计算信号（当数据库无历史信号时使用）
@@ -359,8 +388,30 @@ async def _compute_signals_from_index(
     3. 近20日波动率: 高波动=恐惧=高分数
     三因子加权 → 综合分数 → 7级信号
 
-    Returns: {date_str: {"signal_level": str, "composite_score": float}}
+    支持自定义因子权重和信号边界。
     """
+
+    # 因子权重映射：前端11因子 → 后端5个计算因子权重
+    # 返回值: (rsi_w, ret20_w, vol_w, mom_w, dd_w, trend_w)
+    def _map_weights(fw: dict[str, float] | None, fe: dict[str, bool] | None):
+        if not fw:
+            return 0.20, 0.20, 0.10, 0.15, 0.25, 0.10
+        # 映射表：前端因子名 → 后端计算因子索引
+        mapping = {
+            "RSI": 0, "VOL": 2, "ADR": 1, "NHNL": 4,
+            "TURN": 2, "FLOW": 5, "ETF": 3, "ERP": 4,
+            "POS": 1, "NBF": 0, "PCR": 4, "NEWF": 5,
+        }
+        raw = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        for fname, fweight in fw.items():
+            idx = mapping.get(fname, -1)
+            if idx >= 0 and (not fe or fe.get(fname, True)):
+                raw[idx] += fweight
+        total = sum(raw)
+        if total > 0:
+            return tuple(x / total for x in raw)
+        return 0.20, 0.20, 0.10, 0.15, 0.25, 0.10
+
     ts_code = _INDEX_CODE_MAP.get(index_code, index_code.replace("SH", "").replace("SZ", "") + ".SH")
 
     try:
@@ -513,6 +564,7 @@ def _generate_daily_action(
     current_cash: float,
     current_position: float,
     initial_capital: float,
+    custom_action_map: dict[str, dict] | None = None,
 ) -> tuple[str, int, str]:
     """
     根据因子信号生成操作建议 — 完全由因子驱动，无人为干预
@@ -741,7 +793,10 @@ async def _run_daily_tracking_backtest(
         _logger.info("回测信号: 数据库覆盖率 %.0f%%，使用数据库信号", db_coverage * 100)
     else:
         # 数据库覆盖率不足，实时计算信号
-        signal_map = await _compute_signals_from_index(signal_index_code, req.start_date, req.end_date)
+        signal_map = await _compute_signals_from_index(
+            signal_index_code, req.start_date, req.end_date,
+            req.factor_weights or None, req.factor_enabled or None, req.signal_boundaries or None,
+        )
         _logger.info("回测信号: 数据库覆盖率 %.0f%%不足，使用实时计算信号(%d天)", db_coverage * 100, len(signal_map))
         # 如果实时计算也失败，仍然尝试数据库（即使覆盖率低，也比全是B好）
         if not signal_map and signal_map_db:
@@ -1269,30 +1324,58 @@ async def get_backtest_history(
     }
 
 
+class SaveStrategyRequest(BaseModel):
+    """保存方案请求"""
+    name: str
+    params_json: dict | str
+
+
 @router.post("/strategy")
 async def save_backtest_strategy(
-    req: dict,
+    req: SaveStrategyRequest,
     user_id: str = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """保存回测方案（Stub）"""
-    return {
-        "code": 0,
-        "data": {
-            "id": 1,
-            "name": req.get("name", "未命名方案"),
-        },
-        "message": "保存成功",
-    }
+    """保存回测方案（真实实现）"""
+    data = _load_strategies()
+    existing = next((s for s in data["strategies"] if s["name"] == req.name), None)
+    params = req.params_json if isinstance(req.params_json, str) else json.dumps(req.params_json, ensure_ascii=False)
+    if existing:
+        existing["params_json"] = params
+        existing["updated_at"] = datetime.now().isoformat()
+        strategy_id = existing["id"]
+    else:
+        strategy_id = data["next_id"]
+        data["strategies"].append({
+            "id": strategy_id,
+            "name": req.name,
+            "params_json": params,
+            "is_active": False,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        })
+        data["next_id"] = strategy_id + 1
+    _save_strategies(data)
+    return {"code": 0, "data": {"id": strategy_id, "name": req.name}, "message": "保存成功"}
+
+
+@router.get("/strategy")
+async def get_backtest_strategies(
+    user_id: str = Depends(get_current_user),
+) -> dict:
+    """获取方案列表"""
+    data = _load_strategies()
+    return {"code": 0, "data": {"strategies": data["strategies"]}, "message": "ok"}
 
 
 @router.delete("/strategy/{strategy_id}")
 async def delete_backtest_strategy(
     strategy_id: int,
     user_id: str = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """删除回测方案（Stub）"""
+    """删除回测方案"""
+    data = _load_strategies()
+    data["strategies"] = [s for s in data["strategies"] if s["id"] != strategy_id]
+    _save_strategies(data)
     return {"code": 0, "data": None, "message": "删除成功"}
 
 
@@ -1300,7 +1383,10 @@ async def delete_backtest_strategy(
 async def activate_backtest_strategy(
     strategy_id: int,
     user_id: str = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """激活回测方案（Stub）"""
+    """激活回测方案"""
+    data = _load_strategies()
+    for s in data["strategies"]:
+        s["is_active"] = (s["id"] == strategy_id)
+    _save_strategies(data)
     return {"code": 0, "data": None, "message": "激活成功"}

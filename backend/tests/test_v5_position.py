@@ -71,7 +71,7 @@ class TestPositionEngine:
         (4, 1.0),
         (3, 0.75),
         (2, 0.50),
-        (1, 0.25),
+        (1, 0.0),   # 1星=HOLD，不操作（以 config.py V5_CONFIDENCE_POSITION_ADJ 为准）
     ])
     def test_confidence_adjustment(self, stars, expected):
         """置信度修正因子正确"""

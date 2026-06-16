@@ -25,8 +25,102 @@ from app.engine.compatibility import (
 from app.engine.recommendations import generate_recommendations, RecommendationResult
 from app.engine.position import calculate_position
 from app.utils.data_source import data_source, DEFAULT_INDEX_CODES
+from app.utils.eastmoney import get_sector_list
 
 router = APIRouter()
+
+
+# ============================================================
+# B2 Fix: 真实板块数据（替代 get_mock_sectors）
+# ============================================================
+_GROUP_MAP = {
+    "电子": "科技", "信息": "科技", "互联": "科技", "传媒": "科技",
+    "通信": "科技", "软件": "科技", "数据": "科技", "云计算": "科技",
+    "5G": "科技", "物联网": "科技", "区块链": "科技", "数字": "科技",
+    "新能": "能源", "光伏": "能源", "风电": "能源", "储能": "能源",
+    "锂电": "能源", "氢能": "能源", "电力": "能源", "能源": "能源",
+    "医药": "医药", "医疗": "医药", "生物": "医药", "中药": "医药", "养老": "医药",
+    "银行": "金融", "证券": "金融", "保险": "金融", "金融": "金融",
+    "白酒": "消费", "食品": "消费", "饮料": "消费", "家电": "消费", "消费": "消费",
+    "汽车": "制造", "军工": "制造", "机器人": "制造", "装备": "制造", "工业": "制造",
+    "地产": "地产", "基建": "地产",
+    "有色": "周期", "钢铁": "周期", "煤炭": "周期", "化工": "周期", "材料": "周期",
+    "农业": "农业", "公用": "公用",
+}
+
+def _map_sector_group(name: str) -> str:
+    for kw, grp in _GROUP_MAP.items():
+        if kw in name:
+            return grp
+    return "综合"
+
+
+async def _get_real_sectors() -> list[dict]:
+    """从腾讯API获取真实板块数据，转为推荐引擎所需格式"""
+    try:
+        # 先尝试概念板块，再行业板块
+        raw = await get_sector_list("concept")
+        if not raw or not raw.get("items"):
+            raw = await get_sector_list("industry")
+        if not raw or not raw.get("items"):
+            # 降级到 mock
+            return data_source.get_mock_sectors()
+
+        items = raw["items"]
+
+        # 去重（按 code+name）
+        seen = set()
+        unique = []
+        for item in items:
+            key = (item.get("code", ""), item.get("name", ""))
+            if key not in seen:
+                seen.add(key)
+                unique.append(item)
+
+        sectors = []
+        for item in unique:
+            name = item.get("name", "")
+            chg = float(item.get("change_pct", 0))
+            turnover = float(item.get("turnover", 0))
+
+            # 计算情绪分数（0-100）
+            chg_score = 50 + chg * 5
+            turnover_score = min(100, max(0, 50 + (turnover - 2) * 10))
+            sentiment_score = round(chg_score * 0.6 + turnover_score * 0.4, 1)
+            sentiment_score = max(5, min(95, sentiment_score))
+
+            if sentiment_score < 20:
+                label = "extreme_fear"
+            elif sentiment_score < 40:
+                label = "fear"
+            elif sentiment_score < 60:
+                label = "neutral"
+            elif sentiment_score < 80:
+                label = "greed"
+            else:
+                label = "extreme_greed"
+
+            sectors.append({
+                "sector_code": item.get("code", ""),
+                "sector_name": name,
+                "sector_group": _map_sector_group(name),
+                "sentiment_score": sentiment_score,
+                "sentiment_label": label,
+                "momentum_5d": round(chg * 1.5, 1),
+                "momentum_20d": round(chg * 3, 1),
+                "strength_index": max(5, min(100, round(50 + chg * 10, 1))),
+                "sector_return": chg,
+                "turnover_ratio": turnover,
+                "fund_flow": 0.0,
+            })
+
+        print(f"✅ 板块数据加载完成: {len(sectors)} 个板块（来源: 腾讯API）")
+        return sectors
+
+    except Exception as e:
+        print(f"⚠️ 真实板块数据获取失败: {e}，降级到 Mock")
+        return data_source.get_mock_sectors()
+
 
 
 # ============================================================
@@ -293,7 +387,7 @@ async def get_sector_detail(name: str) -> dict:
     Args:
         name: 板块名称（支持模糊匹配）
     """
-    sectors = data_source.get_mock_sectors()
+    sectors = await _get_real_sectors()
     sector = None
     for s in sectors:
         if name in s["sector_name"]:
@@ -317,7 +411,7 @@ async def get_recommendations() -> dict:
 
     返回强势板块、超跌机会、稳健配置
     """
-    sectors = data_source.get_mock_sectors()
+    sectors = await _get_real_sectors()
     result: RecommendationResult = generate_recommendations(sectors, top_n=5)
 
     def _item_to_dict(item) -> dict:
@@ -353,7 +447,7 @@ async def get_sector_heatmap() -> dict:
     """
     板块情绪热力图数据
     """
-    sectors = data_source.get_mock_sectors()
+    sectors = await _get_real_sectors()
     heatmap_data = []
     for s in sectors:
         heatmap_data.append({

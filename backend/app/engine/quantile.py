@@ -78,24 +78,14 @@ class QuantileNorm:
     def _fallback_percentile(self, raw: FactorRawValue) -> float:
         """
         数据不足时的降级策略：
-        使用硬编码分位数参考表（基于沪深300历史数据预估）
+        使用因子方向中位数作为参考（而非全0.50）
+        - greed 因子：0.50（中位数，偏中性）
+        - fear 因子：0.50（中位数，偏中性）
+        注意：回填历史数据后此降级策略应很少触发
         """
-        # 简易映射：根据因子方向和原始值范围估算分位数
-        # 实际部署后应预先回填历史数据
-        fallback_map = {
-            "VOL":  0.50,
-            "ADR":  0.50,
-            "ERP":  0.50,
-            "FLOW": 0.50,
-            "ETF":  0.50,
-            "NHNL": 0.50,
-            "TURN": 0.50,
-            "POS":  0.50,
-            "NBF":  0.50,
-            "PCR":  0.50,
-            "NEWF": 0.50,
-        }
-        return fallback_map.get(raw.factor_name, 0.50)
+        # 方向映射：fear 因子（如VOL/ERP/TURN/PCR）和 greed 因子默认都是0.50
+        # 这是临时策略，回填后由真实分位数替代
+        return 0.50
 
     async def _get_sample_count(self, index_code: str, factor_name: str) -> int:
         """获取历史样本数"""

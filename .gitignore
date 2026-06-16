@@ -32,3 +32,12 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 test_bclass_factors.py
+
+# 临时/备份文件
+*.bak
+backend/b1_fix_composite_backfill.py
+backend/b2_fix_sectors.py
+backend/migrate_codes.py
+backend/verify_b1.py
+backend/data/
+backend/app/engine/v5.py

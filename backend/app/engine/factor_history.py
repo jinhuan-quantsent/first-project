@@ -88,7 +88,7 @@ class FactorHistoryStore:
         """插入单条历史记录，唯一约束防重复"""
         try:
             values = dict(
-                index_code=index_code,
+                index_code=_normalize_code(index_code),
                 factor_name=factor_name,
                 trade_date=trade_date,
                 raw_value=round(raw_value, 4),
@@ -120,7 +120,7 @@ class FactorHistoryStore:
         try:
             for rec in records:
                 values = dict(
-                    index_code=rec[0],
+                    index_code=_normalize_code(rec[0]),
                     factor_name=rec[1],
                     trade_date=rec[2],
                     raw_value=round(rec[3], 4),

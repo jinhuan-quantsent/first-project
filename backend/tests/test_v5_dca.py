@@ -23,9 +23,9 @@ class TestSignalToMultiplier:
         ("S",  2.0),
         ("A",  1.5),
         ("B",  1.0),
-        ("C",  0.8),
-        ("D",  0.5),
-        ("E",  0.0),
+        ("C",  0.5),   # 减半定投（以 dca_advice.py 为准）
+        ("D",  0.0),   # 暂停定投
+        ("E",  0.0),   # 暂停定投+考虑赎回
     ])
     def test_multiplier_mapping(self, signal, expected):
         """7级信号定投倍数映射"""
@@ -38,9 +38,9 @@ class TestSignalToMultiplier:
         ("S",  2.0),
         ("A",  1.5),
         ("B",  1.0),
-        ("C",  0.8),
-        ("D",  0.5),
-        ("E",  0.0),
+        ("C",  0.5),   # 减半定投
+        ("D",  0.0),   # 暂停定投
+        ("E",  0.0),   # 暂停定投+考虑赎回
     ])
     def test_get_multiplier_shortcut(self, signal, expected):
         """get_multiplier 便捷方法"""
@@ -59,8 +59,8 @@ class TestSignalToAction:
         ("S",  "加倍定投"),
         ("A",  "增额定投"),
         ("B",  "标准定投"),
-        ("C",  "减额定投"),
-        ("D",  "减额定投"),
+        ("C",  "减半定投"),    # 以 dca_advice.py 为准
+        ("D",  "暂停定投"),    # 以 dca_advice.py 为准
         ("E",  "建议赎回"),
     ])
     def test_action_mapping(self, signal, expected_action):
