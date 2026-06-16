@@ -6,8 +6,8 @@
     python -m scripts.backfill_factor_history [--index-code SH000300] [--lookback-days 1260] [--factors ETF,POS,PCR,NEWF] [--all]
 
 功能:
-    1. 回填缺失的4个因子（ETF/POS/PCR/NEWF）的历史数据
-    2. 也支持回填全部11因子+COMPOSITE+CLOSE
+    1. 回填缺失的因子历史数据
+    2. 支持14因子+COMPOSITE+CLOSE
     3. 自动限流，避免Tushare API被ban
 
 注意事项:
@@ -434,6 +434,271 @@ async def backfill_newf(
     return count
 
 
+async def backfill_margin(
+    store: FactorHistoryStore,
+    session,
+    tushare_pro,
+    index_code: str,
+    lookback_days: int = 1260,
+) -> int:
+    """
+    回填 MARGIN 融资融券因子历史数据
+    数据源: Tushare margin (融资融券余额)
+    计算方式: 融资净流入 = 当日融资余额 - 前日融资余额
+    """
+    end_date = date.today().isoformat().replace("-", "")
+    start_date = (date.today() - timedelta(days=lookback_days + 100)).isoformat().replace("-", "")
+
+    records: list[tuple[str, str, str, float]] = []
+
+    # 只回填上证和深证的融资融券数据
+    if index_code.startswith("SH"):
+        exchange_ids = ["SSE"]
+    elif index_code.startswith("SZ"):
+        exchange_ids = ["SZSE"]
+    else:
+        exchange_ids = ["SSE", "SZSE"]
+
+    ts_code = _normalize_code(index_code)
+
+    for exchange_id in exchange_ids:
+        try:
+            print(f"  📊 MARGIN: 获取 {exchange_id} 融资融券数据...")
+            df = tushare_pro.margin(
+                exchange_id=exchange_id,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            time.sleep(API_CALL_INTERVAL)
+
+            if df is None or df.empty:
+                print(f"  ⚠️ {exchange_id} 融资融券数据为空，尝试替代方案...")
+                continue
+
+            df = df.sort_values("trade_date").reset_index(drop=True)
+
+            rzye_col = "rzye" if "rzye" in df.columns else None  # 融资余额
+            if rzye_col is None:
+                print(f"  ⚠️ {exchange_id} 无融资余额列，跳过")
+                continue
+
+            rzye = df[rzye_col].values.astype(float)
+            trade_dates = df["trade_date"].values
+
+            for i in range(1, len(df)):
+                cur_rzye = float(rzye[i])
+                prev_rzye = float(rzye[i - 1])
+                # 融资净流入（亿元）
+                net_flow = round((cur_rzye - prev_rzye) / 1e8, 4)  # rzye 单位是元
+                td = str(trade_dates[i])
+                records.append((ts_code, "MARGIN", td, net_flow))
+
+            print(f"  ✅ {exchange_id}: {len(df) - 1} 个日期点")
+
+        except Exception as e:
+            print(f"  ⚠️ margin({exchange_id}) 获取失败: {e}")
+            time.sleep(1)
+
+    if not records:
+        # 降级：用指数成交量变化率近似融资净流入
+        print(f"  📊 MARGIN: 降级用成交量变化率近似...")
+        try:
+            ts_idx = _normalize_code(index_code)
+            df = tushare_pro.index_daily(
+                ts_code=ts_idx,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            time.sleep(API_CALL_INTERVAL)
+
+            if df is not None and len(df) > 1:
+                df = df.sort_values("trade_date").reset_index(drop=True)
+                vol_col = "vol" if "vol" in df.columns else "volume"
+                vols = df[vol_col].values.astype(float)
+                trade_dates = df["trade_date"].values
+
+                for i in range(1, len(df)):
+                    if float(vols[i - 1]) > 0:
+                        vol_change = (float(vols[i]) / float(vols[i - 1]) - 1.0) * 100
+                        # 成交量变化×10 近似融资净流入
+                        net_flow = round(vol_change * 10, 4)
+                        td = str(trade_dates[i])
+                        records.append((ts_code, "MARGIN", td, net_flow))
+
+                print(f"  ✅ 成交量近似: {len(df) - 1} 个日期点")
+        except Exception as e:
+            print(f"  ⚠️ 成交量近似失败: {e}")
+
+    if not records:
+        return 0
+
+    count = await store.insert_batch(session, records)
+    print(f"  ✅ MARGIN 回填完成: {count} 条记录")
+    return count
+
+
+async def backfill_rsi(
+    store: FactorHistoryStore,
+    session,
+    tushare_pro,
+    index_code: str,
+    lookback_days: int = 1260,
+) -> int:
+    """
+    回填 RSI 因子历史数据
+    数据源: Tushare index_daily → 计算 RSI(14)
+    """
+    end_date = date.today().isoformat().replace("-", "")
+    # 多取一些数据用于 RSI 计算的预热期
+    start_date = (date.today() - timedelta(days=lookback_days + 200)).isoformat().replace("-", "")
+    ts_code = _normalize_code(index_code)
+
+    records: list[tuple[str, str, str, float]] = []
+
+    try:
+        print(f"  📊 RSI: 获取 {ts_code} 日线数据...")
+        df = tushare_pro.index_daily(
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        time.sleep(API_CALL_INTERVAL)
+
+        if df is None or df.empty:
+            print(f"  ⚠️ {ts_code} 无日线数据")
+            return 0
+
+        df = df.sort_values("trade_date").reset_index(drop=True)
+        closes = df["close"].values.astype(float)
+        trade_dates = df["trade_date"].values
+
+        # 计算 RSI(14)
+        period = 14
+        deltas = np.diff(closes)
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+
+        # 第一个 RSI 值用简单平均
+        avg_gain = np.mean(gains[:period])
+        avg_loss = np.mean(losses[:period])
+
+        rsi_values = []
+        for i in range(period, len(deltas)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+            if avg_loss == 0:
+                rsi = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                rsi = 100.0 - (100.0 / (1.0 + rs))
+            rsi_values.append(rsi)
+
+        # rsi_values[0] 对应 deltas[period] 即 closes[period+1]
+        # trade_dates[i+1] 对应 closes[i+1]
+        # 所以 rsi_values[j] 对应 trade_dates[period+1+j]
+        for j, rsi_val in enumerate(rsi_values):
+            td_idx = period + 1 + j
+            if td_idx < len(trade_dates):
+                td = str(trade_dates[td_idx])
+                # 只记录 lookback_days 范围内的数据
+                records.append((ts_code, "RSI", td, round(rsi_val, 4)))
+
+        print(f"  ✅ RSI(14): {len(records)} 个日期点")
+
+    except Exception as e:
+        print(f"  ⚠️ RSI 回填失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+    if not records:
+        return 0
+
+    count = await store.insert_batch(session, records)
+    print(f"  ✅ RSI 回填完成: {count} 条记录")
+    return count
+
+
+async def backfill_industry_divergence(
+    store: FactorHistoryStore,
+    session,
+    tushare_pro,
+    index_code: str,
+    lookback_days: int = 1260,
+) -> int:
+    """
+    回填 INDUSTRY_DIVERGENCE 板块分歧因子历史数据
+    数据源: Tushare index_daily (多指数收益率标准差)
+    计算方式: 每日各主要指数收益率的标准差 → 衡量板块间分歧度
+    """
+    end_date = date.today().isoformat().replace("-", "")
+    start_date = (date.today() - timedelta(days=lookback_days + 100)).isoformat().replace("-", "")
+    ts_code = _normalize_code(index_code)
+
+    records: list[tuple[str, str, str, float]] = []
+
+    # 用主要指数代表各板块
+    representative_indices = [
+        "000001.SH",  # 上证指数
+        "399001.SZ",  # 深证成指
+        "399006.SZ",  # 创业板指
+        "000300.SH",  # 沪深300
+        "000016.SH",  # 上证50
+        "000905.SH",  # 中证500
+    ]
+
+    # 获取各指数日线数据
+    all_daily: dict[str, dict[str, float]] = {}  # {trade_date: {index: return_rate}}
+
+    for idx_code in representative_indices:
+        try:
+            print(f"  📊 IND_DIV: 获取 {idx_code} 日线...")
+            df = tushare_pro.index_daily(
+                ts_code=idx_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            time.sleep(API_CALL_INTERVAL)
+
+            if df is None or df.empty:
+                continue
+
+            df = df.sort_values("trade_date").reset_index(drop=True)
+            closes = df["close"].values.astype(float)
+            trade_dates = df["trade_date"].values
+
+            for i in range(1, len(df)):
+                if float(closes[i - 1]) > 0:
+                    ret = float(closes[i]) / float(closes[i - 1]) - 1.0
+                    td = str(trade_dates[i])
+                    if td not in all_daily:
+                        all_daily[td] = {}
+                    all_daily[td][idx_code] = ret
+
+        except Exception as e:
+            print(f"  ⚠️ {idx_code} 获取失败: {e}")
+            time.sleep(1)
+
+    if not all_daily:
+        return 0
+
+    # 计算每日收益率标准差
+    sorted_dates = sorted(all_daily.keys())
+    for td in sorted_dates:
+        returns = list(all_daily[td].values())
+        if len(returns) >= 3:  # 至少3个指数才有意义
+            std = round(float(np.std(returns)) * 100, 4)  # 转为百分比
+            records.append((ts_code, "INDUSTRY_DIVERGENCE", td, std))
+
+    print(f"  ✅ INDUSTRY_DIVERGENCE: {len(records)} 个日期点")
+
+    if not records:
+        return 0
+
+    count = await store.insert_batch(session, records)
+    print(f"  ✅ INDUSTRY_DIVERGENCE 回填完成: {count} 条记录")
+    return count
+
+
 async def run_backfill(
     index_codes: list[str],
     factors: list[str],
@@ -467,6 +732,9 @@ async def run_backfill(
         "POS": backfill_pos,
         "PCR": backfill_pcr,
         "NEWF": backfill_newf,
+        "MARGIN": backfill_margin,
+        "RSI": backfill_rsi,
+        "INDUSTRY_DIVERGENCE": backfill_industry_divergence,
     }
 
     # 原有7因子通过 backfill_from_tushare 回填
@@ -537,13 +805,13 @@ def main():
     parser.add_argument(
         "--factors",
         type=str,
-        default="ETF,POS,NEWF",
-        help="要回填的因子（逗号分隔），默认 ETF,POS,NEWF（跳过PCR因其积分要求高）",
+        default="ETF,POS,NEWF,MARGIN,RSI,INDUSTRY_DIVERGENCE",
+        help="要回填的因子（逗号分隔），默认 ETF,POS,NEWF,MARGIN,RSI,INDUSTRY_DIVERGENCE",
     )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="回填全部11因子+CLOSE",
+        help="回填全部14因子+CLOSE",
     )
     parser.add_argument(
         "--include-pcr",
@@ -562,7 +830,7 @@ def main():
     # 确定因子列表
     if args.all:
         factors = ["VOL", "ADR", "NHNL", "TURN", "ERP", "FLOW", "NBF",
-                    "ETF", "POS", "PCR", "NEWF"]
+                    "ETF", "POS", "PCR", "NEWF", "MARGIN", "RSI", "INDUSTRY_DIVERGENCE"]
     else:
         factors = [f.strip().upper() for f in args.factors.split(",")]
         if args.include_pcr and "PCR" not in factors:
