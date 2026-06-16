@@ -70,6 +70,7 @@ from app.api.fund import router as fund_router
 from app.api.review_v5 import router as review_v5_router
 from app.api.portfolio import router as portfolio_router
 from app.api.watchlist import router as watchlist_router
+from app.api.market import router as market_router
 
 # V5 核心路由（已自带 /api/v5 前缀）
 app.include_router(health_router, prefix="", tags=["健康检查"])
@@ -78,6 +79,9 @@ app.include_router(v5_router, prefix="", tags=["V5.0情绪引擎"])
 
 # 基金查询（prefix="/api/v5/fund" 必须在 include_router 参数里传，否则FastAPI不生效）
 app.include_router(fund_router, prefix="/api/v5/fund", tags=["基金查询"])
+
+# 市场数据（推荐/热力图等，挂载到 /api/v5 下）
+app.include_router(market_router, prefix="/api/v5", tags=["市场数据"])
 
 # 持仓管理（已自带 /api/v5/portfolio 前缀）
 app.include_router(portfolio_router, prefix="", tags=["持仓管理"])

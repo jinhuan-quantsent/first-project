@@ -32,6 +32,7 @@ import { fetchFundDetailV5 } from '../api/fundSearchV5';
 import { fetchFundDetail } from '../api/fund';
 import SignalBadge from '../components/common/SentimentBadge';
 import SignalRibbon from '../components/fundsearch/SignalRibbon';
+import { toast } from '../components/common/Toast';
 
 /* ============================================================
    工具函数
@@ -730,7 +731,7 @@ export default function WatchlistV5() {
         });
       }
     } catch (err: any) {
-      alert(err?.message || '删除自选失败，请重试');
+      toast.error(err?.message || '删除自选失败，请重试');
     }
   }, [selectedCode]);
 
@@ -797,7 +798,7 @@ export default function WatchlistV5() {
   return (
     <div className="max-w-5xl mx-auto space-y-4">
       {/* 7级信号色带 */}
-      <SignalRibbon activeLevel={selectedItem ? (sentimentCache[selectedItem.fund_code]?.signalLevel ?? null) : null} height={8} />
+      <SignalRibbon activeLevel={selectedCode ? signals[selectedCode]?.signalLevel ?? null : null} height={8} />
 
       {/* 页面标题 */}
       <div>

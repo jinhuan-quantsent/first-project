@@ -22,6 +22,7 @@ import { fetchV5Sentiment, fetchV5MultiIndex } from '../api/marketV5';
 import type { V5MultiIndexItem, V5FactorDetail } from '../api/marketV5';
 import { addWatchlistV5 } from '../api/watchlistV5';
 import { addPortfolioV5 } from '../api/portfolioV5';
+import client from '../api/client';
 import { toast } from '../components/common/Toast';
 import type {
   FundSearchItem,
@@ -105,6 +106,10 @@ export default function FundSearchV5() {
   const [marketScore, setMarketScore] = useState<number | null>(null);
   const [marketSignal, setMarketSignal] = useState<SignalLevel | null>(null);
 
+  // —— 机会雷达数据 ——
+  const [radarItems, setRadarItems] = useState<any[]>([]);
+  const [radarLoading, setRadarLoading] = useState(false);
+
   /** 加载大盘数据 */
   useEffect(() => {
     let cancelled = false;
@@ -128,6 +133,32 @@ export default function FundSearchV5() {
           } catch { /* 推荐理由非关键，失败不影响 */ }
         }
       } catch { /* 静默降级 */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  /** 加载机会雷达数据 */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setRadarLoading(true);
+      try {
+        const res = await client.get('/api/v5/market/recommendations');
+        const json = res.data;
+        if (cancelled || json.code !== 0) return;
+        const data = json.data;
+        // 合并所有分类的推荐
+        const all: any[] = [
+          ...(data.strong_sectors || []).map((s: any) => ({ ...s, opportunity_type: 'strong' })),
+          ...(data.rebound_opportunities || []).map((s: any) => ({ ...s, opportunity_type: 'rebound' })),
+          ...(data.steady_choices || []).map((s: any) => ({ ...s, opportunity_type: 'steady' })),
+        ];
+        if (!cancelled) setRadarItems(all);
+      } catch {
+        // 静默降级，组件会用DUMMY_ITEMS
+      } finally {
+        if (!cancelled) setRadarLoading(false);
+      }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -318,7 +349,10 @@ export default function FundSearchV5() {
       {!keyword && (
         <div className="space-y-4">
           <SectorCards />
-          <OpportunityRadarPanel />
+          <OpportunityRadarPanel
+            items={radarItems.length > 0 ? radarItems : undefined}
+            loading={radarLoading}
+          />
         </div>
       )}
 
