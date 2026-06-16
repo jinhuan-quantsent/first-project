@@ -286,8 +286,11 @@ async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_se
         row.record_time = datetime.now()
 
         await db_session.commit()
-    except Exception:
-        pass  # 非关键路径
+    except Exception as e:
+        logger.error(
+            "[V5 Pipeline] market_sentiment 落库失败: index=%s, date=%s, error=%s",
+            ts_code, td_date, e,
+        )
 
     result = {
         "index_code": index_code,
