@@ -165,3 +165,80 @@ export async function fetchV5FactorHeatmap(
   );
   return res.data.data;
 }
+
+// ================== Phase D 新增 API ==================
+
+/** 因子雷达图数据 */
+export interface FactorRadarItem {
+  name: string;
+  label: string;
+  direction: string;
+  percentile: number;
+  weight: number;
+}
+
+export async function fetchFactorRadar(
+  indexCode: string = 'SH000300',
+): Promise<{ index_code: string; factors: FactorRadarItem[]; trade_date: string }> {
+  const res = await client.get<ApiResponse<{ index_code: string; factors: FactorRadarItem[]; trade_date: string }>>(
+    `${V5_PREFIX}/market/factor-radar`,
+    { params: { index_code: indexCode } },
+  );
+  return res.data.data;
+}
+
+/** 背离预警数据 */
+export interface DivergenceAlert {
+  index_code: string;
+  index_name: string;
+  divergence_type: string;
+  strength: number;
+  price_trend: string;
+  sentiment_trend: string;
+  description: string;
+}
+
+export async function fetchDivergenceAlerts(): Promise<{
+  all_clear: boolean;
+  alerts: DivergenceAlert[];
+  checked_at: string;
+}> {
+  const res = await client.get<ApiResponse<{
+    all_clear: boolean;
+    alerts: DivergenceAlert[];
+    checked_at: string;
+  }>>(`${V5_PREFIX}/market/divergence`);
+  return res.data.data;
+}
+
+/** 信号验证数据 */
+export interface ForwardAccuracy {
+  win_rate: number;
+  avg_return: number;
+  count: number;
+}
+
+export async function fetchSignalPerformance(params: {
+  indexCode?: string;
+  days?: number;
+  forwardDays?: number;
+}): Promise<{
+  index_code: string;
+  total_signals: number;
+  signal_distribution: Record<string, number>;
+  forward_accuracy: Record<string, ForwardAccuracy>;
+}> {
+  const res = await client.get<ApiResponse<{
+    index_code: string;
+    total_signals: number;
+    signal_distribution: Record<string, number>;
+    forward_accuracy: Record<string, ForwardAccuracy>;
+  }>>(`${V5_PREFIX}/backtest/signal-performance`, {
+    params: {
+      index_code: params.indexCode || 'SH000300',
+      days: params.days || 60,
+      forward_days: params.forwardDays || 5,
+    },
+  });
+  return res.data.data;
+}

@@ -4,6 +4,9 @@ import SentimentBadge from '../components/common/SentimentBadge';
 import SignalLights from '../components/common/SignalLights';
 import LoadingSpinner from '../components/common/LoadingSpinner';
 import ErrorMessage from '../components/common/ErrorMessage';
+import FactorRadarChart from '../components/dashboard/FactorRadarChart';
+import DivergenceBanner from '../components/dashboard/DivergenceBanner';
+import SignalVerifyBoard from '../components/dashboard/SignalVerifyBoard';
 import { Star, AlertTriangle, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { clsx } from 'clsx';
 import type { SignalLevel } from '../types';
@@ -160,6 +163,9 @@ export default function DashboardV5() {
         <p className="text-xs md:text-sm text-gray-400 mt-1">14因子流水线 | 7级信号 | 4星置信度</p>
       </div>
 
+      {/* 背离预警横幅 */}
+      <DivergenceBanner />
+
       {/* 多指数卡片 */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {indexes.map((idx) => (
@@ -297,6 +303,18 @@ export default function DashboardV5() {
         </h3>
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
           {FACTOR_DEFS.map(renderFactorCard)}
+        </div>
+      </div>
+
+      {/* Phase D: 因子雷达图 + 信号验证看板 */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="card p-5">
+          <h3 className="text-sm font-bold text-gray-700 mb-3">因子雷达图</h3>
+          <FactorRadarChart indexCode={selectedIndex || 'SH000300'} />
+        </div>
+        <div className="card p-5">
+          <h3 className="text-sm font-bold text-gray-700 mb-3">信号验证看板</h3>
+          <SignalVerifyBoard indexCode={selectedIndex || 'SH000300'} />
         </div>
       </div>
     </div>
