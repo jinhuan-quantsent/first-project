@@ -15,11 +15,10 @@ from app.core.database import get_session
 from app.models.factor_history import FactorHistory
 from app.utils.code_format import to_tushare
 
-# 反向因子：值越高越恐慌 → 得分 = 100 - percentile
-REVERSE_FACTORS = {"波动率", "RSI"}
-
-# 倒U型因子：适中最好 → 用偏差映射
-INVERTED_U_FACTORS = {"换手率", "融资融券"}
+# V4 残留常量（已废弃，V5 使用 V5_FACTOR_META 中的 direction 字段）
+# 反转逻辑已统一到 sigmoid.py 的 REVERSE_FACTORS 和 v5.py 的 direction=="fear" 判断
+REVERSE_FACTORS_V4 = {"波动率", "RSI"}  # DEPRECATED
+INVERTED_U_FACTORS_V4 = {"换手率", "融资融券"}  # DEPRECATED
 
 DEFAULT_LOOKBACK = 750
 

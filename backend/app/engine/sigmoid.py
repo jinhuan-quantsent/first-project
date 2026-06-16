@@ -1,7 +1,11 @@
 """
 Sigmoid 映射层 — V5.0 层2
 因子特异 Sigmoid 映射：分位数(0-1) → 得分(0-100)
-⚠️ 反向因子（ERP）需要在映射后做 100 - score
+⚠️ 反向因子（direction=fear）需要在映射后做 100 - score
+- ERP: 高ERP=股票便宜=恐惧低 → 反转后低分
+- VOL: 高波动=恐慌 → 反转后低分
+- TURN: 高换手=恐慌 → 反转后低分
+- PCR: 高PCR=避险情绪=恐慌 → 反转后低分
 """
 from __future__ import annotations
 
@@ -17,8 +21,8 @@ from app.engine.factor_engine import FACTOR_NAMES
 from app.core.config import settings
 
 
-# 反向因子：映射后需要 100 - score
-REVERSE_FACTORS = {"ERP"}
+# 反向因子：映射后需要 100 - score（direction=fear 的因子）
+REVERSE_FACTORS = {"ERP", "VOL", "TURN", "PCR"}
 
 
 class SigmoidMapper:
@@ -41,7 +45,7 @@ class SigmoidMapper:
             # 应用 Sigmoid
             score = self.apply_sigmoid(qr.percentile, c, k)
 
-            # ⚠️ 反向因子处理：ERP 高原始值 → 低恐惧分
+            # ⚠️ 反向因子处理：fear方向因子高原始值 → 反转后低分（恐慌）
             if qr.factor_name in REVERSE_FACTORS:
                 score = 100.0 - score
 
