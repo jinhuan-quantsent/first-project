@@ -27,6 +27,7 @@ function App() {
         <Route element={<AppLayout />}>
           {/* V5.0：/ 默认指向基金查询页 */}
           <Route path="/" element={<FundSearch />} />
+          <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/watchlist" element={<Watchlist />} />
           <Route path="/portfolio" element={<Portfolio />} />
           <Route path="/backtest" element={<Backtest />} />

@@ -14,6 +14,7 @@ import MarketInfoBar from '../components/fundsearch/MarketInfoBar';
 import SearchBox     from '../components/fundsearch/SearchBox';
 import FundResultList from '../components/fundsearch/FundResultList';
 import SectorCards    from '../components/fundsearch/SectorCards';
+import SectorWarnings from '../components/fundsearch/SectorWarnings';
 import OpportunityRadarPanel from '../components/fundsearch/OpportunityRadarPanel';
 import FundDetailPanel from '../components/fundsearch/FundDetailPanel';
 
@@ -349,6 +350,7 @@ export default function FundSearchV5() {
       {!keyword && (
         <div className="space-y-4">
           <SectorCards />
+          <SectorWarnings />
           <OpportunityRadarPanel
             items={radarItems.length > 0 ? radarItems : undefined}
             loading={radarLoading}

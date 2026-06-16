@@ -1,5 +1,6 @@
 import { NavLink, useLocation } from 'react-router-dom';
 import {
+  LayoutDashboard,
   Search,
   Star,
   Briefcase,
@@ -7,6 +8,7 @@ import {
 } from 'lucide-react';
 
 const NAV_ITEMS = [
+  { to: '/dashboard', icon: LayoutDashboard, label: '大盘情绪' },
   { to: '/', icon: Search, label: '基金查询' },
   { to: '/watchlist', icon: Star, label: '自选' },
   { to: '/portfolio', icon: Briefcase, label: '持仓' },

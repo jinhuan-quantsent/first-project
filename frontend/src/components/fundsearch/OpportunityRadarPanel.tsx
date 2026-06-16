@@ -14,6 +14,8 @@ export type OpportunityType = 'strong' | 'rebound' | 'steady';
 interface OpportunityItem {
   fund_code: string;
   fund_name: string;
+  sector_code?: string;   // 板块代码（后端recommendations返回）
+  sector_name?: string;   // 板块名称（后端recommendations返回）
   signal_level: SignalLevel;
   confidence_stars: 1 | 2 | 3 | 4;
   opportunity_type: OpportunityType;
@@ -159,8 +161,13 @@ export default function OpportunityRadarPanel({
                   <div className="flex items-center gap-1.5">
                     <SentimentBadge level={item.signal_level} size="sm" />
                     <span className="text-xs font-medium text-gray-700 truncate">
-                      {item.fund_name}
+                      {item.sector_name || item.fund_name}
                     </span>
+                    {item.sector_name && (
+                      <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-400 shrink-0">
+                        板块
+                      </span>
+                    )}
                   </div>
                   <p className="text-[10px] text-gray-400 truncate mt-0.5">
                     {item.opportunity_reason}
