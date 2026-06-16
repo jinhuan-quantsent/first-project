@@ -90,9 +90,10 @@ function buildRealDetailData(
   // 从 V5 因子详情构建推荐理由
   const factorNames: Record<string, string> = {
     VOL: '波动率', TURN: '换手率', RATIO: '涨跌比', NEWF: '新高占比',
-    MARGIN: '融资融券', SPREAD: '股债利差', RSI: 'RSI指标',
+    MARGIN: '融资融券', ERP: '股债利差', RSI: 'RSI指标',
     FLOW: '北向资金', ETF: 'ETF流入', POS: '基金仓位', NBF: '非银融资',
-    PCR: '看跌看涨比', SHIBOR: 'Shibor利率',
+    PCR: '看跌看涨比', NHNL: '新高新低', ADR: '涨跌比',
+    INDUSTRY_DIVERGENCE: '行业分歧度',
   };
 
   let recommendationReason = '';

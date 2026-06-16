@@ -131,17 +131,20 @@ class Settings(BaseSettings):
 
     # --- V5.0 11因子配置 (名称/方向/权重/Sigmoid参数) ---
     V5_FACTOR_CONFIG: dict = Field(default_factory=lambda: {
-        "VOL":  {"label": "波动率", "direction": "fear", "weight": 0.12, "sigmoid_c": 0.50, "sigmoid_k": 3.0, "source": "tushare"},
-        "ADR":  {"label": "涨跌比", "direction": "greed", "weight": 0.12, "sigmoid_c": 0.50, "sigmoid_k": 2.5, "source": "tushare"},
-        "ERP":  {"label": "股债性价比", "direction": "fear", "weight": 0.12, "sigmoid_c": 0.50, "sigmoid_k": 4.0, "source": "tushare"},
-        "FLOW": {"label": "资金流", "direction": "greed", "weight": 0.10, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "tushare"},
-        "ETF":  {"label": "ETF份额", "direction": "greed", "weight": 0.08, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "tushare"},
-        "NHNL": {"label": "新高占比", "direction": "greed", "weight": 0.08, "sigmoid_c": 0.60, "sigmoid_k": 2.5, "source": "tushare"},
-        "TURN": {"label": "换手率", "direction": "fear", "weight": 0.08, "sigmoid_c": 0.40, "sigmoid_k": 3.0, "source": "tushare"},
-        "POS":  {"label": "基金仓位", "direction": "greed", "weight": 0.08, "sigmoid_c": 0.50, "sigmoid_k": 1.8, "source": "tushare"},
+        "VOL":  {"label": "波动率", "direction": "fear", "weight": 0.11, "sigmoid_c": 0.50, "sigmoid_k": 3.0, "source": "tushare"},
+        "ADR":  {"label": "涨跌比", "direction": "greed", "weight": 0.11, "sigmoid_c": 0.50, "sigmoid_k": 2.5, "source": "tushare"},
+        "ERP":  {"label": "股债性价比", "direction": "fear", "weight": 0.11, "sigmoid_c": 0.50, "sigmoid_k": 4.0, "source": "tushare"},
+        "FLOW": {"label": "资金流", "direction": "greed", "weight": 0.09, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "tushare"},
+        "ETF":  {"label": "ETF份额", "direction": "greed", "weight": 0.07, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "tushare"},
+        "NHNL": {"label": "新高占比", "direction": "greed", "weight": 0.07, "sigmoid_c": 0.60, "sigmoid_k": 2.5, "source": "tushare"},
+        "TURN": {"label": "换手率", "direction": "fear", "weight": 0.07, "sigmoid_c": 0.40, "sigmoid_k": 3.0, "source": "tushare"},
+        "POS":  {"label": "基金仓位", "direction": "greed", "weight": 0.07, "sigmoid_c": 0.50, "sigmoid_k": 1.8, "source": "tushare"},
         "NBF":  {"label": "北向资金", "direction": "greed", "weight": 0.06, "sigmoid_c": 0.50, "sigmoid_k": 2.5, "source": "tushare"},
         "PCR":  {"label": "认沽认购比", "direction": "fear", "weight": 0.04, "sigmoid_c": 0.30, "sigmoid_k": 4.0, "source": "tushare"},
         "NEWF": {"label": "新发基金热度", "direction": "greed", "weight": 0.04, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "tushare"},
+        "MARGIN": {"label": "融资融券", "direction": "greed", "weight": 0.04, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "tushare"},
+        "RSI": {"label": "RSI指标", "direction": "fear", "weight": 0.03, "sigmoid_c": 0.50, "sigmoid_k": 2.5, "source": "tushare"},
+        "INDUSTRY_DIVERGENCE": {"label": "行业分歧度", "direction": "fear", "weight": 0.03, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "sector"},
     })
 
     # --- V5.0 分位数标准化窗口 ---

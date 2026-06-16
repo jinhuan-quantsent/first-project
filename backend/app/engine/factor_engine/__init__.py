@@ -1,6 +1,6 @@
 """
 因子引擎包 — V5.0
-注册 11 个因子，提供统一入口
+注册 14 个因子，提供统一入口
 """
 from app.engine.factor_engine.base import (
     BaseFactor,
@@ -21,11 +21,15 @@ from app.engine.factor_engine.pos import PosFactor
 from app.engine.factor_engine.nbf import NbfFactor
 from app.engine.factor_engine.pcr import PcrFactor
 from app.engine.factor_engine.newf import NewfFactor
+from app.engine.factor_engine.margin import MarginFactor
+from app.engine.factor_engine.rsi import RsiFactor
+from app.engine.factor_engine.industry_divergence import IndustryDivergenceFactor
 
-# 11 因子名称列表（按架构附录顺序）
+# 14 因子名称列表（按架构附录顺序）
 FACTOR_NAMES: list[str] = [
     "VOL", "ADR", "ERP", "FLOW", "ETF",
     "NHNL", "TURN", "POS", "NBF", "PCR", "NEWF",
+    "MARGIN", "RSI", "INDUSTRY_DIVERGENCE",
 ]
 
 # 因子类映射
@@ -41,6 +45,9 @@ FACTOR_CLASSES: dict[str, type[BaseFactor]] = {
     "NBF": NbfFactor,
     "PCR": PcrFactor,
     "NEWF": NewfFactor,
+    "MARGIN": MarginFactor,
+    "RSI": RsiFactor,
+    "INDUSTRY_DIVERGENCE": IndustryDivergenceFactor,
 }
 
 
@@ -79,4 +86,7 @@ __all__ = [
     "NbfFactor",
     "PcrFactor",
     "NewfFactor",
+    "MarginFactor",
+    "RsiFactor",
+    "IndustryDivergenceFactor",
 ]
