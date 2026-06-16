@@ -35,7 +35,7 @@ export default function AppLayout() {
     <div className="h-full flex flex-col">
       <MarketSnapshotBar />
 
-      <div className="flex flex-1 overflow-hidden" style={{ paddingTop: 'var(--snapshot-bar-height)' }}>
+      <div className="flex flex-1 overflow-hidden">
         <Sidebar />
 
         <main className="flex-1 overflow-y-auto bg-gray-50 p-4 md:p-6">
