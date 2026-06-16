@@ -342,7 +342,7 @@ async def get_advice_history(
 
     # 计算胜率
     verified = [r for r in rows if r.is_verified]
-    correct = [r for r in verified if r.accuracy_score > 0.5]
+    correct = [r for r in verified if r.accuracy_score is not None and r.accuracy_score > 0.5]
     win_rate = round(len(correct) / len(verified) * 100, 1) if verified else 0
 
     return {
