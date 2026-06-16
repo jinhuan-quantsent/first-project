@@ -10,7 +10,7 @@ const NAV_ITEMS = [
   { to: '/', icon: Search, label: '基金查询' },
   { to: '/watchlist', icon: Star, label: '自选' },
   { to: '/portfolio', icon: Briefcase, label: '持仓' },
-  { to: '/review', icon: BarChart3, label: '历史回溯' },
+  { to: '/backtest', icon: BarChart3, label: '策略回测' },
 ];
 
 export default function Sidebar() {

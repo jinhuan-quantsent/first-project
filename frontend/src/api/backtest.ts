@@ -168,3 +168,30 @@ export async function deleteBacktestStrategyV5(id: number): Promise<void> {
 export async function activateBacktestStrategyV5(id: number): Promise<void> {
   await client.put(`/api/v5/backtest/strategy/${id}/activate`);
 }
+
+/** 信号绩效统计 */
+export interface SignalPerformanceData {
+  index_code: string;
+  total_signals: number;
+  signal_distribution: Record<string, number>;
+  buy_signals: number;
+  sell_signals: number;
+  hold_signals: number;
+  signals: {
+    date: string;
+    signal_level: string;
+    composite_score: number;
+    confidence?: number;
+  }[];
+  _data_source?: string;
+}
+
+export async function fetchSignalPerformance(
+  indexCode = 'SH000300',
+  days = 30,
+): Promise<SignalPerformanceData> {
+  const res = await client.get<ApiResponse<SignalPerformanceData>>('/api/v5/backtest/signal-performance', {
+    params: { index_code: indexCode, days },
+  });
+  return res.data.data;
+}

@@ -5,7 +5,7 @@ import Dashboard from './pages/DashboardV5';
 import FundSearch from './pages/FundSearchV5';
 import Watchlist from './pages/WatchlistV5';
 import Portfolio from './pages/PortfolioV5';
-import Review from './pages/Backtest';
+import Backtest from './pages/Backtest';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import { useAppStore } from './store';
@@ -27,7 +27,9 @@ function App() {
           <Route path="/" element={<FundSearch />} />
           <Route path="/watchlist" element={<Watchlist />} />
           <Route path="/portfolio" element={<Portfolio />} />
-          <Route path="/review" element={<Review />} />
+          <Route path="/backtest" element={<Backtest />} />
+          {/* 兼容旧路径 /review → /backtest */}
+          <Route path="/review" element={<Navigate to="/backtest" replace />} />
           {/* 兼容旧路径 */}
           <Route path="/search" element={<Navigate to="/" replace />} />
         </Route>
