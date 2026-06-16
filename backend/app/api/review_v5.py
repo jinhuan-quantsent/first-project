@@ -1262,21 +1262,28 @@ async def get_signal_performance(
     close_map: dict[date, float] = {}
     if forward_days > 0:
         from app.models.factor_history import FactorHistory
+        # trade_date 在 DB 中是 "YYYYMMDD" 字符串格式
+        cutoff_str = start_date.strftime("%Y%m%d")
+        end_str = (end_date + timedelta(days=forward_days + 10)).strftime("%Y%m%d")
         price_stmt = (
-            select(FactorHistory.trade_date, FactorHistory.value)
+            select(FactorHistory.raw_value, FactorHistory.trade_date)
             .where(
                 and_(
                     FactorHistory.index_code == ts_index_code,
                     FactorHistory.factor_name == "CLOSE",
-                    FactorHistory.trade_date >= start_date,
-                    FactorHistory.trade_date <= end_date + timedelta(days=forward_days + 10),
+                    FactorHistory.trade_date >= cutoff_str,
+                    FactorHistory.trade_date <= end_str,
                 )
             )
             .order_by(FactorHistory.trade_date.asc())
         )
         price_result = await session.execute(price_stmt)
         for row in price_result:
-            close_map[row[0]] = row[1]
+            try:
+                dt = datetime.strptime(row[1], "%Y%m%d").date()
+                close_map[dt] = row[0]
+            except (ValueError, IndexError):
+                pass
 
     for r in records:
         sl = r.signal_level or "B"
