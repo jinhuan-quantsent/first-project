@@ -5,6 +5,8 @@
 数据源：
 - 指数日线：Tushare index_daily
 - 信号等级：factor_history + V5引擎实时计算
+
+方案持久化：数据库（backtest_strategy 表），V5.0 Phase1 迁移自 JSON 文件
 """
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
@@ -29,30 +31,10 @@ from app.engine.backtest import (
 )
 from app.models.factor_history import FactorHistory
 from app.models.market_sentiment import MarketSentiment
+from app.models.backtest_strategy import BacktestStrategy
 from app.utils.data_source import data_source
+from app.utils.code_format import to_tushare, to_display, INDEX_REGISTRY
 import json
-from pathlib import Path
-
-# 方案持久化：JSON 文件存储
-_STRATEGY_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "backtest_strategies.json"
-
-
-def _load_strategies() -> dict:
-    """加载方案列表（线程安全：每次重新读取）"""
-    if not _STRATEGY_FILE.exists():
-        return {"strategies": [], "next_id": 1}
-    try:
-        with open(_STRATEGY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {"strategies": [], "next_id": 1}
-
-
-def _save_strategies(data: dict):
-    """保存方案列表"""
-    _STRATEGY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(_STRATEGY_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 router = APIRouter(prefix="/api/v5/backtest")
@@ -115,13 +97,9 @@ class BacktestRequest(BaseModel):
 # 数据获取：真实数据优先，Mock降级
 # ============================================================
 
-# 指数代码映射
-_INDEX_CODE_MAP = {
-    "SH000300": "000300.SH",
-    "SH000001": "000001.SH",
-    "SZ399006": "399006.SZ",
-    "SH000016": "000016.SH",
-}
+# 指数代码映射 — 已迁移至 app.utils.code_format
+# _INDEX_CODE_MAP 保留为兼容变量，数据来源统一从 INDEX_REGISTRY 生成
+_INDEX_CODE_MAP = {to_display(k): k for k in INDEX_REGISTRY}
 
 
 async def _get_real_price_data(
@@ -130,7 +108,7 @@ async def _get_real_price_data(
     end_date: str,
 ) -> list[dict]:
     """从Tushare获取真实指数日线数据"""
-    ts_code = _INDEX_CODE_MAP.get(index_code, index_code.replace("SH", "").replace("SZ", "") + ".SH")
+    ts_code = to_tushare(index_code)
 
     try:
         if not data_source._tushare_pro:
@@ -174,15 +152,31 @@ async def _get_real_signal_data(
     session: AsyncSession,
 ) -> dict[str, str]:
     """从factor_history获取V5信号等级"""
+    # 统一转换为 Tushare 格式（数据库存储格式）
+    ts_index_code = to_tushare(index_code)
+    # 转换日期格式：MarketSentiment.trade_date 是 DATE 类型，需传 date 对象
+    # FactorHistory.trade_date 是 VARCHAR 类型，需传字符串
+    try:
+        from datetime import date as date_type
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        start_str = start_date.replace("-", "")
+        end_str = end_date.replace("-", "")
+    except Exception:
+        start_dt = start_date
+        end_dt = end_date
+        start_str = start_date.replace("-", "") if "-" in start_date else start_date
+        end_str = end_date.replace("-", "") if "-" in end_date else end_date
+
     try:
         stmt = select(
             MarketSentiment.trade_date,
             MarketSentiment.signal_level,
         ).where(
             and_(
-                MarketSentiment.index_code == index_code,
-                MarketSentiment.trade_date >= start_date.replace("-", ""),
-                MarketSentiment.trade_date <= end_date.replace("-", ""),
+                MarketSentiment.index_code == ts_index_code,
+                MarketSentiment.trade_date >= start_dt,
+                MarketSentiment.trade_date <= end_dt,
             )
         ).order_by(MarketSentiment.trade_date)
 
@@ -198,10 +192,10 @@ async def _get_real_signal_data(
             FactorHistory.raw_value,
         ).where(
             and_(
-                FactorHistory.index_code == index_code,
+                FactorHistory.index_code == ts_index_code,
                 FactorHistory.factor_name == "COMPOSITE",
-                FactorHistory.trade_date >= start_date.replace("-", ""),
-                FactorHistory.trade_date <= end_date.replace("-", ""),
+                FactorHistory.trade_date >= start_str,
+                FactorHistory.trade_date <= end_str,
             )
         ).order_by(FactorHistory.trade_date)
 
@@ -315,15 +309,8 @@ async def _get_fund_price_data(
 
 
 def _convert_fund_code(code: str) -> str:
-    """6位基金代码 → Tushare格式（与eastmoney.code_to_tushare相同逻辑）"""
-    code = code.strip()
-    if "." in code:
-        return code
-    if code.startswith(("51", "52", "56", "58", "50")):
-        return f"{code}.SH"
-    if code.startswith(("15", "16", "18")):
-        return f"{code}.SZ"
-    return f"{code}.OF"
+    """6位基金代码 → Tushare格式（委托给 code_format.to_tushare）"""
+    return to_tushare(code)
 
 
 def _generate_mock_price_data(
@@ -412,7 +399,7 @@ async def _compute_signals_from_index(
             return tuple(x / total for x in raw)
         return 0.20, 0.20, 0.10, 0.15, 0.25, 0.10
 
-    ts_code = _INDEX_CODE_MAP.get(index_code, index_code.replace("SH", "").replace("SZ", "") + ".SH")
+    ts_code = to_tushare(index_code)
 
     try:
         if not data_source._tushare_pro:
@@ -530,18 +517,24 @@ async def _compute_signals_from_index(
                 dev_pct = (current_close / ma20 - 1) * 100
                 trend_bonus = max(-20, min(20, -dev_pct * 3))
 
-            # 加权聚合: RSI(0.20) + ret20(0.20) + vol(0.10) + mom(0.15) + drawdown(0.25) + trend(0.10)
-            raw_composite = rsi_score * 0.20 + ret_score * 0.20 + vol_score * 0.10 + mom_score * 0.15 + dd_score * 0.25 + trend_bonus * 0.10
+            # 加权聚合: 使用自定义因子权重（如提供）
+            w_rsi, w_ret, w_vol, w_mom, w_dd, w_trend = _map_weights(factor_weights, factor_enabled)
+            raw_composite = rsi_score * w_rsi + ret_score * w_ret + vol_score * w_vol + mom_score * w_mom + dd_score * w_dd + trend_bonus * w_trend
             composite = raw_composite
 
-            # 分数→信号等级（放宽阈值，更容易产生极端信号）
+            # 分数→信号等级（支持自定义边界）
             def _score_to_signal(s: float) -> str:
-                if s >= 82: return "S+"
-                elif s >= 72: return "S"
-                elif s >= 60: return "A"
-                elif s >= 38: return "B"
-                elif s >= 22: return "C"
-                elif s >= 12: return "D"
+                # signal_boundaries: [B_upper, A_upper, S_upper, S+_upper, C_upper, D_upper]
+                # 实际含义: E≤D_upper<D_upper<C_upper≤B_upper≤A_upper≤S_upper≤S+_upper
+                # 简化: boundaries = [E_max, D_max, C_max, B_max, A_max, S_max]
+                # 分数 >= threshold 时返回对应信号
+                b = signal_boundaries if signal_boundaries and len(signal_boundaries) >= 6 else [12.0, 25.0, 38.0, 52.0, 65.0, 82.0]
+                if s >= b[5]: return "S+"
+                elif s >= b[4]: return "S"
+                elif s >= b[3]: return "A"
+                elif s >= b[2]: return "B"
+                elif s >= b[1]: return "C"
+                elif s >= b[0]: return "D"
                 else: return "E"
 
             signal_level = _score_to_signal(composite)
@@ -577,26 +570,54 @@ def _generate_daily_action(
     - C级映射sell而非hold（与backtest.py DEFAULT_ACTION_MAPPING对齐）
     - E级 = 清仓，策略结束
     - 亏完或清仓 → 策略结束，不重建仓位
+
+    支持自定义 action_mapping（来自前端因子方案）。
     """
     # 信号→操作映射: (action, pct_ratio, is_clear)
     # buy: ratio相对于current_cash（根据手上现金决定加仓多少）
     # sell: ratio相对于current_position（按剩余仓位比例减仓）
     # E: 清仓
-    action_map: dict[str, tuple[str, float, bool]] = {
-        "S+": ("buy",  0.30, False),   # 极度恐惧 → 加仓30% of cash
-        "S":  ("buy",  0.20, False),   # 恐惧 → 加仓20% of cash
-        "A":  ("buy",  0.10, False),   # 偏恐惧 → 加仓10% of cash
-        "B":  ("hold", 0,    False),   # 中性 → 持有
-        "C":  ("sell", 0.10, False),   # 偏贪婪 → 减仓10% of position
-        "D":  ("sell", 0.20, False),   # 贪婪 → 减仓20% of position
-        "E":  ("sell", 1.00, True),    # 极度贪婪 → 清仓（策略结束）
+    default_map: dict[str, tuple[str, float, bool]] = {
+        "S+": ("buy",  0.30, False),
+        "S":  ("buy",  0.20, False),
+        "A":  ("buy",  0.10, False),
+        "B":  ("hold", 0,    False),
+        "C":  ("sell", 0.10, False),
+        "D":  ("sell", 0.20, False),
+        "E":  ("sell", 1.00, True),
     }
 
-    default_action = ("hold", 0, False)
-    action, ratio, is_clear = action_map.get(signal_level or "", default_action)
+    # 使用自定义映射（如提供）
+    if custom_action_map:
+        # 前端格式: {level: ActionMappingItem} → 后端格式: {level: (action, ratio, is_clear)}
+        # ActionMappingItem 是 Pydantic 模型，用 .type/.mult 属性访问，不是 dict.get()
+        action_map: dict[str, tuple[str, float, bool]] = {}
+        for level, item in custom_action_map.items():
+            # 兼容 dict 和 Pydantic 模型两种格式
+            if hasattr(item, 'type'):
+                action_type = item.type
+                mult = item.mult
+            elif isinstance(item, dict):
+                action_type = item.get("type", "hold")
+                mult = item.get("mult", 0)
+            else:
+                action_type = "hold"
+                mult = 0
+            is_clear = (action_type == "sell_all" or mult >= 1.0)
+            ratio = mult if action_type == "buy" else (mult if 0 < mult < 1 else (1.0 if is_clear else 0.1))
+            action_map[level] = (action_type if action_type != "sell_all" else "sell", ratio, is_clear)
+        # 确保所有7级都有映射
+        for level in ["S+", "S", "A", "B", "C", "D", "E"]:
+            if level not in action_map:
+                action_map[level] = default_map[level]
+    else:
+        action_map = default_map
 
+    default_action = ("hold", 0, False)
+    result = action_map.get(signal_level or "", default_action)
     if signal_level and signal_level not in action_map:
-        action, ratio, is_clear = default_action
+        result = default_action
+    action, ratio, is_clear = result
 
     safe_score = score if score is not None else 50.0
 
@@ -670,6 +691,15 @@ async def _get_signal_for_date(
     import logging
     _logger = logging.getLogger(__name__)
 
+    # 统一转换为 Tushare 格式（数据库存储格式）
+    ts_index_code = to_tushare(index_code)
+    # 转换日期：MarketSentiment.trade_date 是 DATE，FactorHistory.trade_date 是 VARCHAR
+    date_str_clean = date_str.replace("-", "")
+    try:
+        query_date = datetime.strptime(date_str, "%Y-%m-%d").date() if "-" in date_str else datetime.strptime(date_str, "%Y%m%d").date()
+    except Exception:
+        query_date = date_str
+
     # 1. 尝试从 market_sentiment 表精确查询
     try:
         stmt = select(
@@ -677,8 +707,8 @@ async def _get_signal_for_date(
             MarketSentiment.composite_score,
         ).where(
             and_(
-                MarketSentiment.index_code == index_code,
-                MarketSentiment.trade_date == date_str.replace("-", ""),
+                MarketSentiment.index_code == ts_index_code,
+                MarketSentiment.trade_date == query_date,
             )
         )
         result = await session.execute(stmt)
@@ -694,9 +724,9 @@ async def _get_signal_for_date(
             FactorHistory.raw_value,
         ).where(
             and_(
-                FactorHistory.index_code == index_code,
+                FactorHistory.index_code == ts_index_code,
                 FactorHistory.factor_name == "COMPOSITE",
-                FactorHistory.trade_date == date_str.replace("-", ""),
+                FactorHistory.trade_date == date_str_clean,
             )
         )
         result2 = await session.execute(stmt2)
@@ -723,8 +753,8 @@ async def _get_signal_for_date(
             MarketSentiment.composite_score,
         ).where(
             and_(
-                MarketSentiment.index_code == index_code,
-                MarketSentiment.trade_date < date_str.replace("-", ""),
+                MarketSentiment.index_code == ts_index_code,
+                MarketSentiment.trade_date < query_date,
             )
         ).order_by(MarketSentiment.trade_date.desc()).limit(1)
         result3 = await session.execute(stmt3)
@@ -859,6 +889,7 @@ async def _run_daily_tracking_backtest(
             # 根据因子信号生成操作建议
             action, action_amount, reason = _generate_daily_action(
                 signal_level, signal_score, cash, position_value, req.initial_capital,
+                req.action_mapping or None,
             )
 
             # 执行操作，更新cash和position
@@ -1185,17 +1216,20 @@ async def get_signal_performance(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """信号绩效统计"""
-    cache_k = f"signal_perf:{index_code}:{days}"
+    # 统一转换为 Tushare 格式（数据库存储格式）
+    ts_index_code = to_tushare(index_code)
+
+    cache_k = f"signal_perf:{ts_index_code}:{days}"
     cached = await cache_get(cache_k)
     if cached is not None:
         return cached
 
-    end_date = datetime.now().strftime("%Y%m%d")
-    start_date = (datetime.now() - timedelta(days=days + 10)).strftime("%Y%m%d")
+    end_date = datetime.now().date()
+    start_date = (datetime.now() - timedelta(days=days + 10)).date()
 
     stmt = select(MarketSentiment).where(
         and_(
-            MarketSentiment.index_code == index_code,
+            MarketSentiment.index_code == ts_index_code,
             MarketSentiment.trade_date >= start_date,
             MarketSentiment.trade_date <= end_date,
         )
@@ -1225,7 +1259,7 @@ async def get_signal_performance(
             "date": r.trade_date,
             "signal_level": sl,
             "composite_score": r.composite_score,
-            "confidence": r.confidence,
+            "confidence": r.confidence_stars,
         })
 
     buy_count = sum(signal_counts.get(s, 0) for s in ["S+", "S", "A"])
@@ -1334,48 +1368,91 @@ class SaveStrategyRequest(BaseModel):
 async def save_backtest_strategy(
     req: SaveStrategyRequest,
     user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """保存回测方案（真实实现）"""
-    data = _load_strategies()
-    existing = next((s for s in data["strategies"] if s["name"] == req.name), None)
-    params = req.params_json if isinstance(req.params_json, str) else json.dumps(req.params_json, ensure_ascii=False)
+    """保存回测方案（数据库持久化，按用户隔离）"""
+    params_str = req.params_json if isinstance(req.params_json, str) else json.dumps(req.params_json, ensure_ascii=False)
+
+    # 查找同名方案
+    stmt = select(BacktestStrategy).where(
+        and_(
+            BacktestStrategy.user_id == user_id,
+            BacktestStrategy.name == req.name,
+        )
+    )
+    result = await session.execute(stmt)
+    existing = result.scalar_one_or_none()
+
     if existing:
-        existing["params_json"] = params
-        existing["updated_at"] = datetime.now().isoformat()
-        strategy_id = existing["id"]
+        existing.params_json = params_str
+        existing.updated_at = datetime.now()
+        await session.flush()
+        strategy_id = existing.id
     else:
-        strategy_id = data["next_id"]
-        data["strategies"].append({
-            "id": strategy_id,
-            "name": req.name,
-            "params_json": params,
-            "is_active": False,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-        })
-        data["next_id"] = strategy_id + 1
-    _save_strategies(data)
+        new_strategy = BacktestStrategy(
+            user_id=user_id,
+            name=req.name,
+            params_json=params_str,
+            is_active=False,
+        )
+        session.add(new_strategy)
+        await session.flush()
+        strategy_id = new_strategy.id
+
     return {"code": 0, "data": {"id": strategy_id, "name": req.name}, "message": "保存成功"}
 
 
 @router.get("/strategy")
 async def get_backtest_strategies(
     user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """获取方案列表"""
-    data = _load_strategies()
-    return {"code": 0, "data": {"strategies": data["strategies"]}, "message": "ok"}
+    """获取方案列表（按用户隔离）"""
+    stmt = select(BacktestStrategy).where(
+        BacktestStrategy.user_id == user_id
+    ).order_by(BacktestStrategy.created_at.desc())
+    result = await session.execute(stmt)
+    strategies = result.scalars().all()
+
+    return {
+        "code": 0,
+        "data": {
+            "strategies": [
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "params_json": s.params_json,
+                    "is_active": s.is_active,
+                    "created_at": s.created_at.isoformat() if s.created_at else None,
+                    "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+                }
+                for s in strategies
+            ]
+        },
+        "message": "ok",
+    }
 
 
 @router.delete("/strategy/{strategy_id}")
 async def delete_backtest_strategy(
     strategy_id: int,
     user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """删除回测方案"""
-    data = _load_strategies()
-    data["strategies"] = [s for s in data["strategies"] if s["id"] != strategy_id]
-    _save_strategies(data)
+    """删除回测方案（仅删除自己的）"""
+    stmt = select(BacktestStrategy).where(
+        and_(
+            BacktestStrategy.id == strategy_id,
+            BacktestStrategy.user_id == user_id,
+        )
+    )
+    result = await session.execute(stmt)
+    strategy = result.scalar_one_or_none()
+
+    if not strategy:
+        return {"code": 404, "data": None, "message": "方案不存在或无权删除"}
+
+    await session.delete(strategy)
     return {"code": 0, "data": None, "message": "删除成功"}
 
 
@@ -1383,10 +1460,31 @@ async def delete_backtest_strategy(
 async def activate_backtest_strategy(
     strategy_id: int,
     user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """激活回测方案"""
-    data = _load_strategies()
-    for s in data["strategies"]:
-        s["is_active"] = (s["id"] == strategy_id)
-    _save_strategies(data)
+    """激活回测方案（同一用户仅一个活跃方案）"""
+    # 先将该用户所有方案设为不活跃
+    stmt_deactivate = (
+        update(BacktestStrategy)
+        .where(BacktestStrategy.user_id == user_id)
+        .values(is_active=False)
+    )
+    await session.execute(stmt_deactivate)
+
+    # 再激活目标方案
+    stmt = select(BacktestStrategy).where(
+        and_(
+            BacktestStrategy.id == strategy_id,
+            BacktestStrategy.user_id == user_id,
+        )
+    )
+    result = await session.execute(stmt)
+    strategy = result.scalar_one_or_none()
+
+    if not strategy:
+        return {"code": 404, "data": None, "message": "方案不存在或无权操作"}
+
+    strategy.is_active = True
+    await session.flush()
+
     return {"code": 0, "data": None, "message": "激活成功"}

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_session
 from app.models.factor_history import FactorHistory
+from app.utils.code_format import to_tushare
 
 # 反向因子：值越高越恐慌 → 得分 = 100 - percentile
 REVERSE_FACTORS = {"波动率", "RSI"}
@@ -55,12 +56,12 @@ def get_all_factor_names() -> list[str]:
 
 
 def _normalize_code(code: str) -> str:
-    """Convert between API format (SH000001) and tushare format (000001.SH)"""
-    if code.startswith("SH") and "." not in code:
-        return code[2:] + ".SH"
-    if code.startswith("SZ") and "." not in code:
-        return code[2:] + ".SZ"
-    return code
+    """Convert between API format (SH000001) and tushare format (000001.SH)
+
+    Deprecated: Use app.utils.code_format.to_tushare() instead.
+    This wrapper is kept for backward compatibility with existing call sites.
+    """
+    return to_tushare(code)
 
 
 class FactorHistoryStore:
@@ -217,8 +218,9 @@ class FactorHistoryStore:
         lookback_days: int = DEFAULT_LOOKBACK,
     ) -> int:
         """
-        从 Tushare 回填某指数的历史因子数据（V5.0 升级版）
-        支持11个V5因子 + COMPOSITE + CLOSE
+        从 Tushare 回填某指数的历史因子数据（V5.0）
+        覆盖7个A/B类因子 + COMPOSITE + CLOSE
+        ⚠️ 缺少 ETF/POS/PCR/NEWF 4个因子，需通过 scripts/backfill_factor_history.py 补充
         """
         import pandas as pd
 

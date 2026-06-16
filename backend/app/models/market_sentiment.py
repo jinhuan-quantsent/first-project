@@ -13,7 +13,7 @@ class MarketSentiment(Base, TimestampMixin):
     """市场情绪主表"""
     __tablename__ = "market_sentiment"
 
-    index_code: Mapped[str] = mapped_column(String(20), index=True, comment="指数代码: SH000001/SH000300/SZ399001/SZ399006")
+    index_code: Mapped[str] = mapped_column(String(20), index=True, comment="指数代码(Tushare格式): 000001.SH/000300.SH/399001.SZ/399006.SZ")
     index_name: Mapped[str] = mapped_column(String(50), default="", comment="指数名称")
     trade_date: Mapped[date] = mapped_column(Date, index=True, comment="交易日期")
     record_time: Mapped[datetime] = mapped_column(DateTime, default=None, comment="记录时间")

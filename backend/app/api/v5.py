@@ -1,4 +1,3 @@
-import logging
 """
 V5.0 专属接口
 11因子流水线 + 7级信号 + 4星置信度 + 5×7仓位矩阵
@@ -17,11 +16,10 @@ from app.core.auth import get_current_user
 from app.core.database import get_session
 from app.core.config import settings
 from app.utils.data_source import data_source, DEFAULT_INDEX_CODES
+from app.utils.code_format import to_tushare, to_display
 from app.engine.factor_engine import FACTOR_NAMES, FACTOR_CLASSES
 from app.engine.quantile import QuantileNorm
 from app.utils.eastmoney import get_sector_list, get_sector_detail
-from app.engine.sector_scorer import score_sectors
-from app.engine.recommendations import generate_recommendations, RecommendationResult
 from app.engine.sigmoid import SigmoidMapper
 from app.engine.factor_engine.base import FactorSigmoidResult
 from app.engine.aggregator_v5 import AggregatorV5
@@ -31,8 +29,6 @@ from app.engine.position_v5 import PositionEngineV5
 from app.engine.sentiment_macd import SentimentMACD
 
 router = APIRouter(prefix="/api/v5")
-
-logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -181,8 +177,8 @@ async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_se
             await history_store.insert(
                 db_session, index_code, "CLOSE", trade_date, float(today_close),
             )
-    except Exception as e:
-        logger.warning("CLOSE因子写入失败: %s", e)
+    except Exception:
+        pass  # 非关键路径，失败不影响主流程
 
     # 置信度计算（传入MACD数据+价格/情绪序列）
     confidence_stars, confidence_detail, defenses = confidence_engine.calculate(
@@ -213,8 +209,8 @@ async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_se
     if trade_date == date.today().isoformat():
         try:
             await cache_set(cache_key, result, ttl=300)
-        except Exception as e:
-            logger.warning("缓存写入失败: %s", e)
+        except Exception:
+            pass  # 缓存失败不影响主流程
 
     return result
 
@@ -364,12 +360,6 @@ async def get_v5_signal_lights(
 
     返回最近N天的信号等级，用于 SignalLights 组件
     """
-    from app.core.redis_client import cache_get, cache_set
-    cache_key = "fsa:signal-lights:" + index_code
-    cached = await cache_get(cache_key)
-    if cached:
-        return {"code": 0, "data": cached, "message": "ok"}
-
     today = date.today()
     signals = []
 
@@ -392,13 +382,15 @@ async def get_v5_signal_lights(
                 "confidence_stars": result["confidence_stars"],
             })
 
-    signal_data = {
-        "index_code": index_code,
-        "signals": signals,
-        "updated_at": datetime.now().isoformat(),
+    return {
+        "code": 0,
+        "data": {
+            "index_code": index_code,
+            "signals": signals,
+            "updated_at": datetime.now().isoformat(),
+        },
+        "message": "ok",
     }
-    await cache_set(cache_key, signal_data, ttl=120)
-    return {"code": 0, "data": signal_data, "message": "ok"}
 
 
 @router.post("/portfolio/position-advice")
@@ -472,8 +464,8 @@ async def execute_v5_position(
         if portfolio and portfolio.market_value and portfolio.holding_shares > 0:
             # 简化：用持仓市值占比估算（需要用户总资产，此处暂用持仓比例）
             from_position_pct = round(portfolio.market_value / max(portfolio.holding_shares * portfolio.current_nav, 1.0), 4)
-    except Exception as e:
-        logger.warning("持仓计算异常: %s", e)
+    except Exception:
+        pass
 
     execution = PositionExecution(
         user_id=user_id,
@@ -664,69 +656,6 @@ async def get_v5_sector_detail(
         "message": "ok",
     }
 
-
-
-# ============================================================
-# 板块情绪推荐 & 热力图
-# ============================================================
-@router.get("/market/recommendations")
-async def get_v5_recommendations(
-    sector_type: str = Query("concept", description="板块类型: concept=概念, industry=行业"),
-    top_n: int = Query(5, ge=1, le=20, description="每类推荐数量"),
-) -> dict:
-    """机会雷达推荐 - 基于板块情绪评分，推荐强势板块、超跌反弹机会、稳健配置"""
-    try:
-        raw = await get_sector_list(sector_type=sector_type, page_size=100)
-        items = raw.get("items", []) if isinstance(raw, dict) else []
-        if not items:
-            raw = await get_sector_list(sector_type="industry", page_size=100)
-            items = raw.get("items", []) if isinstance(raw, dict) else []
-    except Exception as e:
-        logger.warning("板块数据获取失败: %s", e)
-        items = []
-
-    if not items:
-        return {"code": 0, "data": {"strong_sectors": [], "rebound_opportunities": [], "steady_choices": [], "top_picks": [], "summary": "当前板块数据暂不可用，请稍后再试"}, "message": "ok"}
-
-    scored = await score_sectors(items)
-    result = generate_recommendations(scored, top_n=top_n)
-
-    def _item_to_dict(item) -> dict:
-        return {"sector_code": item.sector_code, "sector_name": item.sector_name, "sector_group": item.sector_group, "sentiment_score": item.sentiment_score, "sentiment_label": item.sentiment_label, "momentum_5d": item.momentum_5d, "momentum_20d": item.momentum_20d, "strength_index": item.strength_index, "opportunity_type": item.opportunity_type, "opportunity_reason": item.opportunity_reason, "recommended_funds": item.recommended_funds}
-
-    return {"code": 0, "data": {"strong_sectors": [_item_to_dict(i) for i in result.strong_sectors], "rebound_opportunities": [_item_to_dict(i) for i in result.rebound_opportunities], "steady_choices": [_item_to_dict(i) for i in result.steady_choices], "top_picks": [_item_to_dict(i) for i in result.top_picks], "summary": result.summary}, "message": "ok"}
-
-
-@router.get("/market/sector-heatmap")
-async def get_v5_sector_heatmap(
-    sector_type: str = Query("concept", description="板块类型: concept=概念, industry=行业"),
-) -> dict:
-    """板块情绪热力图数据 - 按行业分组聚合的情绪分数"""
-    try:
-        raw = await get_sector_list(sector_type=sector_type, page_size=100)
-        items = raw.get("items", []) if isinstance(raw, dict) else []
-        if not items:
-            raw = await get_sector_list(sector_type="industry", page_size=100)
-            items = raw.get("items", []) if isinstance(raw, dict) else []
-    except Exception as e:
-        logger.warning("热力图板块数据获取失败: %s", e)
-        items = []
-
-    if not items:
-        return {"code": 0, "data": {"groups": [], "items": []}, "message": "ok"}
-
-    scored = await score_sectors(items)
-    groups = {}
-    for s in scored:
-        g = s["sector_group"]
-        if g not in groups:
-            groups[g] = []
-        groups[g].append(s["sentiment_score"])
-
-    group_avg = {g: round(sum(scores) / len(scores), 1) for g, scores in groups.items()}
-    heatmap_items = [{"sector_code": s["sector_code"], "sector_name": s["sector_name"], "sector_group": s["sector_group"], "sentiment_score": s["sentiment_score"], "sentiment_label": s["sentiment_label"], "sector_return": s["sector_return"], "momentum_5d": s["momentum_5d"], "strength_index": s["strength_index"]} for s in scored]
-
-    return {"code": 0, "data": {"groups": [{"name": g, "avg_score": s} for g, s in sorted(group_avg.items(), key=lambda x: x[1], reverse=True)], "items": heatmap_items}, "message": "ok"}
 
 # ============================================================
 # 定投建议接口

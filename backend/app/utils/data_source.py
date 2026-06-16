@@ -18,6 +18,14 @@ from typing import Optional
 
 from app.core.config import settings
 from app.core.redis_client import cache_get, cache_set
+from app.utils.code_format import (
+    to_tushare,
+    to_display,
+    INDEX_REGISTRY,
+    DEFAULT_INDEX_CODES_DISPLAY,
+    DEFAULT_INDEX_CODES_TUSHARE,
+    get_index_name as _get_index_name,
+)
 from app.utils.exceptions import (
     DataSourceError,
     NetworkError,
@@ -31,36 +39,23 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# 指数代码映射
+# 指数代码映射（兼容旧代码，逐步迁移至 code_format）
 # ============================================================
-INDEX_CODE_MAP: dict[str, dict] = {
-    "SH000001": {
-        "name": "上证综指",
-        "tushare_code": "000001.SH",
-        "akshare_symbol": "sh000001",
-        "exchange": "SSE",
-    },
-    "SH000300": {
-        "name": "沪深300",
-        "tushare_code": "000300.SH",
-        "akshare_symbol": "sh000300",
-        "exchange": "SSE",
-    },
-    "SZ399001": {
-        "name": "深证成指",
-        "tushare_code": "399001.SZ",
-        "akshare_symbol": "sz399001",
-        "exchange": "SZSE",
-    },
-    "SZ399006": {
-        "name": "创业板指",
-        "tushare_code": "399006.SZ",
-        "akshare_symbol": "sz399006",
-        "exchange": "SZSE",
-    },
-}
+# 从 INDEX_REGISTRY 自动生成，避免重复维护
+INDEX_CODE_MAP: dict[str, dict] = {}
+for _ts_code, _name in INDEX_REGISTRY.items():
+    _display = to_display(_ts_code)
+    # 从 ts_code 提取代码和交易所
+    _parts = _ts_code.split(".")
+    _base, _suffix = _parts[0], _parts[1]
+    INDEX_CODE_MAP[_display] = {
+        "name": _name,
+        "tushare_code": _ts_code,
+        "akshare_symbol": f"sh{_base}" if _suffix == "SH" else f"sz{_base}",
+        "exchange": "SSE" if _suffix == "SH" else "SZSE",
+    }
 
-DEFAULT_INDEX_CODES = ["SH000001", "SH000300", "SZ399001", "SZ399006"]
+DEFAULT_INDEX_CODES = DEFAULT_INDEX_CODES_DISPLAY
 
 # 缓存 key 前缀
 CACHE_PREFIX = "fsa:"
