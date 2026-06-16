@@ -60,7 +60,7 @@ def get_factor_instance(factor_name: str) -> BaseFactor | None:
 
 
 def get_all_factors() -> list[BaseFactor]:
-    """获取全部 11 个因子实例"""
+    """获取全部 14 个因子实例"""
     return [cls() for cls in FACTOR_CLASSES.values()]
 
 

@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     # --- V5.0 信号边界 (6个边界划分7级: S+/S/A/B/C/D/E) ---
     V5_SIGNAL_BOUNDARIES: List[int] = Field(default_factory=lambda: [12, 25, 38, 52, 65, 80])
 
-    # --- V5.0 11因子配置 (名称/方向/权重/Sigmoid参数) ---
+    # --- V5.0 14因子配置 (名称/方向/权重/Sigmoid参数) ---
     V5_FACTOR_CONFIG: dict = Field(default_factory=lambda: {
         "VOL":  {"label": "波动率", "direction": "fear", "weight": 0.11, "sigmoid_c": 0.50, "sigmoid_k": 3.0, "source": "tushare"},
         "ADR":  {"label": "涨跌比", "direction": "greed", "weight": 0.11, "sigmoid_c": 0.50, "sigmoid_k": 2.5, "source": "tushare"},
