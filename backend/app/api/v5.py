@@ -364,6 +364,12 @@ async def get_v5_signal_lights(
 
     返回最近N天的信号等级，用于 SignalLights 组件
     """
+    from app.core.redis_client import cache_get, cache_set
+    cache_key = "fsa:signal-lights:" + index_code
+    cached = await cache_get(cache_key)
+    if cached:
+        return {"code": 0, "data": cached, "message": "ok"}
+
     today = date.today()
     signals = []
 
@@ -386,15 +392,13 @@ async def get_v5_signal_lights(
                 "confidence_stars": result["confidence_stars"],
             })
 
-    return {
-        "code": 0,
-        "data": {
-            "index_code": index_code,
-            "signals": signals,
-            "updated_at": datetime.now().isoformat(),
-        },
-        "message": "ok",
+    signal_data = {
+        "index_code": index_code,
+        "signals": signals,
+        "updated_at": datetime.now().isoformat(),
     }
+    await cache_set(cache_key, signal_data, ttl=120)
+    return {"code": 0, "data": signal_data, "message": "ok"}
 
 
 @router.post("/portfolio/position-advice")

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.core.database import get_session
 from app.models.user_portfolio import UserPortfolio
+from app.core.redis_client import cache_get, cache_set
 
 router = APIRouter(prefix="/api/v5/portfolio")
 
@@ -53,6 +54,11 @@ async def get_portfolio(
 ) -> dict:
     """获取用户持仓列表"""
     stmt = select(UserPortfolio).where(UserPortfolio.user_id == user_id)
+    cache_key = f"fsa:portfolio:{user_id}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return {"code": 0, "data": cached, "message": "ok"}
+
     result = await session.execute(stmt)
     items = result.scalars().all()
 
@@ -86,23 +92,21 @@ async def get_portfolio(
     core_value = sum(it["market_value"] for it in core_items)
     satellite_value = sum(it["market_value"] for it in satellite_items)
 
-    return {
-        "code": 0,
-        "data": {
-            "items": item_list,
-            "summary": {
-                "total_value": round(total_value, 2),
-                "total_return": round(total_return, 2),
-                "total_return_rate": total_return_rate,
-                "daily_return": round(sum(it["daily_return"] for it in item_list), 2),
-                "fund_count": len(item_list),
-                "core_ratio": round(core_value / total_value * 100, 1) if total_value > 0 else 0,
-                "satellite_ratio": round(satellite_value / total_value * 100, 1) if total_value > 0 else 0,
-            },
-            "updated_at": datetime.now().isoformat(),
+    portfolio_data = {
+        "items": item_list,
+        "summary": {
+            "total_value": round(total_value, 2),
+            "total_return": round(total_return, 2),
+            "total_return_rate": total_return_rate,
+            "daily_return": round(sum(it["daily_return"] for it in item_list), 2),
+            "fund_count": len(item_list),
+            "core_ratio": round(core_value / total_value * 100, 1) if total_value > 0 else 0,
+            "satellite_ratio": round(satellite_value / total_value * 100, 1) if total_value > 0 else 0,
         },
-        "message": "ok",
+        "updated_at": datetime.now().isoformat(),
     }
+    await cache_set(cache_key, portfolio_data, ttl=60)
+    return {"code": 0, "data": portfolio_data, "message": "ok"}
 
 
 @router.post("", status_code=201)
