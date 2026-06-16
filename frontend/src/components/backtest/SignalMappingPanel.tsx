@@ -1,4 +1,4 @@
-import type { ModelParams } from '../../../api/backtest';
+import type { ModelParams } from '../../api/backtest';
 import { SIGNAL_LEVELS, SIGNAL_BG, SIGNAL_LABELS } from './constants';
 import { RangeSlider } from './RangeSlider';
 

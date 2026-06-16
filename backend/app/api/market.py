@@ -25,7 +25,7 @@ from app.engine.compatibility import (
     calculate_composite_sentiment,
     CompositeResult,
 )
-from app.engine.recommendations import generate_recommendations, RecommendationResult
+from app.engine.recommendations import generate_recommendations, generate_warnings, RecommendationResult
 from app.engine.position import calculate_position
 from app.engine.sector_scorer import score_sectors
 from app.utils.data_source import data_source, DEFAULT_INDEX_CODES
@@ -271,49 +271,6 @@ async def get_index_detail(code: str) -> dict:
     }
 
 
-@router.get("/market/snapshot")
-async def get_market_snapshot() -> dict:
-    """
-    市场快照（顶部状态条数据）
-
-    返回关键指数摘要 + 全局情绪标签
-    """
-    index_data = await data_source.get_all_index_data()
-
-    items = []
-    index_results: dict[str, CompositeResult] = {}
-
-    for code in DEFAULT_INDEX_CODES:
-        if code not in index_data:
-            continue
-        data = index_data[code]
-        result = _compute_index_result(code, data)
-        index_results[code] = result
-        items.append({
-            "index_code": code,
-            "index_name": data["index_name"],
-            "close": data["close"],
-            "change_pct": data["change_pct"],
-            "composite_score": result.composite_score,
-            "sentiment_label": result.sentiment_label,
-        })
-
-    composite = calculate_composite_sentiment(index_results)
-
-    return {
-        "code": 0,
-        "data": {
-            "indexes": items,
-            "global_sentiment": composite.sentiment_label,
-            "global_score": composite.composite_score,
-            "divergence_index": composite.divergence_index,
-            "conclusion": composite.conclusion,
-            "updated_at": datetime.now().isoformat(),
-        },
-        "message": "ok",
-    }
-
-
 @router.get("/market/sector/{name}")
 async def get_sector_detail(name: str) -> dict:
     """
@@ -348,6 +305,7 @@ async def get_recommendations() -> dict:
     """
     sectors = await _get_real_sectors()
     result: RecommendationResult = generate_recommendations(sectors, top_n=5)
+    warnings = generate_warnings(sectors, max_warnings=5)
 
     def _item_to_dict(item) -> dict:
         return {
@@ -375,6 +333,18 @@ async def get_recommendations() -> dict:
             "steady_choices": [_item_to_dict(i) for i in result.steady_choices],
             "top_picks": [_item_to_dict(i) for i in result.top_picks],
             "summary": result.summary,
+            "warnings": [
+                {
+                    "sector_name": w.sector_name,
+                    "sector_code": w.sector_code,
+                    "sentiment_score": w.sentiment_score,
+                    "momentum_5d": w.momentum_5d,
+                    "warning_type": w.warning_type,
+                    "signal_level": w.signal_level,
+                    "reason": w.reason,
+                }
+                for w in warnings
+            ],
         },
         "message": "ok",
     }

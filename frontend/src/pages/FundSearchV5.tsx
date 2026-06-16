@@ -111,6 +111,9 @@ export default function FundSearchV5() {
   const [radarItems, setRadarItems] = useState<any[]>([]);
   const [radarLoading, setRadarLoading] = useState(false);
 
+  // —— 风险警示数据 ——
+  const [warningItems, setWarningItems] = useState<any[]>([]);
+
   /** 加载大盘数据 */
   useEffect(() => {
     let cancelled = false;
@@ -155,8 +158,14 @@ export default function FundSearchV5() {
           ...(data.steady_choices || []).map((s: any) => ({ ...s, opportunity_type: 'steady' })),
         ];
         if (!cancelled) setRadarItems(all);
-      } catch {
-        // 静默降级，组件会用DUMMY_ITEMS
+        // 同时提取风险警示数据
+        if (!cancelled && data.warnings) {
+          setWarningItems(data.warnings);
+        }
+      } catch (err) {
+        console.error('[FundSearch] 加载推荐数据失败:', err);
+        // 降级为空数组，不再用假数据
+        if (!cancelled) setRadarItems([]);
       } finally {
         if (!cancelled) setRadarLoading(false);
       }
@@ -350,9 +359,9 @@ export default function FundSearchV5() {
       {!keyword && (
         <div className="space-y-4">
           <SectorCards />
-          <SectorWarnings />
+          <SectorWarnings items={warningItems} loading={radarLoading} />
           <OpportunityRadarPanel
-            items={radarItems.length > 0 ? radarItems : undefined}
+            items={radarItems}
             loading={radarLoading}
           />
         </div>

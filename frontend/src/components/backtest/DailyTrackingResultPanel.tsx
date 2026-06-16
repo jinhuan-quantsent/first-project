@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { TrendingUp } from 'lucide-react';
-import type { BacktestResultV5 } from '../../../api/backtest';
+import type { BacktestResultV5 } from '../../api/backtest';
 import { SIGNAL_BG, SIGNAL_LABELS } from './constants';
 import { EquityChart } from './EquityChart';
 

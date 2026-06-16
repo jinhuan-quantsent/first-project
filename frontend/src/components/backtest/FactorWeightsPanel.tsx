@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import type { ModelParams } from '../../../api/backtest';
+import type { ModelParams } from '../../api/backtest';
 import { FACTOR_NAMES, FACTOR_LABELS } from './constants';
 
 /** Category 2: 因子权重 */

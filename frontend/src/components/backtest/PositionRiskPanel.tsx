@@ -1,4 +1,4 @@
-import type { ModelParams } from '../../../api/backtest';
+import type { ModelParams } from '../../api/backtest';
 import { RangeSlider } from './RangeSlider';
 
 /** Category 5: 仓位风控 */
@@ -17,15 +17,13 @@ export function PositionRiskPanel({ params, onChange }: { params: ModelParams; o
         </div>
       </div>
 
-      {/* 止损 */}
+      {/* 回撤加仓（替代原止损——基金回撤时应加仓而非清仓） */}
       <div>
-        <p className="text-xs text-gray-500 font-medium mb-1">🛡️ 止损</p>
-        <RangeSlider label="止损线" value={params.stop_loss} min={-0.30} max={-0.05} step={0.01} unit=""
-          onChange={v => u('stop_loss', v)} />
-        <div className="mt-1"><RangeSlider label="触发阈值倍数" value={params.stop_loss_threshold} min={0.5} max={2.0} step={0.1}
-          onChange={v => u('stop_loss_threshold', v)} /></div>
-        <div className="mt-1"><RangeSlider label="止损减仓比例" value={params.stop_loss_reduce_pct} min={10} max={100} step={5} unit="%"
-          onChange={v => u('stop_loss_reduce_pct', v)} /></div>
+        <p className="text-xs text-gray-500 font-medium mb-1">🛡️ 回撤加仓</p>
+        <RangeSlider label="加仓触发线" value={params.pullback_add} min={-0.30} max={-0.05} step={0.01} unit=""
+          onChange={v => u('pullback_add', v)} />
+        <div className="mt-1"><RangeSlider label="加仓比例" value={params.pullback_add_pct} min={0.05} max={0.50} step={0.05} unit=""
+          onChange={v => u('pullback_add_pct', v)} /></div>
       </div>
 
       {/* 止盈 */}

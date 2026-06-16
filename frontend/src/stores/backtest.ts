@@ -50,6 +50,8 @@ interface BacktestState {
   selectedFund: FundSuggestion | null;
   backtestParams: BacktestParams;
 
+  loadError: string | null;
+
   // Actions — 策略管理
   setActiveId: (id: number | null) => void;
   updateParams: (newParams: ModelParams) => void;
@@ -88,7 +90,7 @@ const INITIAL_STRATEGIES: BacktestStrategy[] = [
     params: {
       ...DEFAULT_MODEL_PARAMS,
       action_mapping: { ...DEFAULT_MODEL_PARAMS.action_mapping, 'B': { type: 'buy', mult: 0.5, label: '小幅加仓' } },
-      overheat_days: 15, stop_loss: -0.20,
+      overheat_days: 15, pullback_add: -0.20,
     },
   },
 ];
@@ -104,6 +106,7 @@ export const useBacktestStore = create<BacktestState>((set, get) => ({
   running: false,
   result: null,
   error: null,
+  loadError: null,
   selectedFund: null,
   backtestParams: {
     startDate: defaultDateRange(),
@@ -169,8 +172,9 @@ export const useBacktestStore = create<BacktestState>((set, get) => ({
           set({ activeId: active.id, systemActiveSchemeName: active.name });
         }
       }
-    } catch {
-      // 加载失败就用默认方案
+    } catch (err) {
+      console.error('[Backtest] 加载方案失败:', err);
+      set({ loadError: String(err) } as any);
     }
   },
 
@@ -186,7 +190,16 @@ export const useBacktestStore = create<BacktestState>((set, get) => ({
     }
 
     try {
-      await saveBacktestStrategyV5({ name: activeStrategy.name, params_json: activeStrategy.params as any });
+      const saved = await saveBacktestStrategyV5({ name: activeStrategy.name, params_json: activeStrategy.params as any });
+      // 用后端返回的真实 id 替换本地假 id
+      if (saved?.id) {
+        set(state => ({
+          strategies: state.strategies.map(s =>
+            s.id === activeStrategy.id ? { ...s, id: saved.id } : s
+          ),
+        }));
+      }
+      await get().loadSavedStrategies();  // 重新从后端拉取确保一致
       alert(`方案「${activeStrategy.name}」保存成功！`);
     } catch (err: any) {
       alert(err?.message || '保存方案失败');

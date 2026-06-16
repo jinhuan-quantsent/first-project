@@ -3,6 +3,8 @@
 从 .env 文件和环境变量读取配置
 支持 Supabase PostgreSQL 和 SQLite 双模式
 """
+import json as _json
+from pathlib import Path as _Path
 from typing import List
 
 from pydantic_settings import BaseSettings
@@ -125,6 +127,10 @@ class Settings(BaseSettings):
     # ============================
     # V5.0 新增配置项
     # ============================
+    # ⚠️ 以下参数为前后端共享，修改时需同步更新前端 paramsMapper.ts：
+    #   - V5_FACTOR_CONFIG (权重 + sigmoid_k)
+    #   - V5_SIGNAL_BOUNDARIES
+    #   - V5_QUANTILE_WINDOW_DAYS
 
     # --- V5.0 信号边界 (6个边界划分7级: S+/S/A/B/C/D/E) ---
     V5_SIGNAL_BOUNDARIES: List[int] = Field(default_factory=lambda: [12, 25, 38, 52, 65, 80])
@@ -199,3 +205,19 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# ── 激活策略参数覆盖 ──
+_ACTIVE_CONFIG_PATH = _Path(__file__).parent.parent / "data" / "active_strategy.json"
+
+
+def get_active_strategy_overrides() -> dict | None:
+    """从本地 JSON 读取回测激活方案的参数。如果有，用于覆盖主系统默认值。"""
+    try:
+        if _ACTIVE_CONFIG_PATH.exists():
+            with open(_ACTIVE_CONFIG_PATH, encoding="utf-8") as f:
+                data = _json.load(f)
+            return data.get("params")
+    except Exception:
+        pass
+    return None

@@ -1,5 +1,5 @@
 import { TrendingUp, Shield, AlertTriangle } from 'lucide-react';
-import type { BacktestResultV5 } from '../../../api/backtest';
+import type { BacktestResultV5 } from '../../api/backtest';
 import { SIGNAL_BG } from './constants';
 import { EquityChart } from './EquityChart';
 
@@ -54,7 +54,7 @@ export function BacktestResultPanel({ result }: { result: BacktestResultV5 | nul
           <AlertTriangle className="w-3.5 h-3.5 text-orange-500 shrink-0" />
           <p className="text-xs text-orange-700">
             风控触发 {result.risk_stats.risk_triggers}次
-            （止损{result.risk_stats.stop_loss_triggers}·过热{result.risk_stats.overheat_triggers}）
+            （回撤加仓{result.risk_stats.drawdown_add_buys}·过热{result.risk_stats.overheat_triggers}）
             · 回调加仓{result.risk_stats.pullback_buys}·偏离加仓{result.risk_stats.deviation_buys}
           </p>
         </div>

@@ -1,4 +1,4 @@
-import type { ModelParams, ActionRule } from '../../../api/backtest';
+import type { ModelParams, ActionRule } from '../../api/backtest';
 import { SIGNAL_LEVELS, SIGNAL_BG, ACTION_TYPE_OPTIONS, DEFAULT_ACTION_MAPPING } from './constants';
 
 /** Category 3: 行动映射 */

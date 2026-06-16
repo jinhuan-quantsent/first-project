@@ -178,3 +178,79 @@ def generate_recommendations(
         top_picks=top_picks,
         summary=summary,
     )
+
+
+# ============================================================
+# 风险警示生成
+# ============================================================
+
+@dataclass
+class SectorWarningItem:
+    """板块风险警示项"""
+    sector_name: str
+    sector_code: str
+    sentiment_score: float
+    momentum_5d: float
+    warning_type: str  # "overheated" | "weak"
+    signal_level: str = "B"
+    reason: str = ""
+
+
+def generate_warnings(
+    sector_data: list[dict],
+    max_warnings: int = 5,
+) -> list[SectorWarningItem]:
+    """
+    生成板块风险警示
+
+    规则：
+    - 过热（overheated）：情绪分 > 75 且 5日动量 > 3%（贪婪+追涨）
+    - 疲软（weak）：情绪分 < 25 且 5日动量 < -3%（恐慌+下跌）
+
+    Args:
+        sector_data: 与 generate_recommendations 相同的板块数据列表
+        max_warnings: 最多返回的警示数量
+
+    Returns:
+        按严重度排序的风险警示列表
+    """
+    warnings: list[SectorWarningItem] = []
+
+    for s in sector_data:
+        score = s.get("sentiment_score", 50.0)
+        momentum_5d = s.get("momentum_5d", 0.0)
+        signal_level = s.get("signal_level", "B")
+        sector_name = s.get("sector_name", "")
+
+        # 过热板块：情绪分 > 75 且 5日动量 > 3%
+        if score > 75 and momentum_5d > 3.0:
+            warnings.append(SectorWarningItem(
+                sector_name=sector_name,
+                sector_code=s.get("sector_code", ""),
+                sentiment_score=score,
+                momentum_5d=momentum_5d,
+                warning_type="overheated",
+                signal_level=signal_level,
+                reason=f"板块情绪过热（{score:.0f}分），5日涨幅{momentum_5d:+.1f}%，追涨风险高，注意回调",
+            ))
+
+        # 疲软板块：情绪分 < 25 且 5日动量 < -3%
+        elif score < 25 and momentum_5d < -3.0:
+            warnings.append(SectorWarningItem(
+                sector_name=sector_name,
+                sector_code=s.get("sector_code", ""),
+                sentiment_score=score,
+                momentum_5d=momentum_5d,
+                warning_type="weak",
+                signal_level=signal_level,
+                reason=f"板块持续疲软（{score:.0f}分），5日跌幅{momentum_5d:+.1f}%，下行趋势明显",
+            ))
+
+    # 按严重度排序：过热优先（过热风险更大），同类型按情绪分极值排序
+    type_order = {"overheated": 0, "weak": 1}
+    warnings.sort(key=lambda w: (
+        type_order.get(w.warning_type, 9),
+        -abs(w.sentiment_score - 50),  # 越极端越靠前
+    ))
+
+    return warnings[:max_warnings]

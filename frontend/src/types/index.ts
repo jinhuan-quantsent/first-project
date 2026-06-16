@@ -78,6 +78,10 @@ export interface IndexSnapshot {
   change_pct: number;
   composite_score: number;
   sentiment_label: SentimentLabel;
+  // V5 新增字段
+  signal_level?: SignalLevel;
+  confidence_stars?: ConfidenceStars;
+  regime?: string;
 }
 
 // --- 指数详情 ---
@@ -381,6 +385,11 @@ export interface MarketSnapshot {
   divergence_index: number;
   conclusion: string;
   updated_at: string;
+  // V5 新增字段
+  signal_level?: SignalLevel;
+  confidence_stars?: ConfidenceStars;
+  regime?: string;
+  composite_score?: number;
 }
 
 // --- 认证相关 ---

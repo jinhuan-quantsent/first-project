@@ -30,18 +30,17 @@ export interface ModelParams {
 
   // Category 4: 因子引擎
   quantile_window: number;            // 分位数窗口
-  sigmoid_k: number;                  // Sigmoid 陡峭度
+  sigmoid_k: Record<string, number>;  // 每因子 Sigmoid 陡峭度（与后端 config.py V5_FACTOR_CONFIG 对齐）
   composite_method: string;           // 聚合方式
   neutral_score: number;              // 中性分数
 
-  // Category 5: 仓位风控
+  // Category 5: 仓位风控（基金模式：回撤加仓替代止损）
   max_position: number;               // 最大仓位
   min_position: number;               // 最小仓位
-  stop_loss: number;                  // 止损线
-  stop_loss_threshold: number;         // 止损触发阈值倍数
-  stop_loss_reduce_pct: number;       // 止损减仓比例%
+  pullback_add: number;               // 回撤加仓触发线（替代原stop_loss）
+  pullback_add_pct: number;           // 加仓比例（当前持仓的%）
   take_profit: number;                // 止盈线
-  take_profit_drawdown: number;       // 止盈回撤触发
+  take_profit_drawdown: number;       // 移动止盈回撤触发
   overheat_days: number;              // 过热连续天数
   overheat_factor: number;            // 过热减仓系数
   pullback_lower: number;             // 回调加仓下限
@@ -106,7 +105,7 @@ export interface RiskStats {
   risk_triggers: number;
   pullback_buys: number;
   deviation_buys: number;
-  stop_loss_triggers: number;
+  drawdown_add_buys: number;
   overheat_triggers: number;
 }
 

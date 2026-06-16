@@ -135,6 +135,15 @@ class AggregatorV5:
         return "sideways"
 
     def _load_weights(self) -> dict[str, float]:
-        """从配置加载因子权重"""
+        """从配置加载因子权重，支持激活策略参数覆盖"""
+        from app.core.config import get_active_strategy_overrides
         cfg = settings.V5_FACTOR_CONFIG
-        return {name: info["weight"] for name, info in cfg.items()}
+        weights = {name: info["weight"] for name, info in cfg.items()}
+
+        # 如果有激活策略的参数覆盖，合并权重
+        overrides = get_active_strategy_overrides()
+        if overrides and "factor_weights" in overrides:
+            for name, weight in overrides["factor_weights"].items():
+                if name in weights:
+                    weights[name] = weight
+        return weights

@@ -4,7 +4,7 @@
  */
 import type { FundSearchItem, FundDetail, SignalLevel } from '../../types';
 import { SIGNAL_LABELS } from '../../types';
-import { X } from 'lucide-react';
+import { X, AlertTriangle } from 'lucide-react';
 import { clsx } from 'clsx';
 import ExpandableReason, { adaptReason, inferActionAdvice } from '../common/ExpandableReason';
 
@@ -205,6 +205,15 @@ export default function FundDetailPanel({
             </div>
           </section>
         )}
+
+        {/* ===== 风险提示 ===== */}
+        <section>
+          <h4 className="text-xs font-medium text-gray-400 mb-2 flex items-center gap-1">
+            <AlertTriangle className="w-3 h-3" />
+            风险提示
+          </h4>
+          <FundRiskWarnings fund={fund} detail={detail} />
+        </section>
       </div>
     </div>
   );
@@ -236,6 +245,117 @@ function TrendCard({
       <p className="text-xs text-gray-400 mb-1">{title}</p>
       <p className={clsx('text-lg font-bold', trend.color)}>{trend.text}</p>
       <p className="text-[11px] text-gray-400 mt-1 leading-tight">{reason}</p>
+    </div>
+  );
+}
+
+/** 风险类型定义 */
+interface RiskTag {
+  label: string;
+  level: 'high' | 'medium' | 'low';
+  detail: string;
+}
+
+const RISK_LEVEL_STYLE = {
+  high: 'bg-red-50 text-red-600 border-red-200',
+  medium: 'bg-amber-50 text-amber-600 border-amber-200',
+  low: 'bg-blue-50 text-blue-600 border-blue-200',
+};
+
+/**
+ * 基金风险提示组件
+ * 基于基金基本信息生成风险标签：
+ * - 规模过小/过大
+ * - 经理信息缺失
+ * - 风格漂移（类型不匹配跟踪指数）
+ * - 费率相关提示
+ */
+function FundRiskWarnings({ fund, detail }: { fund: FundSearchItem; detail: FundDetail | null }) {
+  const risks: RiskTag[] = [];
+
+  // 1. 规模风险
+  const size = safeNum(fund.fund_size);
+  if (size > 0 && size < 2) {
+    risks.push({
+      label: '迷你基金',
+      level: 'high',
+      detail: `规模仅${size.toFixed(1)}亿，存在清盘风险`,
+    });
+  } else if (size > 200) {
+    risks.push({
+      label: '超大基金',
+      level: 'medium',
+      detail: `规模${size.toFixed(1)}亿，船大难掉头，超额收益可能收窄`,
+    });
+  }
+
+  // 2. 经理信息缺失
+  if (!detail?.manager || detail.manager === '-' || detail.manager === '未知') {
+    risks.push({
+      label: '经理不明',
+      level: 'medium',
+      detail: '基金经理信息缺失，无法评估管理能力',
+    });
+  }
+
+  // 3. 风格漂移检测（指数基金但无跟踪指数）
+  if (fund.fund_type === '指数型' && detail?.tracking_index && detail.tracking_index === '-') {
+    risks.push({
+      label: '风格漂移',
+      level: 'medium',
+      detail: '指数型基金未标注跟踪指数，可能存在风格漂移',
+    });
+  }
+
+  // 4. 新基金风险（成立不足1年）
+  if (detail?.inception_date) {
+    const inception = new Date(detail.inception_date);
+    const ageYears = (Date.now() - inception.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+    if (ageYears < 1) {
+      risks.push({
+        label: '新基金',
+        level: 'medium',
+        detail: `成立不足1年（${ageYears.toFixed(1)}年），历史数据不充分`,
+      });
+    }
+  }
+
+  // 5. 收益异常（年内涨跌幅超过40%或低于-30%）
+  const yearReturn = safeNum(fund.year_return);
+  if (Math.abs(yearReturn) > 40) {
+    risks.push({
+      label: yearReturn > 0 ? '收益异常高' : '跌幅过大',
+      level: 'medium',
+      detail: `年内${yearReturn > 0 ? '涨幅' : '跌幅'}${Math.abs(yearReturn).toFixed(1)}%，波动剧烈`,
+    });
+  }
+
+  if (risks.length === 0) {
+    return (
+      <div className="flex items-center gap-2 py-2">
+        <span className="w-2 h-2 rounded-full bg-emerald-400" />
+        <span className="text-xs text-gray-500">暂无明显风险提示</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1.5">
+      {risks.map((risk, idx) => (
+        <div
+          key={idx}
+          className={clsx(
+            'flex items-start gap-2 px-2.5 py-1.5 rounded-lg border',
+            RISK_LEVEL_STYLE[risk.level],
+          )}
+        >
+          <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
+          <div className="min-w-0">
+            <span className="text-xs font-medium">{risk.label}</span>
+            <p className="text-[10px] opacity-80 mt-0.5 leading-tight">{risk.detail}</p>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

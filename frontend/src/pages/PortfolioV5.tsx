@@ -79,13 +79,52 @@ function buildRealDetailData(
   sentimentDetail: any | undefined,
   adviceData?: { items: any[]; stats: any } | undefined,
   tradeRecords?: any[] | undefined,
+  overallTargetPct?: number | null,
 ): PositionDetailData {
   const signalLevel = signal?.signalLevel ?? 'B';
   const signalLabel = SIGNAL_LABELS[signalLevel] ?? '中性';
-  const operationTag: PositionDetailData['operationTag'] =
-    signalLevel === 'S+' || signalLevel === 'S' ? '加仓' :
-    signalLevel === 'D' || signalLevel === 'E' ? '减仓' :
-    signalLevel === 'A' ? '买入' : '持有';
+
+  // 双层建议体系：信号+整体仓位交叉判断
+  const getOperationTag = (
+    sigLevel: string,
+    currentWeightPct: number,
+    overallTargetPct?: number,
+  ): { tag: PositionDetailData['operationTag']; reason: string } => {
+    // 纯信号判断
+    const signalTag =
+      sigLevel === 'S+' || sigLevel === 'S' ? '加仓' :
+      sigLevel === 'D' || sigLevel === 'E' ? '减仓' :
+      sigLevel === 'A' ? '买入' : '持有';
+
+    // 无整体目标时直接返回信号级判断
+    if (overallTargetPct === undefined || overallTargetPct === null) {
+      return { tag: signalTag, reason: `基于${SIGNAL_LABELS[sigLevel]}信号` };
+    }
+
+    // 有整体目标 → 交叉判断
+    const needReduce = currentWeightPct > overallTargetPct * 1.1;  // 当前权重超目标10%+
+    const needAdd = currentWeightPct < overallTargetPct * 0.9;      // 当前权重低目标10%-
+
+    if (signalTag === '减仓' && needReduce) {
+      return { tag: '减仓', reason: `${SIGNAL_LABELS[sigLevel]}信号+整体仓位需降，优先减持` };
+    }
+    if (signalTag === '加仓' && needAdd) {
+      return { tag: '加仓', reason: `${SIGNAL_LABELS[sigLevel]}信号+整体仓位偏低，优先增持` };
+    }
+    if (signalTag === '减仓' && !needReduce) {
+      return { tag: '持有', reason: `虽${SIGNAL_LABELS[sigLevel]}信号，但整体仓位已偏低，暂不减持` };
+    }
+    if (signalTag === '加仓' && !needAdd) {
+      return { tag: '持有', reason: `虽${SIGNAL_LABELS[sigLevel]}信号，但整体仓位已偏高，暂不加仓` };
+    }
+    return { tag: signalTag, reason: `基于${SIGNAL_LABELS[sigLevel]}信号，与整体仓位一致` };
+  };
+
+  const { tag: operationTag, reason: opReason } = getOperationTag(
+    signalLevel,
+    item.weight_pct,
+    overallTargetPct ?? undefined,
+  );
 
   // 从 V5 因子详情构建推荐理由
   const factorNames: Record<string, string> = {
@@ -418,6 +457,9 @@ export default function PortfolioV5() {
   const [evaluationsMap, setEvaluationsMap] = useState<Record<string, any>>({});
   const [sentimentDetailsMap, setSentimentDetailsMap] = useState<Record<string, any>>({});
 
+  // 整体仓位目标（从V5引擎获取）
+  const [overallTargetPct, setOverallTargetPct] = useState<number | null>(null);
+
   // 建议记录 + 交易记录
   const [adviceMap, setAdviceMap] = useState<Record<string, { items: any[]; stats: any }>>({});
   const [tradeMap, setTradeMap] = useState<Record<string, any[]>>({});
@@ -539,6 +581,25 @@ export default function PortfolioV5() {
         });
         setSignals(signalMap);
 
+        // 获取整体仓位目标（V5引擎计算）
+        try {
+          const snapRes = await client.get('/api/v5/market/snapshot');
+          const snapData = snapRes.data?.data;
+          if (snapData?.composite_score !== undefined && snapData?.signal_level) {
+            // 根据信号等级和当前仓位估算目标仓位（简化版，复用V5仓位矩阵逻辑）
+            const currentPosPct = safeSummary?.core_ratio ?? 0.5;
+            const signalLevel = snapData.signal_level as string;
+            const posMatrix: Record<string, number> = {
+              'S+': 0.80, 'S': 0.70, 'A': 0.60, 'B': 0.50,
+              'C': 0.40, 'D': 0.30, 'E': 0.20,
+            };
+            const target = posMatrix[signalLevel] ?? 0.50;
+            setOverallTargetPct(target);
+          }
+        } catch {
+          // 静默降级
+        }
+
         // 从详情API提取增强数据
         const realNavHistories: Record<string, number[]> = {};
         const realTopStocks: Record<string, { name: string; pct: number; change: number }[]> = {};
@@ -648,15 +709,27 @@ export default function PortfolioV5() {
     return () => { cancelled = true; };
   }, []);
 
-  /** 执行仓位调整 */
+  /** 执行仓位调整（V5引擎精确目标仓位） */
   const handleExecute = useCallback(async (item: PortfolioItem) => {
     const signal = signals[item.fund_code];
-    await executePositionV5({
-      fund_code: item.fund_code,
-      target_position_pct: Math.min(0.95, item.weight_pct + 0.10),
-      signal_level: signal?.signalLevel ?? 'B',
-      confidence_stars: signal?.confidenceStars ?? 3,
-    });
+    // 调用V5引擎获取精确目标仓位，而非写死+10%
+    try {
+      const advice = await fetchPositionAdviceV5(item.fund_code, item.weight_pct);
+      await executePositionV5({
+        fund_code: item.fund_code,
+        target_position_pct: advice.target_pct ?? Math.min(0.95, item.weight_pct + 0.10),
+        signal_level: signal?.signalLevel ?? 'B',
+        confidence_stars: signal?.confidenceStars ?? 3,
+      });
+    } catch {
+      // 降级到信号级判断
+      await executePositionV5({
+        fund_code: item.fund_code,
+        target_position_pct: Math.min(0.95, item.weight_pct + 0.10),
+        signal_level: signal?.signalLevel ?? 'B',
+        confidence_stars: signal?.confidenceStars ?? 3,
+      });
+    }
   }, [signals]);
 
   // =============== 渲染 ===============
@@ -715,6 +788,7 @@ export default function PortfolioV5() {
               { factors: signals[item.fund_code]?.factorDetails },
               adviceMap[item.fund_code],
               tradeMap[item.fund_code],
+              overallTargetPct,
             );
 
             return (

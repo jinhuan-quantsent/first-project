@@ -9,9 +9,10 @@ import type { ModelParams, ActionRule } from '../api/backtest';
    ============================================================ */
 
 export const FACTOR_LABELS: Record<string, string> = {
-  VOL: '波动率', ADR: '涨跌比', ERP: '股债比', FLOW: '北向资金',
+  VOL: '波动率', ADR: '涨跌比', ERP: '股债比', FLOW: '资金流',
   ETF: 'ETF资金', NHNL: '新高新低', TURN: '换手率', POS: '持仓结构',
-  NBF: '融资余额', PCR: '看跌看涨比', NEWF: '新发基金',
+  NBF: '北向资金', PCR: '看跌看涨比', NEWF: '新发基金',
+  MARGIN: '融资融券', RSI: 'RSI指标', INDUSTRY_DIVERGENCE: '行业分歧度',
 };
 export const FACTOR_NAMES = Object.keys(FACTOR_LABELS);
 
@@ -58,20 +59,30 @@ export const DEFAULT_ACTION_MAPPING: Record<string, ActionRule> = {
 export const DEFAULT_MODEL_PARAMS: ModelParams = {
   signal_boundaries: [12, 25, 38, 52, 65, 80],
   signal_lag_days: 1,
-  factor_weights: Object.fromEntries(FACTOR_NAMES.map(n => [n, parseFloat((1 / FACTOR_NAMES.length).toFixed(3))])),
+  // 与后端 config.py V5_FACTOR_CONFIG 对齐
+  factor_weights: {
+    VOL: 0.11, ADR: 0.11, ERP: 0.11, FLOW: 0.09,
+    ETF: 0.07, NHNL: 0.07, TURN: 0.07, POS: 0.07,
+    NBF: 0.06, PCR: 0.02, NEWF: 0.04, MARGIN: 0.04,
+    RSI: 0.03, INDUSTRY_DIVERGENCE: 0.03,
+  },
   factor_enabled: Object.fromEntries(FACTOR_NAMES.map(n => [n, true])),
   action_mapping: { ...DEFAULT_ACTION_MAPPING },
-  quantile_window: 252,
-  sigmoid_k: 3.0,
+  quantile_window: 1260,  // 5年×252交易日，与后端 V5_QUANTILE_WINDOW_DAYS 对齐
+  sigmoid_k: {            // 与后端 V5_FACTOR_CONFIG sigmoid_k 对齐
+    VOL: 3.0, ADR: 2.5, ERP: 4.0, FLOW: 2.0,
+    ETF: 2.0, NHNL: 2.5, TURN: 3.0, POS: 1.8,
+    NBF: 2.5, PCR: 4.0, NEWF: 2.0, MARGIN: 2.0,
+    RSI: 2.5, INDUSTRY_DIVERGENCE: 2.0,
+  },
   composite_method: 'weighted_sum',
   neutral_score: 50,
   max_position: 0.95,
   min_position: 0.05,
-  stop_loss: -0.15,
-  stop_loss_threshold: 1.0,
-  stop_loss_reduce_pct: 50,
-  take_profit: 0.30,
-  take_profit_drawdown: 0.10,
+  pullback_add: -0.10,           // 回撤10%触发加仓
+  pullback_add_pct: 0.20,        // 加仓比例：当前持仓的20%
+  take_profit: 0.20,             // 涨20%止盈
+  take_profit_drawdown: 0.08,    // 从最高点回撤8%移动止盈
   overheat_days: 10,
   overheat_factor: 0.7,
   pullback_lower: -0.08,
@@ -118,9 +129,8 @@ export function modelParamsToApiRequest(p: {
     risk_params: {
       max_position: params.max_position,
       min_position: params.min_position,
-      stop_loss: params.stop_loss,
-      stop_loss_threshold: params.stop_loss_threshold,
-      stop_loss_reduce_pct: params.stop_loss_reduce_pct,
+      pullback_add: params.pullback_add,
+      pullback_add_pct: params.pullback_add_pct,
       take_profit: params.take_profit,
       take_profit_drawdown: params.take_profit_drawdown,
       overheat_days: params.overheat_days,

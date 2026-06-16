@@ -1475,6 +1475,7 @@ async def save_backtest_strategy(
         existing.params_json = params_str
         existing.updated_at = datetime.now()
         await session.flush()
+        await session.commit()
         strategy_id = existing.id
     else:
         new_strategy = BacktestStrategy(
@@ -1485,6 +1486,7 @@ async def save_backtest_strategy(
         )
         session.add(new_strategy)
         await session.flush()
+        await session.commit()
         strategy_id = new_strategy.id
 
     return {"code": 0, "data": {"id": strategy_id, "name": req.name}, "message": "保存成功"}
@@ -1574,5 +1576,20 @@ async def activate_backtest_strategy(
 
     strategy.is_active = True
     await session.flush()
+    await session.commit()
 
-    return {"code": 0, "data": None, "message": "激活成功"}
+    # 将激活方案的参数写入本地 JSON（主系统读取入口）
+    import json as _json
+    from pathlib import Path as _Path
+    _ACTIVE_CONFIG_PATH = _Path(__file__).parent.parent / "data" / "active_strategy.json"
+    _ACTIVE_CONFIG_PATH.parent.mkdir(exist_ok=True)
+    with open(_ACTIVE_CONFIG_PATH, "w", encoding="utf-8") as f:
+        _json.dump({
+            "strategy_id": strategy.id,
+            "strategy_name": strategy.name,
+            "params": strategy.params_json if isinstance(strategy.params_json, dict) else _json.loads(strategy.params_json or "{}"),
+            "activated_at": datetime.now().isoformat(),
+        }, f, ensure_ascii=False, indent=2)
+    logger.info("已同步激活方案参数到主系统: %s → %s", strategy.name, _ACTIVE_CONFIG_PATH)
+
+    return {"code": 0, "data": {"id": strategy.id, "name": strategy.name}, "message": "激活成功，主系统参数已同步"}

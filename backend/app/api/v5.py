@@ -691,6 +691,10 @@ async def get_v5_market_snapshot(
                 "change_pct": data.get("change_pct"),
                 "composite_score": result.get("composite_score", 50.0),
                 "sentiment_label": result.get("signal_level", "B"),
+                # V5 新增字段
+                "signal_level": result.get("signal_level", "B"),
+                "confidence_stars": result.get("confidence_stars", 2),
+                "regime": result.get("regime", "sideways"),
             })
         else:
             # 降级：不跑 pipeline，直接用数据源的基本信息
@@ -701,18 +705,52 @@ async def get_v5_market_snapshot(
                 "change_pct": data.get("change_pct"),
                 "composite_score": 50.0,
                 "sentiment_label": "B",
+                "signal_level": "B",
+                "confidence_stars": 2,
+                "regime": "sideways",
             })
 
-    # 综合情绪取第一个
-    main = items[0] if items else None
+    # 综合情绪（加权计算，与 multi-index 保持一致）
+    WEIGHT_MAP = {
+        "SH000001": 0.25,
+        "SH000300": 0.30,
+        "SZ399001": 0.25,
+        "SZ399006": 0.20,
+    }
+    weighted_score = 0.0
+    weighted_confidence = 0.0
+    total_weight = 0.0
+    regime_counts: dict[str, int] = {}
+
+    for item in items:
+        w = WEIGHT_MAP.get(item["index_code"], 0.0)
+        if w > 0:
+            weighted_score += item["composite_score"] * w
+            weighted_confidence += item["confidence_stars"] * w
+            total_weight += w
+            r = item.get("regime", "sideways")
+            regime_counts[r] = regime_counts.get(r, 0) + 1
+
+    composite_score = round(weighted_score / total_weight, 2) if total_weight > 0 else 50.0
+    composite_confidence = round(weighted_confidence / total_weight) if total_weight > 0 else 2
+    composite_regime = max(regime_counts, key=regime_counts.get) if regime_counts else "sideways"
+
+    # 综合信号等级（基于加权分数映射）
+    _signal_mapper = SignalMapper()
+    composite_signal = _signal_mapper.map(composite_score)[0] if total_weight > 0 else "B"
 
     response = {
         "code": 0,
         "data": {
             "indexes": items,
-            "composite_score": main.get("composite_score", 50.0) if main else 50.0,
-            "global_sentiment": main.get("sentiment_label", "B") if main else "B",
-            "global_score": main.get("composite_score", 50.0) if main else 50.0,
+            "global_sentiment": composite_signal,
+            "global_score": composite_score,
+            "composite_score": composite_score,
+            # V5 新增字段
+            "signal_level": composite_signal,
+            "confidence_stars": int(composite_confidence),
+            "regime": composite_regime,
+            "conclusion": _signal_mapper.get_conclusion(composite_signal),
             "updated_at": datetime.now().isoformat(),
         },
         "message": "ok",

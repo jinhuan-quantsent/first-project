@@ -31,16 +31,19 @@ class ActionRule:
 
 @dataclass
 class RiskParams:
-    """风控参数"""
+    """风控参数（基金模式：回撤加仓替代止损）"""
     max_position: float = 0.95
     min_position: float = 0.05
-    stop_loss: float = -0.15
-    stop_loss_threshold: float = 1.0
-    stop_loss_reduce_pct: float = 50.0
-    take_profit: float = 0.30
-    take_profit_drawdown: float = 0.10
+    # 回撤加仓：基金回撤时加仓而非止损清仓
+    pullback_add: float = -0.10       # 回撤10%触发加仓（替代原stop_loss -0.15）
+    pullback_add_pct: float = 0.20    # 加仓比例：当前持仓的20%
+    # 止盈
+    take_profit: float = 0.20         # 涨20%进入止盈监控
+    take_profit_drawdown: float = 0.08  # 从最高点回撤8%触发移动止盈赎回
+    # 过热
     overheat_days: int = 10
     overheat_factor: float = 0.7
+    # 回调/偏离加仓
     pullback_lower: float = -0.08
     pullback_buy_mult: float = 0.5
     position_dev_lower: float = -0.05
@@ -67,8 +70,8 @@ class BacktestConfig:
     start_date: str = "2024-01-01"
     end_date: str = "2024-12-31"
     initial_capital: float = 100000.0
-    commission_rate: float = 0.0012  # 万1.2
-    stamp_tax_rate: float = 0.001   # 千1（卖出）
+    commission_rate: float = 0.0015  # 基金申购费率0.15%
+    stamp_tax_rate: float = 0.005   # 基金赎回费率0.5%（持有<7天）
     signal_strategy: str = "v5_signal"
 
     # Category 1: 信号映射
@@ -194,7 +197,6 @@ class BacktestEngine:
 
         # 风控状态
         peak_portfolio_value = config.initial_capital
-        stop_loss_triggered = False
         take_profit_triggered = False
         overheat_triggered = False
         consecutive_high_signal_days = 0
@@ -206,7 +208,7 @@ class BacktestEngine:
         risk_triggers = 0
         pullback_buys = 0
         deviation_buys = 0
-        stop_loss_triggers = 0
+        drawdown_add_buys = 0
         overheat_triggers = 0
 
         rp = config.risk_params
@@ -252,14 +254,8 @@ class BacktestEngine:
                 if sell_shares > 0:
                     risk_override = ("risk_sell", sell_shares, f"仓位超限({position_ratio*100:.1f}%>{rp.max_position*100:.0f}%)")
 
-            # R2: 止损
-            if total_return_rate < rp.stop_loss * rp.stop_loss_threshold and not stop_loss_triggered and shares > 0:
-                stop_loss_triggered = True
-                sell_pct = rp.stop_loss_reduce_pct / 100
-                sell_shares = shares * sell_pct
-                if sell_shares > 0:
-                    risk_override = ("risk_sell", sell_shares, f"触发止损线(收益{total_return_rate*100:.1f}%<止损{rp.stop_loss*rp.stop_loss_threshold*100:.1f}%)")
-                    stop_loss_triggers += 1
+            # R2: 回撤加仓标记（不直接执行，在操作阶段执行）
+            r2_drawdown_add = total_return_rate < rp.pullback_add and shares > 0
 
             # R3: 止盈回撤
             if total_return_rate > rp.take_profit and not take_profit_triggered and shares > 0:
@@ -371,6 +367,27 @@ class BacktestEngine:
             else:
                 action_text = "持有"
 
+            # ---- R2: 回撤加仓执行（替代原止损——基金回撤时应加仓而非清仓） ----
+            if r2_drawdown_add and shares > 0:
+                add_amount = position_value * rp.pullback_add_pct
+                if add_amount > 0 and add_amount <= cash * 0.95:
+                    commission = add_amount * config.commission_rate
+                    actual_buy = add_amount - commission
+                    buy_shares_r2 = actual_buy / close
+                    shares += buy_shares_r2
+                    cash -= add_amount
+                    drawdown_add_buys += 1
+                    risk_triggers += 1
+                    action_text = f"回撤加仓 ¥{add_amount:,.0f}"
+                    is_risk = True
+                    trade_record = TradeRecord(
+                        trade_date=d, trade_type="buy",
+                        signal_level=effective_signal,
+                        price=round(close, 4), shares=round(buy_shares_r2, 2),
+                        amount=round(actual_buy, 2), commission=round(commission, 2),
+                        reason=f"回撤{total_return_rate*100:.1f}%≤加仓线{rp.pullback_add*100:.0f}%",
+                    )
+
             # ---- R5: 回调/偏离加仓（只在hold状态下） ----
             if not risk_override and action.action_type == "hold" and shares > 0:
                 drawdown_from_peak = (portfolio_value - peak_portfolio_value) / peak_portfolio_value
@@ -412,8 +429,6 @@ class BacktestEngine:
                         )
 
             # ---- 重置风控触发器（条件恢复） ----
-            if total_return_rate > rp.stop_loss * rp.stop_loss_threshold * 1.5:
-                stop_loss_triggered = False
             if total_return_rate < rp.take_profit * 0.5:
                 take_profit_triggered = False
             if consecutive_high_signal_days < rp.overheat_days // 2:
@@ -480,7 +495,7 @@ class BacktestEngine:
             "risk_triggers": risk_triggers,
             "pullback_buys": pullback_buys,
             "deviation_buys": deviation_buys,
-            "stop_loss_triggers": stop_loss_triggers,
+            "drawdown_add_buys": drawdown_add_buys,
             "overheat_triggers": overheat_triggers,
         }
 

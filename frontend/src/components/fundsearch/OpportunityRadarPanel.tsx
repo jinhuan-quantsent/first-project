@@ -12,16 +12,22 @@ import SentimentBadge from '../common/SentimentBadge';
 export type OpportunityType = 'strong' | 'rebound' | 'steady';
 
 interface OpportunityItem {
-  fund_code: string;
-  fund_name: string;
-  sector_code?: string;   // 板块代码（后端recommendations返回）
-  sector_name?: string;   // 板块名称（后端recommendations返回）
+  /** 板块代码（如 BK0001），来自后端推荐引擎 */
+  sector_code?: string;
+  /** 板块名称（如 半导体），来自后端推荐引擎 */
+  sector_name?: string;
+  /** 推荐基金代码（当后端有映射时） */
+  fund_code?: string;
+  /** 推荐基金名称（当后端有映射时） */
+  fund_name?: string;
   signal_level: SignalLevel;
   confidence_stars: 1 | 2 | 3 | 4;
   opportunity_type: OpportunityType;
   opportunity_reason: string;
   strength_index: number;
   composite_score?: number;
+  /** 板块所属行业分组 */
+  sector_group?: string;
 }
 
 /** 信号等级有利度排序权重：恐惧=买入机会→排前 */
@@ -81,14 +87,14 @@ interface OpportunityRadarPanelProps {
 }
 
 export default function OpportunityRadarPanel({
-  items = DUMMY_ITEMS,
+  items,
   loading = false,
   activeType = '',
   onTypeChange,
   onSelect,
 }: OpportunityRadarPanelProps) {
   /** 按有利度排序：恐惧信号排前，同等级按 composite_score 降序 */
-  const sortedItems = [...items].sort((a, b) => {
+  const sortedItems = [...(items || [])].sort((a, b) => {
     const favDiff = SIGNAL_FAVOR_ORDER[a.signal_level] - SIGNAL_FAVOR_ORDER[b.signal_level];
     if (favDiff !== 0) return favDiff;
     return (b.composite_score ?? 0) - (a.composite_score ?? 0);
@@ -143,7 +149,7 @@ export default function OpportunityRadarPanel({
             const classified = classifyItem(item);
             return (
               <button
-                key={item.fund_code}
+                key={item.fund_code || item.sector_code || String(idx)}
                 onClick={() => onSelect?.(item)}
                 className="w-full flex items-center gap-3 px-3 py-2 rounded-lg
                            hover:bg-gray-50 transition-colors text-left"
@@ -193,7 +199,9 @@ export default function OpportunityRadarPanel({
 
           {filtered.length === 0 && (
             <p className="text-xs text-gray-400 text-center py-4">
-              当前分类下暂无推荐
+              {items && items.length === 0
+                ? '暂无推荐数据，请稍后刷新'
+                : '当前分类下暂无推荐'}
             </p>
           )}
         </div>
