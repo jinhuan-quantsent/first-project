@@ -6,6 +6,7 @@ import type { FundSearchItem, SignalLevel } from '../../types';
 import { SIGNAL_LABELS } from '../../types';
 import { Star, Plus } from 'lucide-react';
 import { clsx } from 'clsx';
+import ExpandableReason, { adaptReason, inferActionAdvice } from '../common/ExpandableReason';
 
 /** 安全取数，防止 undefined/null 调用 .toFixed() 崩溃 */
 const safeNum = (v: number | undefined | null, fallback = 0): number => v ?? fallback;
@@ -126,9 +127,13 @@ export default function FundResultList({
                 {/* 右列：推荐理由 */}
                 <div className="min-w-0 flex-1 hidden sm:block">
                   {reason && (
-                    <p className="text-[13px] text-gray-500 truncate">
-                      {reason}
-                    </p>
+                    <ExpandableReason
+                      reason={adaptReason(reason, level)}
+                      signalLevel={level}
+                      actionAdvice={inferActionAdvice(level)}
+                      variant="inline"
+                      summaryMaxLength={35}
+                    />
                   )}
                 </div>
 

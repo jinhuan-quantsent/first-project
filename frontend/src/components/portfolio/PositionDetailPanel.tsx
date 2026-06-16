@@ -5,6 +5,7 @@
 import { useMemo, useState } from 'react';
 import type { SignalLevel } from '../../types';
 import SentimentBadge from '../common/SentimentBadge';
+import ExpandableReason, { adaptReason, inferActionAdvice } from '../common/ExpandableReason';
 import { Star, TrendingUp, ChevronUp, BarChart3, Activity, FileText, Award, Play, Shield } from 'lucide-react';
 import { clsx } from 'clsx';
 
@@ -287,7 +288,15 @@ export default function PositionDetailPanel({ data, onCollapse, onExecute }: Pos
         {/* 信号+原因+收起 */}
         <div className="flex items-center gap-2 shrink-0 ml-2">
           <SentimentBadge level={data.signalLevel} size="sm" variant="inline" />
-          <span className="text-[10px] text-gray-400 truncate max-w-[120px]">{data.signalReason}</span>
+          <div className="max-w-[200px]">
+            <ExpandableReason
+              reason={adaptReason(data.signalReason, data.signalLevel)}
+              signalLevel={data.signalLevel}
+              actionAdvice={inferActionAdvice(data.signalLevel)}
+              variant="compact"
+              summaryMaxLength={20}
+            />
+          </div>
           <button
             onClick={onCollapse}
             className="p-1 rounded hover:bg-gray-100 transition-colors"

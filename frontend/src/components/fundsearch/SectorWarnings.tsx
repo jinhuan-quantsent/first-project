@@ -6,6 +6,8 @@
  */
 import { AlertTriangle, ShieldAlert } from 'lucide-react';
 import { clsx } from 'clsx';
+import ExpandableReason, { adaptReason } from '../common/ExpandableReason';
+import type { SignalLevel } from '../../types';
 
 interface SectorWarningItem {
   sector_name: string;
@@ -92,9 +94,13 @@ export default function SectorWarnings({ items, loading }: SectorWarningsProps) 
                     情绪 {item.sentiment_score} · 5日动量 {item.momentum_5d > 0 ? '+' : ''}{item.momentum_5d.toFixed(1)}%
                   </p>
                 </div>
-                <p className="text-[10px] text-gray-400 max-w-[140px] truncate shrink-0">
-                  {item.reason}
-                </p>
+                <div className="max-w-[160px]">
+                  <ExpandableReason
+                    reason={adaptReason(item.reason)}
+                    variant="compact"
+                    summaryMaxLength={20}
+                  />
+                </div>
               </div>
             );
           })}

@@ -7,10 +7,13 @@
 - RSI → 基于真实收盘价序列计算
 - 融资融券 → 真实数据（Tushare/AKShare）
 - 国债收益率 → AKShare 真实数据
-- 板块数据 → 当前仍用 Mock（后续可接入 AKShare）
+- 板块数据 → sector_scorer V5.0 增强评分（6因子+信号等级+结构化理由）
 """
+import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Query
 
@@ -24,39 +27,20 @@ from app.engine.compatibility import (
 )
 from app.engine.recommendations import generate_recommendations, RecommendationResult
 from app.engine.position import calculate_position
+from app.engine.sector_scorer import score_sectors
 from app.utils.data_source import data_source, DEFAULT_INDEX_CODES
 from app.utils.eastmoney import get_sector_list
 
 router = APIRouter()
 
 
-# ============================================================
-# B2 Fix: 真实板块数据（替代 get_mock_sectors）
-# ============================================================
-_GROUP_MAP = {
-    "电子": "科技", "信息": "科技", "互联": "科技", "传媒": "科技",
-    "通信": "科技", "软件": "科技", "数据": "科技", "云计算": "科技",
-    "5G": "科技", "物联网": "科技", "区块链": "科技", "数字": "科技",
-    "新能": "能源", "光伏": "能源", "风电": "能源", "储能": "能源",
-    "锂电": "能源", "氢能": "能源", "电力": "能源", "能源": "能源",
-    "医药": "医药", "医疗": "医药", "生物": "医药", "中药": "医药", "养老": "医药",
-    "银行": "金融", "证券": "金融", "保险": "金融", "金融": "金融",
-    "白酒": "消费", "食品": "消费", "饮料": "消费", "家电": "消费", "消费": "消费",
-    "汽车": "制造", "军工": "制造", "机器人": "制造", "装备": "制造", "工业": "制造",
-    "地产": "地产", "基建": "地产",
-    "有色": "周期", "钢铁": "周期", "煤炭": "周期", "化工": "周期", "材料": "周期",
-    "农业": "农业", "公用": "公用",
-}
 
-def _map_sector_group(name: str) -> str:
-    for kw, grp in _GROUP_MAP.items():
-        if kw in name:
-            return grp
-    return "综合"
-
+# ============================================================
+# 板块数据获取（使用增强后的 sector_scorer V5.0）
+# ============================================================
 
 async def _get_real_sectors() -> list[dict]:
-    """从腾讯API获取真实板块数据，转为推荐引擎所需格式"""
+    """从东方财富API获取真实板块数据，经 sector_scorer V5.0 增强评分"""
     try:
         # 先尝试概念板块，再行业板块
         raw = await get_sector_list("concept")
@@ -64,68 +48,19 @@ async def _get_real_sectors() -> list[dict]:
             raw = await get_sector_list("industry")
         if not raw or not raw.get("items"):
             # 降级到 mock
-            return data_source.get_mock_sectors()
+            mock = data_source.get_mock_sectors()
+            return await score_sectors(mock)
 
         items = raw["items"]
 
-        # 去重（按 code+name）
-        seen = set()
-        unique = []
-        for item in items:
-            key = (item.get("code", ""), item.get("name", ""))
-            if key not in seen:
-                seen.add(key)
-                unique.append(item)
-
-        sectors = []
-        for item in unique:
-            name = item.get("name", "")
-            chg = float(item.get("change_pct", 0))
-            turnover = float(item.get("turnover", 0))
-
-            # 计算情绪分数（0-100）
-            chg_score = 50 + chg * 5
-            turnover_score = min(100, max(0, 50 + (turnover - 2) * 10))
-            sentiment_score = round(chg_score * 0.6 + turnover_score * 0.4, 1)
-            sentiment_score = max(5, min(95, sentiment_score))
-
-            if sentiment_score < 20:
-                label = "extreme_fear"
-            elif sentiment_score < 40:
-                label = "fear"
-            elif sentiment_score < 60:
-                label = "neutral"
-            elif sentiment_score < 80:
-                label = "greed"
-            else:
-                label = "extreme_greed"
-
-            sectors.append({
-                "sector_code": item.get("code", ""),
-                "sector_name": name,
-                "sector_group": _map_sector_group(name),
-                "sentiment_score": sentiment_score,
-                "sentiment_label": label,
-                "momentum_5d": round(chg * 1.5, 1),
-                "momentum_20d": round(chg * 3, 1),
-                "strength_index": max(5, min(100, round(50 + chg * 10, 1))),
-                "sector_return": chg,
-                "turnover_ratio": turnover,
-                "fund_flow": 0.0,
-            })
-
-        print(f"✅ 板块数据加载完成: {len(sectors)} 个板块（来源: 腾讯API）")
+        # 使用增强后的 sector_scorer（6因子+信号等级+结构化理由）
+        sectors = await score_sectors(items)
         return sectors
 
     except Exception as e:
-        print(f"⚠️ 真实板块数据获取失败: {e}，降级到 Mock")
-        return data_source.get_mock_sectors()
-
-
-
-# ============================================================
-# 辅助函数
-# ============================================================
+        logger.warning(f"真实板块数据获取失败: {e}，降级到 Mock")
+        mock = data_source.get_mock_sectors()
+        return await score_sectors(mock)
 
 
 
@@ -421,11 +356,14 @@ async def get_recommendations() -> dict:
             "sector_group": item.sector_group,
             "sentiment_score": item.sentiment_score,
             "sentiment_label": item.sentiment_label,
+            "signal_level": item.signal_level,
             "momentum_5d": item.momentum_5d,
             "momentum_20d": item.momentum_20d,
             "strength_index": item.strength_index,
+            "strength_rank": item.strength_rank,
             "opportunity_type": item.opportunity_type,
             "opportunity_reason": item.opportunity_reason,
+            "reason": item.reason,  # V5 三段式结构化理由
             "recommended_funds": item.recommended_funds,
         }
 
@@ -456,9 +394,12 @@ async def get_sector_heatmap() -> dict:
             "sector_group": s["sector_group"],
             "sentiment_score": s["sentiment_score"],
             "sentiment_label": s["sentiment_label"],
+            "signal_level": s.get("signal_level", "B"),
             "sector_return": s["sector_return"],
             "momentum_5d": s["momentum_5d"],
             "strength_index": s["strength_index"],
+            "strength_rank": s.get("strength_rank", 0),
+            "reason": s.get("reason", {}),
         })
 
     # 按分组聚合

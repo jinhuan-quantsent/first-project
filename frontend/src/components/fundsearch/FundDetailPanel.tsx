@@ -6,6 +6,7 @@ import type { FundSearchItem, FundDetail, SignalLevel } from '../../types';
 import { SIGNAL_LABELS } from '../../types';
 import { X } from 'lucide-react';
 import { clsx } from 'clsx';
+import ExpandableReason, { adaptReason, inferActionAdvice } from '../common/ExpandableReason';
 
 /** 安全取数，防止 undefined/null 调用 .toFixed() 崩溃 */
 const safeNum = (v: number | undefined | null, fallback = 0): number => v ?? fallback;
@@ -147,11 +148,13 @@ export default function FundDetailPanel({
               </span>
             </div>
             {sentiment.reason && (
-              <div className="bg-gray-50 rounded-lg p-3">
-                <p className="text-xs text-gray-600 leading-relaxed">
-                  {sentiment.reason}
-                </p>
-              </div>
+              <ExpandableReason
+                reason={adaptReason(sentiment.reason, sentiment.signalLevel as SignalLevel | undefined)}
+                signalLevel={sentiment.signalLevel as SignalLevel | undefined}
+                actionAdvice={inferActionAdvice(sentiment.signalLevel as SignalLevel | undefined)}
+                variant="panel"
+                defaultExpanded={true}
+              />
             )}
           </section>
         )}

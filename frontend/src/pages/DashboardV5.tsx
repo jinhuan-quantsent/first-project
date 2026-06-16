@@ -19,6 +19,17 @@ const SIGNAL_LABELS: Record<string, string> = {
   'C': '偏贪婪', 'D': '贪婪', 'E': '极度贪婪',
 };
 
+/** 信号等级 → 仓位建议映射（V5.0 5×7矩阵简化版） */
+const POSITION_ADVICE: Record<string, { action: string; position: string; risk: string }> = {
+  'S+': { action: '逢低布局', position: '30%-40%', risk: '高风险区域但存在反弹机会' },
+  'S':  { action: '小仓试探', position: '25%-35%', risk: '恐慌中可分批建仓' },
+  'A':  { action: '谨慎加仓', position: '30%-40%', risk: '偏恐慌，轻仓试探' },
+  'B':  { action: '持有观望', position: '50%', risk: '中性，等待方向明确' },
+  'C':  { action: '适度减仓', position: '40%-50%', risk: '偏热，可逐步锁利' },
+  'D':  { action: '控制仓位', position: '25%-35%', risk: '过热，注意回调' },
+  'E':  { action: '减仓避险', position: '15%-25%', risk: '极度贪婪，高风险' },
+};
+
 interface V5IndexData {
   index_code: string;
   index_name: string;
@@ -41,6 +52,9 @@ const FACTOR_DEFS = [
   { name: 'NBF', label: '北向资金', dir: 'greed' },
   { name: 'PCR', label: '认沽认购比', dir: 'fear' },
   { name: 'NEWF', label: '新发热度', dir: 'greed' },
+  { name: 'MARGIN', label: '融资融券', dir: 'greed' },
+  { name: 'RSI', label: 'RSI指标', dir: 'fear' },
+  { name: 'INDUSTRY_DIVERGENCE', label: '行业分歧', dir: 'fear' },
 ] as const;
 
 export default function DashboardV5() {
@@ -143,7 +157,7 @@ export default function DashboardV5() {
     <div className="max-w-7xl mx-auto space-y-4 md:space-y-6">
       <div>
         <h1 className="text-xl md:text-2xl font-bold text-gray-800">大盘情绪仪表盘 V5.0</h1>
-        <p className="text-xs md:text-sm text-gray-400 mt-1">11因子流水线 | 7级信号 | 4星置信度</p>
+        <p className="text-xs md:text-sm text-gray-400 mt-1">14因子流水线 | 7级信号 | 4星置信度</p>
       </div>
 
       {/* 多指数卡片 */}
@@ -241,46 +255,44 @@ export default function DashboardV5() {
 
           <div className="card p-5">
             <h3 className="text-sm font-bold text-gray-700 mb-3">操作建议</h3>
-            <div className={clsx(
-              'rounded-lg p-4',
-              selected.signal_level === 'S+' || selected.signal_level === 'S'
-                ? 'bg-green-50 border border-green-200'
-                : selected.signal_level === 'D' || selected.signal_level === 'E'
-                ? 'bg-red-50 border border-red-200'
-                : 'bg-gray-50 border border-gray-200'
-            )}>
-              <div className="flex items-center gap-2 mb-2">
-                {selected.signal_level === 'S+' || selected.signal_level === 'S' ? (
-                  <TrendingUp className="w-5 h-5 text-green-500" />
-                ) : selected.signal_level === 'D' || selected.signal_level === 'E' ? (
-                  <TrendingDown className="w-5 h-5 text-red-500" />
-                ) : (
-                  <Minus className="w-5 h-5 text-gray-400" />
-                )}
-                <span className="font-bold text-gray-800">
-                  {selected.composite_score < 38 ? '逢低关注' :
-                   selected.composite_score < 52 ? '持有观望' :
-                   selected.composite_score < 65 ? '适度参与' : '注意风险'}
-                </span>
-              </div>
-              <p className="text-xs text-gray-500">
-                建议仓位:{' '}
-                {selected.composite_score < 38 ? '25%' :
-                 selected.composite_score < 52 ? '50%' :
-                 selected.composite_score < 65 ? '75%' : '25%'}
-              </p>
-              <p className="text-xs text-gray-400 mt-1">
-                基于信号 {SIGNAL_LABELS[selected.signal_level]}，置信度 {selected.confidence_stars} 星
-              </p>
-            </div>
+            {(() => {
+              const advice = POSITION_ADVICE[selected.signal_level] || POSITION_ADVICE['B'];
+              const isBuy = ['S+', 'S', 'A'].includes(selected.signal_level);
+              const isSell = ['D', 'E'].includes(selected.signal_level);
+              return (
+                <div className={clsx(
+                  'rounded-lg p-4',
+                  isBuy ? 'bg-green-50 border border-green-200'
+                  : isSell ? 'bg-red-50 border border-red-200'
+                  : 'bg-gray-50 border border-gray-200'
+                )}>
+                  <div className="flex items-center gap-2 mb-2">
+                    {isBuy ? (
+                      <TrendingUp className="w-5 h-5 text-green-500" />
+                    ) : isSell ? (
+                      <TrendingDown className="w-5 h-5 text-red-500" />
+                    ) : (
+                      <Minus className="w-5 h-5 text-gray-400" />
+                    )}
+                    <span className="font-bold text-gray-800">{advice.action}</span>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    建议仓位: {advice.position}
+                  </p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    {advice.risk} · 信号 {selected.signal_level} · 置信度 {selected.confidence_stars} 星
+                  </p>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}
 
-      {/* 11因子概览 */}
+      {/* 14因子概览 */}
       <div className="card p-5">
         <h3 className="text-sm font-bold text-gray-700 mb-3">
-          11因子引擎概览
+          14因子引擎概览
           {factorsLoading && <span className="ml-2 text-xs text-gray-400 font-normal">加载中...</span>}
         </h3>
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
