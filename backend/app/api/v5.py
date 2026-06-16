@@ -871,3 +871,136 @@ async def get_v5_dca_advice(
         },
         "message": "ok",
     }
+
+
+# ============================================================
+# Phase D: 背离预警 + 因子雷达图
+# ============================================================
+
+@router.get("/market/divergence")
+async def get_divergence_alert(
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    全指数背离检测（Dashboard 顶部预警横幅数据源）
+
+    对4个默认指数运行价格-情绪背离检测，返回有背离信号的指数列表。
+    缓存5分钟。
+    """
+    import asyncio
+    from app.core.redis_client import cache_get, cache_set
+    from app.engine.factor_history import FactorHistoryStore
+    from app.engine.divergence_detector import DivergenceDetector
+
+    cache_key = "fsa:divergence-alert"
+    cached = await cache_get(cache_key)
+    if cached:
+        return cached
+
+    history_store = FactorHistoryStore()
+    detector = DivergenceDetector()
+
+    alerts = []
+    all_clear = True
+
+    for code in DEFAULT_INDEX_CODES:
+        try:
+            price_history = await history_store.get_series(
+                session, code, "CLOSE", lookback_days=30,
+            )
+            sentiment_history = await history_store.get_series(
+                session, code, "COMPOSITE", lookback_days=30,
+            )
+
+            if len(price_history) < 5 or len(sentiment_history) < 5:
+                continue
+
+            result = detector.detect(price_history, sentiment_history)
+            if result["divergence_type"]:
+                all_clear = False
+                # 获取指数名称
+                from app.utils.code_format import INDEX_REGISTRY
+                index_name = INDEX_REGISTRY.get(to_display(code), {}).get("name", code)
+                alerts.append({
+                    "index_code": to_display(code),
+                    "index_name": index_name,
+                    "divergence_type": result["divergence_type"],
+                    "strength": result["strength"],
+                    "description": result["description"],
+                    "price_trend": result["price_trend"],
+                    "sentiment_trend": result["sentiment_trend"],
+                })
+        except Exception as e:
+            logger.warning(f"背离检测异常 {code}: {e}")
+
+    response = {
+        "code": 0,
+        "data": {
+            "all_clear": all_clear,
+            "alerts": sorted(alerts, key=lambda x: x["strength"], reverse=True),
+            "checked_at": datetime.now().isoformat(),
+        },
+        "message": "ok",
+    }
+
+    await cache_set(cache_key, response, ttl=300)
+    return response
+
+
+@router.get("/market/factor-radar")
+async def get_factor_radar(
+    index_code: str = Query(default="SH000300"),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    因子雷达图数据（Dashboard 因子可视化）
+
+    返回14因子的当前分位数值（百分位数），供 ECharts 雷达图使用。
+    """
+    from app.core.redis_client import cache_get, cache_set
+    from app.engine.quantile import QuantileNorm
+    from app.engine.factor_engine import FACTOR_NAMES, FACTOR_CLASSES
+
+    ts_code = to_tushare(index_code)
+    cache_key = f"fsa:factor-radar:{ts_code}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return cached
+
+    trade_date = date.today().isoformat()
+    quantile = QuantileNorm(session=session)
+
+    factors = []
+    for name in FACTOR_NAMES:
+        factor_cls = FACTOR_CLASSES.get(name)
+        if not factor_cls:
+            continue
+        factor = factor_cls()
+        try:
+            raw_value_obj = await factor.fetch_raw(index_code, trade_date)
+            raw_value = raw_value_obj.raw_value
+        except Exception:
+            raw_value = factor._get_default_raw_value(index_code)
+
+        percentile = await quantile.calc_percentile(raw_value, index_code, name)
+
+        factors.append({
+            "name": name,
+            "label": factor.label,
+            "direction": factor.direction,
+            "percentile": round(percentile * 100, 1) if percentile else 50.0,
+            "weight": factor.weight,
+        })
+
+    response = {
+        "code": 0,
+        "data": {
+            "index_code": index_code,
+            "factors": factors,
+            "trade_date": trade_date,
+        },
+        "message": "ok",
+    }
+
+    await cache_set(cache_key, response, ttl=300)
+    return response

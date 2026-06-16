@@ -68,6 +68,13 @@ async def close_db() -> None:
         print("🔌 数据库连接已关闭")
 
 
+def get_async_engine() -> AsyncEngine:
+    """获取数据库引擎（供定时任务等非请求上下文使用）"""
+    if _engine is None:
+        raise RuntimeError("数据库未初始化，请先调用 init_db()")
+    return _engine
+
+
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """获取数据库会话（依赖注入）"""
     if _async_session_factory is None:

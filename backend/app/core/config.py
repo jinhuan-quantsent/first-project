@@ -140,7 +140,7 @@ class Settings(BaseSettings):
         "TURN": {"label": "换手率", "direction": "fear", "weight": 0.07, "sigmoid_c": 0.40, "sigmoid_k": 3.0, "source": "tushare"},
         "POS":  {"label": "基金仓位", "direction": "greed", "weight": 0.07, "sigmoid_c": 0.50, "sigmoid_k": 1.8, "source": "tushare"},
         "NBF":  {"label": "北向资金", "direction": "greed", "weight": 0.06, "sigmoid_c": 0.50, "sigmoid_k": 2.5, "source": "tushare"},
-        "PCR":  {"label": "认沽认购比", "direction": "fear", "weight": 0.04, "sigmoid_c": 0.30, "sigmoid_k": 4.0, "source": "tushare"},
+        "PCR":  {"label": "认沽认购比", "direction": "fear", "weight": 0.02, "sigmoid_c": 0.30, "sigmoid_k": 4.0, "source": "tushare"},
         "NEWF": {"label": "新发基金热度", "direction": "greed", "weight": 0.04, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "tushare"},
         "MARGIN": {"label": "融资融券", "direction": "greed", "weight": 0.04, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "tushare"},
         "RSI": {"label": "RSI指标", "direction": "fear", "weight": 0.03, "sigmoid_c": 0.50, "sigmoid_k": 2.5, "source": "tushare"},

@@ -20,10 +20,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 启动
     await init_db()
     await init_redis()
+
+    # 启动定时任务调度器（每日收盘后自动快照）
+    from app.core.scheduler import init_scheduler
+    scheduler = init_scheduler()
+
     print(f"🚀 {settings.APP_NAME} v{settings.APP_VERSION} 启动成功")
     print(f"📋 CORS origins: {settings.effective_cors_origins}")
     yield
     # 关闭
+    scheduler.shutdown(wait=False)
     await close_redis()
     await close_db()
     print("👋 应用已关闭")

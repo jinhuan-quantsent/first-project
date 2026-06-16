@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -1212,20 +1212,25 @@ async def run_backtest(
 @router.get("/signal-performance")
 async def get_signal_performance(
     index_code: str = Query(default="SH000300"),
-    days: int = Query(default=30),
+    days: int = Query(default=60, description="回看天数"),
+    forward_days: int = Query(default=0, description="前瞻天数(0=不计算, 1/5/20分别计算1/5/20日胜率)"),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """信号绩效统计"""
-    # 统一转换为 Tushare 格式（数据库存储格式）
+    """信号绩效统计（支持前瞻收益验证）
+
+    当 forward_days > 0 时，为每个信号计算 N 日后的实际涨跌幅，
+    并返回按信号等级分组的胜率、平均收益、最大/最小收益。
+    """
     ts_index_code = to_tushare(index_code)
 
-    cache_k = f"signal_perf:{ts_index_code}:{days}"
-    cached = await cache_get(cache_k)
-    if cached is not None:
-        return cached
+    cache_k = f"signal_perf:{ts_index_code}:{days}:{forward_days}"
+    if forward_days == 0:
+        cached = await cache_get(cache_k)
+        if cached is not None:
+            return cached
 
     end_date = datetime.now().date()
-    start_date = (datetime.now() - timedelta(days=days + 10)).date()
+    start_date = (datetime.now() - timedelta(days=days + max(forward_days, 10) + 5)).date()
 
     stmt = select(MarketSentiment).where(
         and_(
@@ -1233,7 +1238,7 @@ async def get_signal_performance(
             MarketSentiment.trade_date >= start_date,
             MarketSentiment.trade_date <= end_date,
         )
-    ).order_by(MarketSentiment.trade_date.desc()).limit(days)
+    ).order_by(MarketSentiment.trade_date.asc())
 
     result = await session.execute(stmt)
     records = result.scalars().all()
@@ -1250,38 +1255,114 @@ async def get_signal_performance(
             "message": "ok",
         }
 
-    signal_counts = {}
+    signal_counts: dict[str, int] = {}
     signals = []
+
+    # 如果需要前瞻收益，先加载 CLOSE 价格序列
+    close_map: dict[date, float] = {}
+    if forward_days > 0:
+        from app.models.factor_history import FactorHistory
+        price_stmt = (
+            select(FactorHistory.trade_date, FactorHistory.value)
+            .where(
+                and_(
+                    FactorHistory.index_code == ts_index_code,
+                    FactorHistory.factor_name == "CLOSE",
+                    FactorHistory.trade_date >= start_date,
+                    FactorHistory.trade_date <= end_date + timedelta(days=forward_days + 10),
+                )
+            )
+            .order_by(FactorHistory.trade_date.asc())
+        )
+        price_result = await session.execute(price_stmt)
+        for row in price_result:
+            close_map[row[0]] = row[1]
+
     for r in records:
         sl = r.signal_level or "B"
         signal_counts[sl] = signal_counts.get(sl, 0) + 1
-        signals.append({
-            "date": r.trade_date,
+        sig_entry = {
+            "date": r.trade_date.isoformat() if hasattr(r.trade_date, "isoformat") else str(r.trade_date),
             "signal_level": sl,
-            "composite_score": r.composite_score,
+            "composite_score": round(r.composite_score, 1) if r.composite_score else None,
             "confidence": r.confidence_stars,
-        })
+        }
+
+        # 前瞻收益计算
+        if forward_days > 0:
+            sig_date = r.trade_date if isinstance(r.trade_date, date) else r.trade_date
+            sig_close = close_map.get(sig_date)
+            future_date = sig_date + timedelta(days=forward_days)
+
+            # 找最近的下一个交易日价格
+            future_close = None
+            for offset in range(0, 5):  # 允许最多往后找5天
+                check_date = future_date + timedelta(days=offset)
+                if check_date in close_map:
+                    future_close = close_map[check_date]
+                    break
+
+            if sig_close and future_close and sig_close > 0:
+                forward_return = round((future_close - sig_close) / sig_close * 100, 2)
+                sig_entry["forward_return"] = forward_return
+                sig_entry["forward_days"] = forward_days
+            else:
+                sig_entry["forward_return"] = None
+
+        signals.append(sig_entry)
 
     buy_count = sum(signal_counts.get(s, 0) for s in ["S+", "S", "A"])
     sell_count = sum(signal_counts.get(s, 0) for s in ["D", "E"])
     hold_count = sum(signal_counts.get(s, 0) for s in ["B", "C"])
 
+    response_data: dict = {
+        "index_code": index_code,
+        "total_signals": len(records),
+        "signal_distribution": signal_counts,
+        "buy_signals": buy_count,
+        "sell_signals": sell_count,
+        "hold_signals": hold_count,
+        "signals": signals[:20],
+        "_data_source": "real",
+    }
+
+    # 前瞻收益按信号等级聚合
+    if forward_days > 0:
+        level_stats: dict[str, dict] = {}
+        for sig in signals:
+            sl = sig["signal_level"]
+            fr = sig.get("forward_return")
+            if fr is None:
+                continue
+            if sl not in level_stats:
+                level_stats[sl] = {"returns": [], "wins": 0, "total": 0}
+            level_stats[sl]["returns"].append(fr)
+            level_stats[sl]["total"] += 1
+            if fr > 0:
+                level_stats[sl]["wins"] += 1
+
+        accuracy: dict[str, dict] = {}
+        for sl, stats in sorted(level_stats.items()):
+            returns = stats["returns"]
+            accuracy[sl] = {
+                "count": stats["total"],
+                "win_rate": round(stats["wins"] / stats["total"] * 100, 1) if stats["total"] > 0 else 0,
+                "avg_return": round(sum(returns) / len(returns), 2) if returns else 0,
+                "max_return": round(max(returns), 2) if returns else 0,
+                "min_return": round(min(returns), 2) if returns else 0,
+                "forward_days": forward_days,
+            }
+        response_data["forward_accuracy"] = accuracy
+
     response = {
         "code": 0,
-        "data": {
-            "index_code": index_code,
-            "total_signals": len(records),
-            "signal_distribution": signal_counts,
-            "buy_signals": buy_count,
-            "sell_signals": sell_count,
-            "hold_signals": hold_count,
-            "signals": signals[:10],
-            "_data_source": "real",
-        },
+        "data": response_data,
         "message": "ok",
     }
 
-    await cache_set(cache_k, response, ttl=300)
+    # 仅基础统计缓存
+    if forward_days == 0:
+        await cache_set(cache_k, response, ttl=300)
     return response
 
 
