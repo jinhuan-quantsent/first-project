@@ -628,6 +628,7 @@ def _generate_daily_action(
     meaning = signal_meanings.get(signal_level or "", "未知")
 
     amount = 0
+    reason = f"{signal_level}级({meaning})分数{safe_score} → 持有"  # 默认，保证所有分支都能 return
 
     if action == "hold":
         reason = f"{signal_level}级({meaning})分数{safe_score} → 持有"
@@ -1097,11 +1098,10 @@ async def run_backtest(
     risk_params = RiskParams(
         max_position=rp.get("max_position", 0.95),
         min_position=rp.get("min_position", 0.05),
-        stop_loss=rp.get("stop_loss", -0.15),
-        stop_loss_threshold=rp.get("stop_loss_threshold", 1.0),
-        stop_loss_reduce_pct=rp.get("stop_loss_reduce_pct", 50.0),
-        take_profit=rp.get("take_profit", 0.30),
-        take_profit_drawdown=rp.get("take_profit_drawdown", 0.10),
+        pullback_add=rp.get("pullback_add", -0.10),
+        pullback_add_pct=rp.get("pullback_add_pct", 0.20),
+        take_profit=rp.get("take_profit", 0.20),
+        take_profit_drawdown=rp.get("take_profit_drawdown", 0.08),
         overheat_days=rp.get("overheat_days", 10),
         overheat_factor=rp.get("overheat_factor", 0.7),
         pullback_lower=rp.get("pullback_lower", -0.08),
