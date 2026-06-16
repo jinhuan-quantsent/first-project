@@ -151,7 +151,10 @@ class FactorHistoryStore:
     ) -> list[float]:
         """获取历史序列，按日期升序"""
         try:
-            cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
+            # trade_date 在 DB 中存储为 "YYYYMMDD" 格式（无横线）
+            # 必须用相同格式比较，否则字符串排序会出错
+            cutoff_date = date.today() - timedelta(days=lookback_days)
+            cutoff = cutoff_date.strftime("%Y%m%d")
             stmt = (
                 select(FactorHistory.raw_value)
                 .where(

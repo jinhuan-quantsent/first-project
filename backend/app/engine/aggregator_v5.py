@@ -104,7 +104,7 @@ class AggregatorV5:
         分歧惩罚系数：factor_std 越大 → penalty 越小 → 最终得分越靠近 50
         penalty ∈ [0.5, 1.0]
         """
-        # 线性映射：std 0 → 1.0,  std 0.35 → 0.5
+        # 线性映射：std 0 → 1.0,  std 15.0 → 0.5（Sigmoid得分范围0-100）
         penalty = self._penalty_max - (factor_std / self._std_threshold) * (
             self._penalty_max - self._penalty_min
         )
@@ -119,7 +119,7 @@ class AggregatorV5:
         mean = np.mean(scores)
         std = np.std(scores)
 
-        # 极端波动：std > 0.35
+        # 极端波动：std > 15.0（Sigmoid得分0-100范围的合理阈值）
         if std > self._std_threshold:
             return "extreme_volatility"
 

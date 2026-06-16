@@ -135,8 +135,66 @@ async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_se
     # Layer 3：加权聚合
     composite = aggregator.aggregate(sigmoid_results)
 
-    # 信号映射
-    signal_level, jump_blocked = signal_mapper.map(composite.score)
+    # 读取前一日信号（用于防跳变）
+    prev_level = None
+    prev_score = None
+    consecutive_same = 0
+    try:
+        from app.models.market_sentiment import MarketSentiment
+        from app.utils.code_format import to_tushare
+        ts_code = to_tushare(index_code)
+        stmt = (
+            select(MarketSentiment)
+            .where(
+                MarketSentiment.index_code == ts_code,
+                MarketSentiment.signal_level.isnot(None),
+            )
+            .order_by(MarketSentiment.trade_date.desc())
+            .limit(1)
+        )
+        prev_result = await db_session.execute(stmt)
+        prev_row = prev_result.scalar_one_or_none()
+        if prev_row:
+            prev_level = prev_row.signal_level
+            prev_score = prev_row.composite_score
+            # 计算连续同向天数
+            if prev_level in signal_mapper.LEVELS:
+                current_idx = signal_mapper.LEVELS.index(
+                    signal_mapper._score_to_level(composite.score)
+                )
+                prev_idx = signal_mapper.LEVELS.index(prev_level)
+                # 同向：当前信号方向与前一信号方向一致（都在B以上或B以下）
+                if (current_idx > 2 and prev_idx > 2) or (current_idx < 2 and prev_idx < 2):
+                    # 查询连续同向天数
+                    stmt2 = (
+                        select(MarketSentiment.signal_level)
+                        .where(
+                            MarketSentiment.index_code == ts_code,
+                            MarketSentiment.signal_level.isnot(None),
+                        )
+                        .order_by(MarketSentiment.trade_date.desc())
+                        .limit(5)
+                    )
+                    recent_result = await db_session.execute(stmt2)
+                    recent_levels = [r[0] for r in recent_result]
+                    for rl in recent_levels:
+                        if rl in signal_mapper.LEVELS:
+                            rl_idx = signal_mapper.LEVELS.index(rl)
+                            if (current_idx > 2 and rl_idx > 2) or (current_idx < 2 and rl_idx < 2):
+                                consecutive_same += 1
+                            else:
+                                break
+    except Exception:
+        pass  # 非关键路径，防跳变退化为基础映射
+
+    # 信号映射（传入防跳变参数）
+    score_diff = (composite.score - prev_score) if prev_score is not None else None
+    signal_level, jump_blocked = signal_mapper.map(
+        composite.score,
+        prev_level=prev_level,
+        score_diff=score_diff,
+        consecutive_same=consecutive_same,
+    )
 
     # 情绪MACD计算（需要历史composite_score序列）
     macd_data = None
@@ -188,7 +246,49 @@ async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_se
         sentiment_series=sentiment_history + [composite.score] if len(sentiment_history) >= 4 else None,
     )
 
-    return {
+    # 写入/更新 market_sentiment 表（供防跳变、每日快照使用）
+    try:
+        from app.models.market_sentiment import MarketSentiment
+        from app.utils.code_format import to_tushare
+        import json
+        ts_code = to_tushare(index_code)
+        td_date = date.fromisoformat(trade_date) if isinstance(trade_date, str) else trade_date
+
+        # 查找今日是否已有记录
+        stmt = (
+            select(MarketSentiment)
+            .where(
+                MarketSentiment.index_code == ts_code,
+                MarketSentiment.trade_date == td_date,
+            )
+        )
+        existing = await db_session.execute(stmt)
+        row = existing.scalar_one_or_none()
+
+        if row is None:
+            row = MarketSentiment(
+                index_code=ts_code,
+                index_name=index_data.get("index_name", ""),
+                trade_date=td_date,
+            )
+            db_session.add(row)
+
+        # 更新V5字段
+        row.composite_score = round(composite.score, 2)
+        row.signal_level = signal_level
+        row.confidence_stars = confidence_stars
+        row.confidence_detail = json.dumps(confidence_detail, ensure_ascii=False) if confidence_detail else None
+        row.factor_std = round(composite.divergence.factor_std, 4)
+        row.triggered_defenses = json.dumps(defenses, ensure_ascii=False) if defenses else None
+        row.divergence_index = round(composite.divergence.penalty_factor, 4)
+        row.trend_direction = composite.divergence.regime
+        row.record_time = datetime.now()
+
+        await db_session.commit()
+    except Exception:
+        pass  # 非关键路径
+
+    result = {
         "index_code": index_code,
         "index_name": index_data.get("index_name", index_code),
         "composite_score": round(composite.score, 2),

@@ -16,6 +16,8 @@ import random
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+import httpx
+
 from app.core.config import settings
 from app.core.redis_client import cache_get, cache_set
 from app.utils.code_format import (
@@ -1152,12 +1154,48 @@ async def fetch_northbound_flow() -> float:
 
 async def fetch_put_call_ratio() -> float:
     """
-    PCR 认沽认购比因子：ETF期权认沽/认购成交量比
+    PCR 认沽认购比因子：期权认沽/认购成交量比
     高PCR → 避险情绪高 → 恐惧
-    数据来源：Tushare opt_daily
-    三级降级：Tushare opt_daily → 波动率近似估算 → 默认0.85
+    四级降级：东方财富期权实时行情 → Tushare opt_daily → 波动率近似估算 → 默认0.85
     """
-    # 第一级：Tushare opt_daily
+    # 第一级：东方财富期权实时行情（免费，无需积分）
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # m:10-15 覆盖所有期权品种（50ETF/300ETF/500ETF/创业板/深100/中证1000等）
+            resp = await client.get(
+                "https://push2.eastmoney.com/api/qt/clist/get",
+                params={
+                    "pn": 1, "pz": 5000, "po": 1, "np": 1,
+                    "fltt": 2, "invt": 2, "fid": "f6",
+                    "fs": "m:10,m:11,m:12,m:13,m:14,m:15",
+                    "fields": "f12,f14,f6",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        if data.get("rc") == 0 and data.get("data", {}).get("diff"):
+            items = data["data"]["diff"]
+            put_vol = 0.0
+            call_vol = 0.0
+            for item in items:
+                name = item.get("f14", "")
+                vol = item.get("f6", 0)
+                if not isinstance(vol, (int, float)):
+                    continue
+                if "沽" in name:
+                    put_vol += vol
+                elif "购" in name:
+                    call_vol += vol
+
+            if call_vol > 0:
+                pcr = put_vol / call_vol
+                logger.info("PCR 东方财富: put=%.0f call=%.0f pcr=%.4f", put_vol, call_vol, pcr)
+                return round(max(0.1, min(5.0, pcr)), 4)
+    except Exception as e:
+        logger.warning("PCR 东方财富降级: %s", e)
+
+    # 第二级：Tushare opt_daily（需高积分，2000分通常不够）
     try:
         if data_source._tushare_pro:
             today = date.today()
@@ -1194,7 +1232,7 @@ async def fetch_put_call_ratio() -> float:
     except Exception as e:
         logger.warning("PCR opt_daily降级: %s", e)
 
-    # 第二级：波动率近似估算
+    # 第三级：波动率近似估算
     try:
         d = await data_source.get_index_data("SH000300")
         vol = float(d.get("volatility", 20))
@@ -1204,7 +1242,7 @@ async def fetch_put_call_ratio() -> float:
     except Exception as e:
         logger.warning("PCR 波动率估算降级: %s", e)
 
-    # 第三级：默认经验值
+    # 第四级：默认经验值
     return 0.85
 
 
