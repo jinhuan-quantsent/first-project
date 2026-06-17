@@ -70,8 +70,6 @@ class BacktestConfig:
     start_date: str = "2024-01-01"
     end_date: str = "2024-12-31"
     initial_capital: float = 100000.0
-    commission_rate: float = 0.0015  # 基金申购费率0.15%
-    stamp_tax_rate: float = 0.005   # 基金赎回费率0.5%（持有<7天）
     signal_strategy: str = "v5_signal"
 
     # Category 1: 信号映射
@@ -87,6 +85,12 @@ class BacktestConfig:
     action_mapping: dict[str, ActionRule] = field(default_factory=lambda: {
         k: ActionRule(**v) for k, v in DEFAULT_ACTION_MAPPING.items()
     })
+
+    # Category 4: 因子引擎（V5 完整方案 — 回测实时计算信号）
+    quantile_window: int = 1260               # 分位数窗口（5年×252交易日）
+    sigmoid_k: dict[str, float] = field(default_factory=dict)  # 每因子 Sigmoid 陡峭度
+    composite_method: str = "weighted_sum"    # 聚合方式: weighted_sum / geometric_mean
+    neutral_score: float = 50.0              # 中性分数
 
     # Category 5: 风控参数
     risk_params: RiskParams = field(default_factory=RiskParams)
@@ -287,8 +291,7 @@ class BacktestEngine:
                 _, sell_shares, reason = risk_override
                 actual_sell = min(sell_shares, shares)
                 sell_amount = actual_sell * close
-                commission = sell_amount * (config.commission_rate + config.stamp_tax_rate)
-                net_amount = sell_amount - commission
+                net_amount = sell_amount
 
                 shares -= actual_sell
                 shares = max(0, shares)
@@ -299,7 +302,7 @@ class BacktestEngine:
                     trade_date=d, trade_type="risk_sell",
                     signal_level=effective_signal,
                     price=round(close, 4), shares=round(actual_sell, 2),
-                    amount=round(net_amount, 2), commission=round(commission, 2),
+                    amount=round(net_amount, 2), commission=0,
                     reason=reason,
                 )
             elif action.action_type == "buy":
@@ -310,8 +313,7 @@ class BacktestEngine:
                     if buy_amount > cash:
                         buy_amount = cash * 0.95  # 留5%现金缓冲
                     if buy_amount > 0:
-                        commission = buy_amount * config.commission_rate
-                        actual_buy = buy_amount - commission
+                        actual_buy = buy_amount
                         buy_shares = actual_buy / close
                         shares += buy_shares
                         cash -= buy_amount
@@ -320,7 +322,7 @@ class BacktestEngine:
                             trade_date=d, trade_type="buy",
                             signal_level=effective_signal,
                             price=round(close, 4), shares=round(buy_shares, 2),
-                            amount=round(actual_buy, 2), commission=round(commission, 2),
+                            amount=round(actual_buy, 2), commission=0,
                             reason=f"信号{effective_signal}→{action.label}",
                         )
                     else:
@@ -333,8 +335,7 @@ class BacktestEngine:
                 else:
                     sell_shares = shares * action.multiplier
                     sell_amount = sell_shares * close
-                    commission = sell_amount * (config.commission_rate + config.stamp_tax_rate)
-                    net_amount = sell_amount - commission
+                    net_amount = sell_amount
                     shares -= sell_shares
                     cash += net_amount
                     action_text = f"减仓 ¥{sell_amount:,.0f}"
@@ -342,7 +343,7 @@ class BacktestEngine:
                         trade_date=d, trade_type="sell",
                         signal_level=effective_signal,
                         price=round(close, 4), shares=round(sell_shares, 2),
-                        amount=round(net_amount, 2), commission=round(commission, 2),
+                        amount=round(net_amount, 2), commission=0,
                         reason=f"信号{effective_signal}→{action.label}",
                     )
             elif action.action_type == "sell_all":
@@ -352,8 +353,7 @@ class BacktestEngine:
                     action_text = "持有(仓位达下限)"
                 else:
                     sell_amount = shares * close
-                    commission = sell_amount * (config.commission_rate + config.stamp_tax_rate)
-                    net_amount = sell_amount - commission
+                    net_amount = sell_amount
                     shares = 0
                     cash += net_amount
                     action_text = f"清仓 ¥{sell_amount:,.0f}"
@@ -361,7 +361,7 @@ class BacktestEngine:
                         trade_date=d, trade_type="sell",
                         signal_level=effective_signal,
                         price=round(close, 4), shares=round(shares, 2),
-                        amount=round(net_amount, 2), commission=round(commission, 2),
+                        amount=round(net_amount, 2), commission=0,
                         reason=f"信号{effective_signal}→{action.label}",
                     )
             else:
@@ -371,8 +371,7 @@ class BacktestEngine:
             if r2_drawdown_add and shares > 0:
                 add_amount = position_value * rp.pullback_add_pct
                 if add_amount > 0 and add_amount <= cash * 0.95:
-                    commission = add_amount * config.commission_rate
-                    actual_buy = add_amount - commission
+                    actual_buy = add_amount
                     buy_shares_r2 = actual_buy / close
                     shares += buy_shares_r2
                     cash -= add_amount
@@ -384,7 +383,7 @@ class BacktestEngine:
                         trade_date=d, trade_type="buy",
                         signal_level=effective_signal,
                         price=round(close, 4), shares=round(buy_shares_r2, 2),
-                        amount=round(actual_buy, 2), commission=round(commission, 2),
+                        amount=round(actual_buy, 2), commission=0,
                         reason=f"回撤{total_return_rate*100:.1f}%≤加仓线{rp.pullback_add*100:.0f}%",
                     )
 
@@ -395,8 +394,7 @@ class BacktestEngine:
                 if drawdown_from_peak <= rp.pullback_lower and drawdown_from_peak > rp.pullback_lower * 2.5:
                     buy_amount = rp.base_buy_amount * rp.pullback_buy_mult
                     if buy_amount <= cash * 0.95:
-                        commission = buy_amount * config.commission_rate
-                        actual_buy = buy_amount - commission
+                        actual_buy = buy_amount
                         buy_shares = actual_buy / close
                         shares += buy_shares
                         cash -= buy_amount
@@ -406,15 +404,14 @@ class BacktestEngine:
                             trade_date=d, trade_type="buy",
                             signal_level=effective_signal,
                             price=round(close, 4), shares=round(buy_shares, 2),
-                            amount=round(actual_buy, 2), commission=round(commission, 2),
+                            amount=round(actual_buy, 2), commission=0,
                             reason=f"回调{drawdown_from_peak*100:.1f}%≤下限{rp.pullback_lower*100:.0f}%",
                         )
                 # 偏离加仓
                 elif position_ratio < (1 + rp.position_dev_lower) and position_ratio > 0 and action_text == "持有":
                     buy_amount = rp.base_buy_amount * rp.position_dev_buy_mult
                     if buy_amount <= cash * 0.95:
-                        commission = buy_amount * config.commission_rate
-                        actual_buy = buy_amount - commission
+                        actual_buy = buy_amount
                         buy_shares = actual_buy / close
                         shares += buy_shares
                         cash -= buy_amount
@@ -424,7 +421,7 @@ class BacktestEngine:
                             trade_date=d, trade_type="buy",
                             signal_level=effective_signal,
                             price=round(close, 4), shares=round(buy_shares, 2),
-                            amount=round(actual_buy, 2), commission=round(commission, 2),
+                            amount=round(actual_buy, 2), commission=0,
                             reason=f"仓位{position_ratio*100:.1f}%偏离下限{(1+rp.position_dev_lower)*100:.0f}%",
                         )
 

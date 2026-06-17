@@ -79,8 +79,8 @@ class BacktestRequest(BaseModel):
     action_mapping: dict[str, ActionMappingItem] = {}
 
     # Category 4: Factor Engine
-    quantile_window: int = 252
-    sigmoid_k: float = 3.0
+    quantile_window: int = 1260
+    sigmoid_k: dict[str, float] = {}
     composite_method: str = "weighted_sum"
     neutral_score: float = 50.0
 
@@ -365,17 +365,21 @@ async def _compute_signals_from_index(
     factor_weights: dict[str, float] | None = None,
     factor_enabled: dict[str, bool] | None = None,
     signal_boundaries: list[float] | None = None,
+    quantile_window: int = 1260,
+    sigmoid_k: dict[str, float] | None = None,
+    composite_method: str = "weighted_sum",
+    neutral_score: float = 50.0,
 ) -> dict[str, dict]:
     """
     从指数历史日线实时计算信号（当数据库无历史信号时使用）
 
-    计算逻辑（基于价格动量的简化信号）：
+    计算逻辑（基于价格动量的简化信号，受因子引擎参数影响）：
     1. RSI(14): 标准RSI → 反转映射（低RSI=恐惧=高分数）
-    2. 近20日涨跌幅: 涨多=贪婪=低分数
-    3. 近20日波动率: 高波动=恐惧=高分数
-    三因子加权 → 综合分数 → 7级信号
+    2. 近N日涨跌幅: 涨多=贪婪=低分数（N由quantile_window驱动）
+    3. 近N日波动率: 高波动=恐惧=高分数
+    三因子加权 → Sigmoid变换(受sigmoid_k控制) → 综合分数 → 7级信号
 
-    支持自定义因子权重和信号边界。
+    支持自定义因子权重、信号边界、分位数窗口、Sigmoid陡峭度、聚合方式、中性分数。
     """
 
     # 因子权重映射：前端11因子 → 后端5个计算因子权重
@@ -405,8 +409,9 @@ async def _compute_signals_from_index(
         if not data_source._tushare_pro:
             return {}
 
-        # 需要额外的历史数据做RSI/波动率计算，往前多取30天
-        extended_start_dt = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=45)).strftime("%Y%m%d")
+        # 需要额外的历史数据做RSI/波动率计算，往前多取 quantile_window/5 天（至少45天）
+        extra_days = max(45, quantile_window // 5)
+        extended_start_dt = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=extra_days)).strftime("%Y%m%d")
         end_dt = end_date.replace("-", "")
 
         df = data_source._tushare_pro.index_daily(
@@ -439,27 +444,30 @@ async def _compute_signals_from_index(
 
         rsi_list = calc_rsi(pct_chgs)
 
-        # 计算近20日涨跌幅和波动率
-        def calc_20day_metrics(closes_list: list[float], dates_list: list[str],
-                               start_dt_str: str) -> dict[str, dict]:
+        # 计算 Rolling 指标（窗口由 quantile_window 驱动，映射到合理范围）
+        # quantile_window 范围 252~2520，映射到 lookback 20~120 日
+        lookback = max(20, min(120, quantile_window // 20))
+
+        def calc_rolling_metrics(closes_list: list[float], dates_list: list[str],
+                                start_dt_str: str, lb: int) -> dict[str, dict]:
             result = {}
             for i in range(len(closes_list)):
                 date_str = str(dates_list[i])
                 if date_str < start_dt_str:
                     continue
 
-                # 近20日涨跌幅
-                if i >= 20:
-                    ret_20 = (closes_list[i] / closes_list[i-20] - 1) * 100
+                # 近lb日涨跌幅
+                if i >= lb:
+                    ret_lb = (closes_list[i] / closes_list[i-lb] - 1) * 100
                 else:
-                    ret_20 = 0.0
+                    ret_lb = 0.0
 
-                # 近20日波动率（日收益率标准差 * sqrt(252))
-                if i >= 20:
-                    recent_returns = [(closes_list[j] / closes_list[j-1] - 1) for j in range(i-19, i+1)]
-                    vol_20 = (sum(r**2 for r in recent_returns) / len(recent_returns) ** 0.5) * (252 ** 0.5) * 100
+                # 近lb日波动率（日收益率标准差 * sqrt(252))
+                if i >= lb:
+                    recent_returns = [(closes_list[j] / closes_list[j-1] - 1) for j in range(i-lb+1, i+1)]
+                    vol_lb = (sum(r**2 for r in recent_returns) / len(recent_returns) ** 0.5) * (252 ** 0.5) * 100
                 else:
-                    vol_20 = 20.0  # 默认中等波动
+                    vol_lb = 20.0  # 默认中等波动
 
                 # 近5日涨跌幅（短期动量）
                 if i >= 5:
@@ -475,52 +483,100 @@ async def _compute_signals_from_index(
 
                 result[date_str] = {
                     "rsi": rsi,
-                    "ret_20": ret_20,
+                    "ret_lb": ret_lb,
                     "ret_5": ret_5,
-                    "vol_20": vol_20,
+                    "vol_lb": vol_lb,
                     "drawdown": drawdown_from_peak,
                 }
             return result
 
         start_dt_str = start_date.replace("-", "")
-        metrics = calc_20day_metrics(closes, dates, start_dt_str)
+        metrics = calc_rolling_metrics(closes, dates, start_dt_str, lookback)
 
-        # 综合分数计算（5因子+趋势+回撤，高灵敏度）
-        # 恐惧(高分数) = 低RSI + 跌得多 + 高波动 + 价格低于均线 + 距峰值远
-        # 贪婪(低分数) = 高RSI + 涨得多 + 低波动 + 价格高于均线 + 创新高
+        # Sigmoid 变换函数：对原始分数施加 S 曲线，k 控制陡峭度
+        def _sigmoid_transform(score: float, k: float) -> float:
+            """将 0-100 分数做 Sigmoid 变换，k 越大越陡（0附近敏感，两端饱和）"""
+            if k <= 0:
+                return score
+            x = (score - 50) / 50  # 归一化到 [-1, 1]
+            import math
+            transformed = 1 / (1 + math.exp(-k * x))  # sigmoid
+            return transformed * 100  # 映射回 0-100
+
+        # 综合分数计算 — 受 sigmoid_k / composite_method / neutral_score 影响
         signals = {}
         for date_str, m in metrics.items():
             # 1. RSI反转: 放大偏离度2x → 更灵敏
             rsi_dev = (m["rsi"] - 50) * 2.0
             rsi_score = max(0, min(100, 50 - rsi_dev))
 
-            # 2. 近20日涨跌幅: 7x灵敏度
-            # -7%→99(恐惧), +7%→1(贪婪), 0%→50(中性)
-            ret_score = max(0, min(100, 50 - m["ret_20"] * 7))
+            # 2. 近lb日涨跌幅: 7x灵敏度
+            ret_score = max(0, min(100, 50 - m["ret_lb"] * 7))
 
             # 3. 波动率: 15%→50, 25%→75, 35%→100
-            vol_score = max(0, min(100, 50 + (m["vol_20"] - 15) * 2.5))
+            vol_score = max(0, min(100, 50 + (m["vol_lb"] - 15) * 2.5))
 
             # 4. 近5日动量: 10x灵敏度（日度波动更敏感）
             mom_score = max(0, min(100, 50 - m["ret_5"] * 10))
 
-            # 5. 距60日峰值回撤: 跌5%→60分(偏恐), 跌10%→80分(恐), 跌15%→95分(极恐)
-            # 创新高→15分(极贪)
+            # 5. 距60日峰值回撤
             dd_score = max(0, min(100, 50 - m["drawdown"] * 3))
 
-            # 趋势检测: 价格与20日均线的关系
+            # 趋势检测: 价格与lb日均线的关系
             date_idx = dates.index(date_str) if date_str in dates else -1
             trend_bonus = 0
-            if date_idx >= 20:
-                ma20 = sum(closes[date_idx-19:date_idx+1]) / 20
+            if date_idx >= lookback:
+                ma_lb = sum(closes[date_idx-lookback+1:date_idx+1]) / lookback
                 current_close = closes[date_idx]
-                dev_pct = (current_close / ma20 - 1) * 100
+                dev_pct = (current_close / ma_lb - 1) * 100
                 trend_bonus = max(-20, min(20, -dev_pct * 3))
+
+            # Sigmoid 变换: 用每因子 sigmoid_k 增强敏感度
+            # 映射: 6个后端计算因子 → sigmoid_k 中的因子名
+            _FACTOR_SOLDIER_MAP = {
+                "rsi": ["RSI", "NBF"],           # RSI类
+                "ret": ["ADR", "POS", "ERP"],     # 涨跌幅类
+                "vol": ["VOL", "TURN"],            # 波动率类
+                "mom": ["FLOW", "ETF", "NEWF"],    # 动量类
+                "dd": ["NHNL", "PCR", "MARGIN"],   # 回撤类
+                "trend": ["INDUSTRY_DIVERGENCE"],  # 趋势类
+            }
+            def _get_soldier_k(factor_group: str) -> float:
+                """取该因子组对应的前端 sigmoid_k 平均值"""
+                names = _FACTOR_SOLDIER_MAP.get(factor_group, [])
+                if not sigmoid_k:
+                    return 0  # 未传 sigmoid_k 时不做变换
+                k_vals = [sigmoid_k[n] for n in names if n in sigmoid_k]
+                return sum(k_vals) / len(k_vals) if k_vals else 0
+
+            rsi_score = _sigmoid_transform(rsi_score, _get_soldier_k("rsi"))
+            ret_score = _sigmoid_transform(ret_score, _get_soldier_k("ret"))
+            vol_score = _sigmoid_transform(vol_score, _get_soldier_k("vol"))
+            mom_score = _sigmoid_transform(mom_score, _get_soldier_k("mom"))
+            dd_score = _sigmoid_transform(dd_score, _get_soldier_k("dd"))
 
             # 加权聚合: 使用自定义因子权重（如提供）
             w_rsi, w_ret, w_vol, w_mom, w_dd, w_trend = _map_weights(factor_weights, factor_enabled)
-            raw_composite = rsi_score * w_rsi + ret_score * w_ret + vol_score * w_vol + mom_score * w_mom + dd_score * w_dd + trend_bonus * w_trend
-            composite = raw_composite
+
+            if composite_method == "geometric_mean":
+                # 几何平均: 避免极端因子被平均掉
+                import math
+                eps = 0.01
+                scores = [
+                    max(rsi_score, eps) ** w_rsi,
+                    max(ret_score, eps) ** w_ret,
+                    max(vol_score, eps) ** w_vol,
+                    max(mom_score, eps) ** w_mom,
+                    max(dd_score, eps) ** w_dd,
+                ]
+                raw_composite = math.prod(scores) ** (1 / max(sum([w_rsi, w_ret, w_vol, w_mom, w_dd]), 0.01))
+                raw_composite += trend_bonus * w_trend
+            else:
+                # weighted_sum (默认)
+                raw_composite = rsi_score * w_rsi + ret_score * w_ret + vol_score * w_vol + mom_score * w_mom + dd_score * w_dd + trend_bonus * w_trend
+
+            # 中性分数偏移: neutral_score=50 时无偏移，>50 向恐惧偏移，<50 向贪婪偏移
+            composite = raw_composite + (neutral_score - 50)
 
             # 分数→信号等级（支持自定义边界）
             def _score_to_signal(s: float) -> str:
@@ -818,15 +874,19 @@ async def _run_daily_tracking_backtest(
     nav_dates = set(item["date"] for item in nav_data)
     db_coverage = len(set(signal_map_db.keys()) & nav_dates) / max(len(nav_dates), 1) if signal_map_db else 0
 
-    if db_coverage >= 0.5:
-        # 数据库覆盖率足够，使用数据库信号
+    if db_coverage >= 0.5 and not (req.sigmoid_k or req.composite_method != "weighted_sum" or req.neutral_score != 50.0):
+        # 数据库覆盖率足够且无自定义因子引擎参数，使用数据库信号
         signal_map = signal_map_db
         _logger.info("回测信号: 数据库覆盖率 %.0f%%，使用数据库信号", db_coverage * 100)
     else:
-        # 数据库覆盖率不足，实时计算信号
+        # 数据库覆盖率不足 或 有自定义因子引擎参数 → 实时计算信号
         signal_map = await _compute_signals_from_index(
             signal_index_code, req.start_date, req.end_date,
             req.factor_weights or None, req.factor_enabled or None, req.signal_boundaries or None,
+            quantile_window=req.quantile_window,
+            sigmoid_k=req.sigmoid_k or None,
+            composite_method=req.composite_method,
+            neutral_score=req.neutral_score,
         )
         _logger.info("回测信号: 数据库覆盖率 %.0f%%不足，使用实时计算信号(%d天)", db_coverage * 100, len(signal_map))
         # 如果实时计算也失败，仍然尝试数据库（即使覆盖率低，也比全是B好）
@@ -1038,10 +1098,11 @@ async def run_backtest(
 
     数据源降级链：Tushare真实日线 + factor_history信号 → Mock
     """
-    # 检查缓存（包含 action_mapping 的 hash，避免参数变化但命中旧缓存）
+    # 检查缓存（包含 action_mapping + 因子引擎参数的 hash，避免参数变化但命中旧缓存）
     import hashlib
     action_hash = hashlib.md5(str(req.action_mapping).encode()).hexdigest()[:8]
-    cache_k = f"backtest:{req.index_code}:{req.fund_code or ''}:{req.start_date}:{req.end_date}:{req.signal_strategy}:{action_hash}:{hash(str(req.risk_params))}"
+    engine_hash = hashlib.md5(f"{req.quantile_window}:{req.sigmoid_k}:{req.composite_method}:{req.neutral_score}".encode()).hexdigest()[:8]
+    cache_k = f"backtest:{req.index_code}:{req.fund_code or ''}:{req.start_date}:{req.end_date}:{req.signal_strategy}:{action_hash}:{engine_hash}:{hash(str(req.risk_params))}"
     cached = await cache_get(cache_k)
     if cached is not None:
         return cached
@@ -1070,9 +1131,32 @@ async def run_backtest(
     else:
         price_data = await _get_real_price_data(req.index_code, req.start_date, req.end_date)
 
-    # 2. 获取信号数据：基金回测时使用沪深300的市场情绪（基金没有自己的信号等级）
+    # 2. 获取信号数据：当因子引擎参数存在时，实时计算信号（完整方案）
     signal_index_code = "SH000300" if req.fund_code else req.index_code
-    signal_map = await _get_real_signal_data(signal_index_code, req.start_date, req.end_date, session)
+
+    # 判断是否使用因子引擎实时计算（quantile_window/sigmoid_k/composite_method/neutral_score 有值即启用）
+    use_realtime = bool(req.sigmoid_k or req.quantile_window != 1260 or req.composite_method != "weighted_sum" or req.neutral_score != 50.0)
+
+    if use_realtime:
+        # 完整方案: 因子引擎参数驱动实时信号计算
+        signal_map_raw = await _compute_signals_from_index(
+            signal_index_code, req.start_date, req.end_date,
+            factor_weights=req.factor_weights or None,
+            factor_enabled=req.factor_enabled or None,
+            signal_boundaries=req.signal_boundaries or None,
+            quantile_window=req.quantile_window,
+            sigmoid_k=req.sigmoid_k or None,
+            composite_method=req.composite_method,
+            neutral_score=req.neutral_score,
+        )
+        # _compute_signals_from_index 返回 {date_str: {signal_level, composite_score, _source}}
+        # 需要转为 price_data 兼容的 {date_str: signal_level}
+        signal_map = {k: v["signal_level"] for k, v in signal_map_raw.items() if isinstance(v, dict)}
+        _logger.info("回测信号: 因子引擎实时计算(quantile_window=%d, sigmoid_k=%d因子, method=%s)",
+                     req.quantile_window, len(req.sigmoid_k or {}), req.composite_method)
+    else:
+        signal_map = await _get_real_signal_data(signal_index_code, req.start_date, req.end_date, session)
+        _logger.info("回测信号: 数据库预存信号(%d天)", len(signal_map))
 
     # 3. 合并信号到价格数据
     if price_data and signal_map:
@@ -1124,6 +1208,10 @@ async def run_backtest(
         sell_signals=req.sell_signals,
         hold_signals=req.hold_signals,
         action_mapping=action_mapping,
+        quantile_window=req.quantile_window,
+        sigmoid_k=req.sigmoid_k or {},
+        composite_method=req.composite_method,
+        neutral_score=req.neutral_score,
         risk_params=risk_params,
     )
 

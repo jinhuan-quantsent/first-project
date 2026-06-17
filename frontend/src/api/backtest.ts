@@ -127,7 +127,7 @@ export async function runBacktestV5(params: {
   factor_enabled?: Record<string, boolean>;
   action_mapping?: Record<string, ActionRule>;
   quantile_window?: number;
-  sigmoid_k?: number;
+  sigmoid_k?: Record<string, number>;
   composite_method?: string;
   neutral_score?: number;
   risk_params?: Record<string, number>;
