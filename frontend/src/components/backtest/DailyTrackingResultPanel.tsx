@@ -15,7 +15,7 @@ export function DailyTrackingResultPanel({ result, strategyName }: { result: Bac
   };
 
   const actionLabel: Record<string, string> = {
-    buy: '加仓', sell: '减仓', hold: '持有', none: '—',
+    buy: '加仓', sell: '减仓', sell_half: '减半仓', sell_all: '清仓', hold: '持有', none: '—',
   };
 
   const [page, setPage] = useState(0);
@@ -25,8 +25,8 @@ export function DailyTrackingResultPanel({ result, strategyName }: { result: Bac
 
   // 操作标记
   const actionMarkers = tracking
-    .filter(t => t.action === 'buy' || t.action === 'sell')
-    .map(t => ({ date: t.date, type: t.action as 'buy' | 'sell' }));
+    .filter(t => t.action === 'buy' || t.action === 'sell' || t.action === 'sell_half' || t.action === 'sell_all')
+    .map(t => ({ date: t.date, type: (t.action.startsWith('sell') ? 'sell' : 'buy') as 'buy' | 'sell' }));
 
   const initCap = result.initial_capital || 100000;
   const finalVal = result.final_portfolio_value || 0;

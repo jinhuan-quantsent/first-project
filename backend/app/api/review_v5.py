@@ -710,8 +710,9 @@ def _generate_daily_action(
             amount = target_amount
             reason = f"{signal_level}级({meaning})分数{safe_score} → 加仓{amount}元({ratio*100:.0f}%现金)"
 
-    elif action == "sell":
-        if is_clear:
+    elif action == "sell" or action.startswith("sell_"):
+        # sell / sell_half / sell_all 都走减仓逻辑
+        if is_clear or action == "sell_all":
             # E级清仓
             amount = round(current_position)
             if amount <= 0:
@@ -720,6 +721,15 @@ def _generate_daily_action(
                 reason = f"{signal_level}级({meaning})分数{safe_score} → 建议清仓，持仓已空，策略结束"
             else:
                 reason = f"{signal_level}级({meaning})分数{safe_score} → 清仓{amount}元，策略结束"
+        elif action == "sell_half":
+            # sell_half: 减部分仓（ratio 为卖出比例，如 0.3 = 卖30%持仓）
+            amount = round(current_position * ratio)
+            if amount <= 0 or current_position <= 0:
+                action = "hold"
+                amount = 0
+                reason = f"{signal_level}级({meaning})分数{safe_score} → 建议减仓，持仓已空，持有"
+            else:
+                reason = f"{signal_level}级({meaning})分数{safe_score} → 减仓{amount}元({ratio*100:.0f}%仓位)"
         else:
             # C/D级减仓 = position × ratio
             amount = round(current_position * ratio)
