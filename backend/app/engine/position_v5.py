@@ -120,6 +120,7 @@ class PositionEngineV5:
             "cost_rejected": cost_rejected,
             "frequency_blocked": frequency_blocked,
             "reason": reason,
+            "trend_text": "",  # 方案B: 趋势卫士文案（后续实现计算逻辑）
         }
 
     def _pct_to_level(self, pct: float) -> str:
@@ -204,3 +205,27 @@ class PositionEngineV5:
             f"置信度：{stars_str}，"
             f"建议仓位从「{current_level}」调整至「{target_pct:.0%}」"
         )
+
+
+# ============================================================
+# 方案B: 趋势卫士
+# ============================================================
+async def calculate_trend_guard(fund_code: str, signal_level: str, fund_type: str = "unknown") -> str:
+    """
+    计算趋势卫士文案（MA20+MACD双指标趋势判定）
+    
+    返回趋势解读文案（trend_text），不修改仓位百分比
+    """
+    # 检查配置开关
+    if not settings.ENABLE_TREND_GUARD:
+        return ""
+    
+    # TODO: 实现NAV历史数据获取逻辑
+    # 当前使用占位逻辑，后续接入fund_nav表数据
+    
+    # 占位返回值（默认无文案）
+    return ""
+
+
+# 导出函数
+__all__ = ["PositionEngineV5", "calculate_trend_guard"]

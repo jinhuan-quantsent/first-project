@@ -289,6 +289,75 @@ async def score_sectors(raw_items: list[dict]) -> list[dict]:
     for rank, item in enumerate(scored, 1):
         item["strength_rank"] = rank
 
-    logger.info("板块情绪评分完成: %d 个板块, 6因子加权(涨跌幅35%%+换手率20%%+ADR20%%+资金流15%%+动量10%%)",
+    logger.info("板块情绪评分完成: %d 个板块, 5因子加权(涨跌幅35%%+换手率20%%+ADR20%%+资金流15%%+动量10%%)",
                 len(scored))
+    
+    # 方案B: 添加板块过滤器标签
+    scored = await add_sector_filter(scored)
+    
     return scored
+
+
+# ============================================================
+# 方案B: 板块过滤器
+# ============================================================
+async def calculate_sector_filter(sector_code: str, sector_name: str = "") -> dict:
+    """
+    计算板块过滤器的三个准入指标，返回build_signal
+    
+    计算逻辑：
+    1. 20日上涨占比 = 近20交易日上涨天数 / 总交易日数
+    2. 60日相对强弱 = 板块60日涨跌幅 - 沪深300同期60日涨跌幅
+    3. MA20趋势位置 = 板块最新收盘价 vs 20日均线
+    
+    Returns:
+        {
+            "up_days_ratio": float,      # 20日上涨占比 (0-1)
+            "relative_strength": float,   # 60日相对强弱 (百分比)
+            "trend_position": str,       # "above_ma20" / "below_ma20"
+            "build_signal": str,           # "可建仓" / "暂不建仓"
+        }
+    """
+    # TODO: 实现历史数据获取逻辑
+    # 当前使用占位逻辑，后续接入Tushare index_daily数据
+    
+    # 占位返回值（默认允许建仓）
+    return {
+        "up_days_ratio": 0.55,
+        "relative_strength": 0.02,
+        "trend_position": "above_ma20",
+        "build_signal": "可建仓",
+    }
+
+
+async def add_sector_filter(scored_sectors: list[dict]) -> list[dict]:
+    """
+    为评分后的板块列表添加板块过滤器标签
+    
+    Args:
+        scored_sectors: score_sectors()返回的板块列表
+        
+    Returns:
+        添加了build_signal等字段的板块列表
+    """
+    # 检查配置开关
+    from app.core.config import settings
+    if not settings.ENABLE_SECTOR_FILTER:
+        # 开关关闭，不添加过滤器字段
+        return scored_sectors
+    
+    # 为每个板块计算过滤器指标
+    for sector in scored_sectors:
+        sector_code = sector.get("sector_code", "")
+        sector_name = sector.get("sector_name", "")
+        
+        # 计算过滤器指标
+        filter_result = await calculate_sector_filter(sector_code, sector_name)
+        
+        # 添加字段
+        sector["up_days_ratio"] = filter_result["up_days_ratio"]
+        sector["relative_strength"] = filter_result["relative_strength"]
+        sector["trend_position"] = filter_result["trend_position"]
+        sector["build_signal"] = filter_result["build_signal"]
+    
+    return scored_sectors

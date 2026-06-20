@@ -197,6 +197,29 @@ class Settings(BaseSettings):
     V5_DEFENSE_PRICE_DIVERGENCE: bool = True    # 防线3: 价格-情绪背离
     V5_DEFENSE_FACTOR_STD: bool = True         # 防线4: 因子分歧度>阈值
 
+    # ============================================================
+    # 方案B: 板块过滤器 + 趋势卫士
+    # ============================================================
+    # --- 板块过滤器开关 ---
+    ENABLE_SECTOR_FILTER: bool = False  # 板块过滤器（建仓拦截）
+
+    # --- 趋势卫士开关 ---
+    ENABLE_TREND_GUARD: bool = False   # 趋势卫士（持仓文案引导）
+
+    # --- 板块过滤器阈值 (可选，默认使用硬编码值) ---
+    SECTOR_FILTER_UP_DAYS_RATIO_THRESHOLD: float = 0.50   # 20日上涨占比阈值 (50%)
+    SECTOR_FILTER_RELATIVE_STRENGTH_THRESHOLD: float = -0.03  # 60日相对强弱阈值 (-3%)
+    SECTOR_FILTER_MA20_POSITION_THRESHOLD: float = 0.0      # MA20趋势位置阈值 (价格>MA20)
+
+    # --- 趋势卫士参数 (可选，默认使用硬编码值) ---
+    TREND_GUARD_MA20_PERIOD: int = 20           # MA20计算周期
+    TREND_GUARD_MACD_FAST: int = 12           # MACD快线周期
+    TREND_GUARD_MACD_SLOW: int = 26           # MACD慢线周期
+    TREND_GUARD_MACD_SIGNAL: int = 9          # MACD信号线周期
+    TREND_GUARD_OSCILLATION_DAYS: int = 20   # 震荡判断周期
+    TREND_GUARD_OSCILLATION_CROSS_THRESHOLD: int = 3  # 震荡判断穿越次数阈值
+    TREND_GUARD_OSCILLATION_AMPLITUDE_THRESHOLD: float = 0.05  # 震荡判断振幅阈值 (5%)
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
