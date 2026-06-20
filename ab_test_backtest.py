@@ -49,13 +49,20 @@ def load_historical_nav(fund_code: str) -> Dict[str, float]:
     """
     从 historical_data/ 目录加载真实净值数据
     
+    如果本地文件不存在，自动从 Tushare 拉取并保存
+    
     Returns:
         日期到净值的映射字典，例如 {"2025-01-02": 3.358, "2025-01-03": 3.325}
     """
     data_file = os.path.join(HISTORICAL_DATA_DIR, f"{fund_code}.json")
     
+    # 如果本地文件不存在，自动拉取
     if not os.path.exists(data_file):
-        print(f"⚠️ 基金 {fund_code} 的历史数据文件不存在")
+        print(f"⚠️ 基金 {fund_code} 的本地数据不存在，自动从 Tushare 拉取...")
+        _auto_download_fund_nav(fund_code)
+    
+    if not os.path.exists(data_file):
+        print(f"❌ 基金 {fund_code} 数据拉取失败")
         return {}
     
     try:
@@ -65,22 +72,92 @@ def load_historical_nav(fund_code: str) -> Dict[str, float]:
         # 转换为日期到净值的映射（统一格式为 YYYY-MM-DD）
         nav_map = {}
         for item in data:
-            # 将 YYYYMMDD 格式转换为 YYYY-MM-DD 格式
+            # 确保日期格式是 YYYY-MM-DD
             date_str = item["date"]
-            if len(date_str) == 8 and date_str.count("-") == 0:
-                # YYYYMMDD 格式
-                formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
-            else:
-                # 已经是 YYYY-MM-DD 格式
-                formatted_date = date_str
+            if len(date_str) == 8 and "-" not in date_str:
+                # YYYYMMDD 格式，转换为 YYYY-MM-DD
+                date_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
             
-            nav_map[formatted_date] = item["nav"]
+            nav_map[date_str] = item["nav"]
         
         return nav_map
         
     except Exception as e:
         print(f"❌ 加载 {fund_code} 历史数据失败：{e}")
         return {}
+
+
+def _auto_download_fund_nav(fund_code: str, start_date: str = "20250101", end_date: str = "20260620"):
+    """
+    自动从 Tushare 下载基金净值数据并保存
+    
+    Args:
+        fund_code: 基金代码，例如 "110022"
+        start_date: 起始日期，格式 "YYYYMMDD"
+        end_date: 结束日期，格式 "YYYYMMDD"
+    """
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        import os
+        import tushare as ts
+        
+        token = os.getenv("TUSHARE_TOKEN")
+        if not token:
+            print("❌ 未配置 TUSHARE_TOKEN")
+            return
+        
+        ts.set_token(token)
+        pro = ts.pro_api()
+        
+        # 转换基金代码格式
+        if not fund_code.endswith(".OF"):
+            ts_code = f"{fund_code}.OF"
+        else:
+            ts_code = fund_code
+        
+        print(f"📥 正在从 Tushare 下载 {fund_code} 的净值数据...")
+        df = pro.fund_nav(ts_code=ts_code, start_date=start_date, end_date=end_date)
+        
+        if df is not None and len(df) > 0:
+            # 转换为标准格式
+            data = []
+            prev_nav = None
+            for _, row in df.iterrows():
+                unit_nav = float(row["unit_nav"])
+                nav_date = str(row["nav_date"])
+                
+                # 确保日期格式是 YYYY-MM-DD
+                if len(nav_date) == 8 and "-" not in nav_date:
+                    nav_date = f"{nav_date[:4]}-{nav_date[4:6]}-{nav_date[6:8]}"
+                
+                # 计算涨跌幅
+                change_pct = 0.0
+                if prev_nav is not None and prev_nav > 0:
+                    change_pct = (unit_nav - prev_nav) / prev_nav * 100
+                prev_nav = unit_nav
+                
+                data.append({
+                    "date": nav_date,
+                    "nav": unit_nav,
+                    "change_pct": round(change_pct, 2)
+                })
+            
+            # 保存到文件
+            data_file = os.path.join(HISTORICAL_DATA_DIR, f"{fund_code}.json")
+            os.makedirs(os.path.dirname(data_file), exist_ok=True)
+            
+            with open(data_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            print(f"✅ 自动下载 {fund_code} 成功，共 {len(data)} 条数据")
+        else:
+            print(f"⚠️ Tushare 返回空数据：{fund_code}")
+    
+    except ImportError:
+        print("❌ 未安装 tushare 包")
+    except Exception as e:
+        print(f"❌ 自动下载 {fund_code} 失败：{e}")
 
 
 # ============================================================
