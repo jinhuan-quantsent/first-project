@@ -1,0 +1,1052 @@
+"""
+V5.0 专属接口
+11因子流水线 + 7级信号 + 4星置信度 + 5×7仓位矩阵
+
+路由前缀：/api/v5
+"""
+from datetime import date, datetime, timedelta
+from typing import Optional
+
+from fastapi import APIRouter, Query, Depends
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.auth import get_current_user
+from app.core.database import get_session, get_session_factory
+from app.core.config import settings
+from app.utils.data_source import data_source, DEFAULT_INDEX_CODES
+from app.utils.code_format import to_tushare, to_display
+from app.engine.factor_engine import FACTOR_NAMES, FACTOR_CLASSES
+from app.engine.quantile import QuantileNorm
+from app.utils.eastmoney import get_sector_list, get_sector_detail
+from app.engine.sigmoid import SigmoidMapper
+from app.engine.factor_engine.base import FactorSigmoidResult
+from app.engine.aggregator_v5 import AggregatorV5
+from app.engine.signal_mapper import SignalMapper
+from app.engine.confidence import ConfidenceEngine
+from app.engine.position_v5 import PositionEngineV5
+from app.engine.sentiment_macd import SentimentMACD
+from app.engine.sector_scorer import score_sectors
+
+router = APIRouter(prefix="/api/v5")
+
+
+# ============================================================
+# Pydantic 模型
+# ============================================================
+
+class PositionAdviceRequest(BaseModel):
+    """仓位建议请求"""
+    fund_code: str
+    current_position_pct: float
+
+
+class PositionExecuteRequest(BaseModel):
+    """仓位执行请求"""
+    fund_code: str
+    target_position_pct: float
+    signal_level: str
+    confidence_stars: int
+
+
+# ============================================================
+# 辅助函数
+# ============================================================
+
+async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_session: AsyncSession = None) -> dict:
+    """
+    运行 V5.0 完整流水线（带 Redis 缓存）
+    返回：{
+        "index_code": ...,
+        "index_name": ...,
+        "composite_score": ...,
+        "signal_level": ...,
+        "confidence_stars": ...,
+        "confidence_detail": ...,
+        "factor_details": [...],
+        "regime": ...,
+        "defenses_triggered": ...,
+    }
+    """
+    from app.core.redis_client import cache_get, cache_set
+
+    if trade_date is None:
+        trade_date = date.today().isoformat()
+
+    # 尝试从缓存获取（仅当天日期的实时数据缓存5分钟）
+    cache_key = f"fsa:sentiment:{index_code}:{trade_date}"
+    if trade_date == date.today().isoformat():
+        cached = await cache_get(cache_key)
+        if cached:
+            return cached
+
+    # 获取指数数据
+    index_data = await data_source.get_index_data(index_code)
+    if not index_data or index_data.get("index_name") == "未知指数":
+        return {"error": f"指数 {index_code} 不存在"}
+
+    # Layer 1+2+3：11因子流水线
+    quantile = QuantileNorm(session=db_session)
+    sigmoid_mapper = SigmoidMapper()
+    aggregator = AggregatorV5()
+    signal_mapper = SignalMapper()
+    confidence_engine = ConfidenceEngine()
+
+    factor_results = []
+    sigmoid_results = []
+
+    for name in FACTOR_NAMES:
+        factor_cls = FACTOR_CLASSES.get(name)
+        if not factor_cls:
+            continue
+        factor = factor_cls()
+
+        # 获取原始值
+        try:
+            raw_value_obj = await factor.fetch_raw(index_code, trade_date)
+            raw_value = raw_value_obj.raw_value
+        except Exception:
+            raw_value = factor._get_default_raw_value(index_code)
+
+        # Layer 1：分位数归一化
+        percentile = await quantile.calc_percentile(raw_value, index_code, name)
+
+        # Layer 2：Sigmoid 映射
+        if percentile is not None:
+            x = percentile
+        else:
+            x = 0.50  # 默认中位数
+
+        sigmoid_score = sigmoid_mapper.apply_sigmoid(x, factor.sigmoid_c, factor.sigmoid_k)
+
+        # 反向因子处理（所有 direction=fear 的因子：ERP/VOL/TURN/PCR）
+        if factor.direction == "fear":
+            sigmoid_score = 100.0 - sigmoid_score
+
+        sigmoid_results.append(FactorSigmoidResult(
+            factor_name=name,
+            percentile=percentile if percentile is not None else 0.50,
+            sigmoid_score=sigmoid_score,
+            c_param=factor.sigmoid_c,
+            k_param=factor.sigmoid_k,
+            slope_at_midpoint=0.0,
+        ))
+
+    # Layer 3：加权聚合
+    composite = aggregator.aggregate(sigmoid_results)
+
+    # 读取前一日信号（用于防跳变）
+    prev_level = None
+    prev_score = None
+    consecutive_same = 0
+    try:
+        from app.models.market_sentiment import MarketSentiment
+        from app.utils.code_format import to_tushare
+        ts_code = to_tushare(index_code)
+        stmt = (
+            select(MarketSentiment)
+            .where(
+                MarketSentiment.index_code == ts_code,
+                MarketSentiment.signal_level.isnot(None),
+            )
+            .order_by(MarketSentiment.trade_date.desc())
+            .limit(1)
+        )
+        prev_result = await db_session.execute(stmt)
+        prev_row = prev_result.scalar_one_or_none()
+        if prev_row:
+            prev_level = prev_row.signal_level
+            prev_score = prev_row.composite_score
+            # 计算连续同向天数
+            if prev_level in signal_mapper.LEVELS:
+                current_idx = signal_mapper.LEVELS.index(
+                    signal_mapper._score_to_level(composite.score)
+                )
+                prev_idx = signal_mapper.LEVELS.index(prev_level)
+                # 同向：当前信号方向与前一信号方向一致（都在B以上或B以下）
+                if (current_idx > 2 and prev_idx > 2) or (current_idx < 2 and prev_idx < 2):
+                    # 查询连续同向天数
+                    stmt2 = (
+                        select(MarketSentiment.signal_level)
+                        .where(
+                            MarketSentiment.index_code == ts_code,
+                            MarketSentiment.signal_level.isnot(None),
+                        )
+                        .order_by(MarketSentiment.trade_date.desc())
+                        .limit(5)
+                    )
+                    recent_result = await db_session.execute(stmt2)
+                    recent_levels = [r[0] for r in recent_result]
+                    for rl in recent_levels:
+                        if rl in signal_mapper.LEVELS:
+                            rl_idx = signal_mapper.LEVELS.index(rl)
+                            if (current_idx > 2 and rl_idx > 2) or (current_idx < 2 and rl_idx < 2):
+                                consecutive_same += 1
+                            else:
+                                break
+    except Exception:
+        pass  # 非关键路径，防跳变退化为基础映射
+
+    # 信号映射（传入防跳变参数）
+    score_diff = (composite.score - prev_score) if prev_score is not None else None
+    signal_level, jump_blocked = signal_mapper.map(
+        composite.score,
+        prev_level=prev_level,
+        score_diff=score_diff,
+        consecutive_same=consecutive_same,
+    )
+
+    # 情绪MACD计算（需要历史composite_score序列）
+    macd_data = None
+    sentiment_history = []
+    price_history = []
+    try:
+        from app.engine.factor_history import FactorHistoryStore
+        history_store = FactorHistoryStore()
+        sentiment_history = await history_store.get_series(
+            db_session, index_code, "COMPOSITE", lookback_days=60,
+        )
+        # 加入今天的分数
+        score_series_for_macd = sentiment_history + [composite.score]
+        macd_engine = SentimentMACD()
+        macd_data = macd_engine.compute(score_series_for_macd)
+
+        # 获取价格历史（用于背离检测）
+        price_history = await history_store.get_series(
+            db_session, index_code, "CLOSE", lookback_days=60,
+        )
+        # 加入今天的价格
+        today_close = index_data.get("close")
+        if today_close:
+            price_history.append(float(today_close))
+    except Exception:
+        macd_data = None
+
+    # 存储今日composite_score到factor_history（供MACD后续使用）
+    try:
+        from app.engine.factor_history import FactorHistoryStore
+        history_store = FactorHistoryStore()
+        await history_store.insert(
+            db_session, index_code, "COMPOSITE", trade_date, composite.score,
+        )
+        # 同时存储今日收盘价（供背离检测使用）
+        today_close = index_data.get("close")
+        if today_close:
+            await history_store.insert(
+                db_session, index_code, "CLOSE", trade_date, float(today_close),
+            )
+    except Exception:
+        pass  # 非关键路径，失败不影响主流程
+
+    # 置信度计算（传入MACD数据+价格/情绪序列）
+    confidence_stars, confidence_detail, defenses = confidence_engine.calculate(
+        sigmoid_results, signal_level, composite.divergence.regime,
+        macd_data=macd_data,
+        price_series=price_history if len(price_history) >= 5 else None,
+        sentiment_series=sentiment_history + [composite.score] if len(sentiment_history) >= 4 else None,
+    )
+
+    # 写入/更新 market_sentiment 表（供防跳变、每日快照使用）
+    try:
+        from app.models.market_sentiment import MarketSentiment
+        from app.utils.code_format import to_tushare
+        import json
+        ts_code = to_tushare(index_code)
+        td_date = date.fromisoformat(trade_date) if isinstance(trade_date, str) else trade_date
+
+        # 查找今日是否已有记录
+        stmt = (
+            select(MarketSentiment)
+            .where(
+                MarketSentiment.index_code == ts_code,
+                MarketSentiment.trade_date == td_date,
+            )
+        )
+        existing = await db_session.execute(stmt)
+        row = existing.scalar_one_or_none()
+
+        if row is None:
+            row = MarketSentiment(
+                index_code=ts_code,
+                index_name=index_data.get("index_name", ""),
+                trade_date=td_date,
+            )
+            db_session.add(row)
+
+        # 更新V5字段
+        row.composite_score = round(composite.score, 2)
+        row.signal_level = signal_level
+        row.confidence_stars = confidence_stars
+        row.confidence_detail = json.dumps(confidence_detail, ensure_ascii=False) if confidence_detail else None
+        row.factor_std = round(composite.divergence.factor_std, 4)
+        row.triggered_defenses = json.dumps(defenses, ensure_ascii=False) if defenses else None
+        row.divergence_index = round(composite.divergence.penalty_factor, 4)
+        row.trend_direction = composite.divergence.regime
+        row.record_time = datetime.now()
+
+        await db_session.commit()
+    except Exception as e:
+        logger.error(
+            "[V5 Pipeline] market_sentiment 落库失败: index=%s, date=%s, error=%s",
+            ts_code, td_date, e,
+        )
+
+    result = {
+        "index_code": index_code,
+        "index_name": index_data.get("index_name", index_code),
+        "composite_score": round(composite.score, 2),
+        "score_std": round(composite.divergence.factor_std, 4),
+        "divergence_penalty": round(composite.divergence.penalty_factor, 4),
+        "regime": composite.divergence.regime,
+        "signal_level": signal_level,
+        "signal_jump_blocked": jump_blocked,
+        "confidence_stars": confidence_stars,
+        "confidence_detail": confidence_detail,
+        "defenses_triggered": defenses,
+        "macd": macd_data,
+        "factor_details": sigmoid_results,
+        "updated_at": datetime.now().isoformat(),
+    }
+
+    # 缓存当天数据5分钟（减少重复计算）
+    if trade_date == date.today().isoformat():
+        try:
+            await cache_set(cache_key, result, ttl=300)
+        except Exception:
+            pass  # 缓存失败不影响主流程
+
+    return result
+
+
+# ============================================================
+# API 接口
+# ============================================================
+
+@router.get("/market/sentiment/{index_code}")
+async def get_v5_sentiment(
+    index_code: str,
+    trade_date: Optional[str] = Query(default=None, description="交易日期 YYYY-MM-DD"),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    获取 V5.0 指数情绪（11因子 + 7级信号 + 4星置信度）
+
+    返回完整流水线结果，用于前端信号详情页
+    """
+    result = await _run_v5_pipeline(index_code, trade_date, db_session=session)
+
+    if "error" in result:
+        return {"code": 404, "data": None, "message": result["error"]}
+
+    return {"code": 0, "data": result, "message": "ok"}
+
+
+@router.get("/market/multi-index")
+async def get_v5_multi_index(
+    codes: Optional[str] = Query(default="SH000001,SH000300,SZ399001,SZ399006", description="指数代码，逗号分隔"),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    获取多指数 V5.0 情绪摘要
+
+    返回简化结果（不含因子明细），用于首页仪表盘。
+    优化：并行调用 pipeline + Redis 缓存 + 降级策略
+    """
+    import asyncio
+    from app.core.redis_client import cache_get, cache_set
+
+    code_list = [c.strip() for c in codes.split(",")]
+
+    # 尝试从缓存获取整体结果
+    cache_key = f"fsa:multi-index:{codes}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return cached
+
+    # 并行调用各指数 pipeline
+    async def _safe_pipeline(code: str) -> dict | None:
+        """安全调用 pipeline，超时或异常返回 None。
+        每次调用创建独立 session，避免 asyncio.gather 并发时
+        AsyncSession 'concurrent operations are not permitted' 错误。
+        """
+        try:
+            factory = get_session_factory()
+            async with factory() as independent_session:
+                return await asyncio.wait_for(
+                    _run_v5_pipeline(code, db_session=independent_session),
+                    timeout=15.0,  # 单个指数最多15秒
+                )
+        except asyncio.TimeoutError:
+            return None
+        except Exception:
+            return None
+
+    results = await asyncio.gather(*[_safe_pipeline(code) for code in code_list])
+
+    items = []
+    for code, result in zip(code_list, results):
+        if result is None or "error" in result:
+            # 降级：尝试读单个指数缓存
+            single_cache = await cache_get(f"fsa:sentiment:{code}")
+            if single_cache and "data" in single_cache:
+                d = single_cache["data"]
+                items.append({
+                    "index_code": code,
+                    "index_name": d.get("index_name", code),
+                    "composite_score": d.get("composite_score", 50.0),
+                    "signal_level": d.get("signal_level", "B"),
+                    "confidence_stars": d.get("confidence_stars", 2),
+                    "regime": d.get("regime", "sideways"),
+                })
+            continue
+
+        items.append({
+            "index_code": result["index_code"],
+            "index_name": result["index_name"],
+            "composite_score": result["composite_score"],
+            "signal_level": result["signal_level"],
+            "confidence_stars": result["confidence_stars"],
+            "regime": result["regime"],
+        })
+
+    # 综合情绪（市值加权：上证0.25 + 沪深300 0.30 + 深证0.25 + 创业板0.20）
+    WEIGHT_MAP = {
+        "SH000001": 0.25,   # 上证指数
+        "SH000300": 0.30,   # 沪深300
+        "SZ399001": 0.25,   # 深证成指
+        "SZ399006": 0.20,   # 创业板指
+    }
+    weighted_score = 0.0
+    total_weight = 0.0
+    for item in items:
+        w = WEIGHT_MAP.get(item["index_code"], 0.0)
+        if w > 0:
+            weighted_score += item["composite_score"] * w
+            total_weight += w
+
+    composite_score = round(weighted_score / total_weight, 2) if total_weight > 0 else 50.0
+
+    # 综合信号：基于加权分数重新映射
+    _signal_mapper = SignalMapper()
+    composite_signal = _signal_mapper.map(composite_score)[0] if total_weight > 0 else "B"
+
+    # 综合体制：取多数体制
+    regime_counts: dict[str, int] = {}
+    for item in items:
+        r = item.get("regime", "sideways")
+        regime_counts[r] = regime_counts.get(r, 0) + 1
+    composite_regime = max(regime_counts, key=regime_counts.get) if regime_counts else "sideways"
+
+    response = {
+        "code": 0,
+        "data": {
+            "indexes": items,
+            "composite": {
+                "composite_score": composite_score,
+                "signal_level": composite_signal,
+                "regime": composite_regime,
+            },
+            "updated_at": datetime.now().isoformat(),
+        },
+        "message": "ok",
+    }
+
+    # 缓存结果 5 分钟
+    await cache_set(cache_key, response, ttl=300)
+
+    return response
+
+
+@router.get("/market/signal-lights/{index_code}")
+async def get_v5_signal_lights(
+    index_code: str,
+    days: int = Query(default=3, description="查看最近N天信号"),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    获取 V5.0 信号灯数据（三周期）
+
+    返回最近N天的信号等级，用于 SignalLights 组件
+    """
+    today = date.today()
+    signals = []
+
+    for i in range(days - 1, -1, -1):
+        d = today - timedelta(days=i)
+        trade_date = d.isoformat()
+
+        result = await _run_v5_pipeline(index_code, trade_date, db_session=session)
+        if "error" in result:
+            signals.append({
+                "date": trade_date,
+                "signal_level": "B",
+                "composite_score": 50.0,
+            })
+        else:
+            signals.append({
+                "date": trade_date,
+                "signal_level": result["signal_level"],
+                "composite_score": result["composite_score"],
+                "confidence_stars": result["confidence_stars"],
+            })
+
+    return {
+        "code": 0,
+        "data": {
+            "index_code": index_code,
+            "signals": signals,
+            "updated_at": datetime.now().isoformat(),
+        },
+        "message": "ok",
+    }
+
+
+@router.post("/portfolio/position-advice")
+async def get_v5_position_advice(
+    req: PositionAdviceRequest,
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    获取 V5.0 仓位调整建议
+
+    输入：fund_code + current_position_pct
+    输出：PositionAdvice（5×7矩阵 + 置信度修正 + 成本校验）
+    """
+    # 获取市场信号（默认用 SH000300 沪深300）
+    index_code = "SH000300"
+    result = await _run_v5_pipeline(index_code, db_session=session)
+
+    if "error" in result:
+        return {"code": 500, "data": None, "message": "无法获取市场信号"}
+
+    signal_level = result["signal_level"]
+    confidence_stars = result["confidence_stars"]
+    regime = result.get("regime", "sideways")
+
+    # 计算仓位建议
+    position_engine = PositionEngineV5(session)
+    advice = await position_engine.calculate(
+        user_id=user_id,
+        fund_code=req.fund_code,
+        current_position_pct=req.current_position_pct,
+        signal_level=signal_level,
+        confidence_stars=confidence_stars,
+        regime=regime,
+    )
+
+    return {
+        "code": 0,
+        "data": advice,
+        "message": "ok",
+    }
+
+
+@router.post("/portfolio/position-execute")
+async def execute_v5_position(
+    req: PositionExecuteRequest,
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    执行 V5.0 仓位调整
+
+    记录执行日志，更新用户持仓
+    """
+    from app.models.position_execution import PositionExecution
+    from app.models.user_portfolio import UserPortfolio
+
+    # 从DB查询用户实际持仓占比
+    from_position_pct = 0.0
+    try:
+        stmt = (
+            select(UserPortfolio)
+            .where(
+                UserPortfolio.user_id == user_id,
+                UserPortfolio.fund_code == req.fund_code,
+            )
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        portfolio = result.scalar_one_or_none()
+        if portfolio and portfolio.market_value and portfolio.holding_shares > 0:
+            # 简化：用持仓市值占比估算（需要用户总资产，此处暂用持仓比例）
+            from_position_pct = round(portfolio.market_value / max(portfolio.holding_shares * portfolio.current_nav, 1.0), 4)
+    except Exception:
+        pass
+
+    execution = PositionExecution(
+        user_id=user_id,
+        fund_code=req.fund_code,
+        execute_date=date.today(),
+        from_position_pct=from_position_pct,
+        to_position_pct=req.target_position_pct,
+        signal_level=req.signal_level,
+        confidence_stars=req.confidence_stars,
+    )
+    session.add(execution)
+    await session.commit()
+
+    return {
+        "code": 0,
+        "data": {
+            "execution_id": execution.id,
+            "message": "执行成功",
+        },
+        "message": "ok",
+    }
+
+
+@router.patch("/portfolio/{item_id}/market-value")
+async def update_portfolio_market_value(
+    item_id: int,
+    payload: dict,
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    更新持仓市值（行内编辑用）
+
+    仅更新 market_value 字段，自动重算 total_return / return_rate
+    """
+    from app.models.user_portfolio import UserPortfolio
+
+    new_market_value = payload.get("market_value")
+    if new_market_value is None or float(new_market_value) <= 0:
+        return {"code": 400, "data": None, "message": "市值必须大于0"}
+
+    stmt = select(UserPortfolio).where(
+        UserPortfolio.id == item_id, UserPortfolio.user_id == user_id
+    )
+    result = await session.execute(stmt)
+    existing = result.scalar_one_or_none()
+
+    if not existing:
+        return {"code": 404, "data": None, "message": f"持仓 {item_id} 不存在"}
+
+    existing.market_value = round(float(new_market_value), 2)
+
+    # 重算收益
+    if existing.holding_shares > 0 and existing.cost_nav > 0:
+        existing.current_nav = round(existing.market_value / existing.holding_shares, 4)
+        existing.total_return = round(existing.market_value - existing.cost_nav * existing.holding_shares, 2)
+        existing.return_rate = round((existing.current_nav / existing.cost_nav - 1) * 100, 2) if existing.cost_nav > 0 else 0
+
+    await session.commit()
+
+    return {
+        "code": 0,
+        "data": {
+            "id": existing.id,
+            "market_value": existing.market_value,
+            "current_nav": existing.current_nav,
+            "total_return": existing.total_return,
+            "return_rate": existing.return_rate,
+        },
+        "message": "更新成功",
+    }
+
+
+@router.get("/market/snapshot")
+async def get_v5_market_snapshot(
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    市场快照（顶部状态条数据）
+
+    返回关键指数摘要 + 全局情绪标签（基于 V5 pipeline）。
+    优化：并行调用 + Redis 缓存 + 降级策略
+    """
+    import asyncio
+    from app.core.redis_client import cache_get, cache_set
+
+    # 尝试从缓存获取
+    cache_key = "fsa:market-snapshot"
+    cached = await cache_get(cache_key)
+    if cached:
+        return cached
+
+    index_data = await data_source.get_all_index_data()
+
+    # 并行调用 V5 pipeline
+    async def _safe_pipeline(code: str) -> dict | None:
+        try:
+            return await asyncio.wait_for(
+                _run_v5_pipeline(code, db_session=session),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            return None
+        except Exception:
+            return None
+
+    pipeline_results = await asyncio.gather(
+        *[_safe_pipeline(code) for code in DEFAULT_INDEX_CODES]
+    )
+
+    items = []
+    for code, result in zip(DEFAULT_INDEX_CODES, pipeline_results):
+        data = index_data.get(code, {})
+        if code not in index_data:
+            continue
+
+        if result and "error" not in result:
+            items.append({
+                "index_code": code,
+                "index_name": data.get("index_name", code),
+                "close": data.get("close"),
+                "change_pct": data.get("change_pct"),
+                "composite_score": result.get("composite_score", 50.0),
+                "sentiment_label": result.get("signal_level", "B"),
+                # V5 新增字段
+                "signal_level": result.get("signal_level", "B"),
+                "confidence_stars": result.get("confidence_stars", 2),
+                "regime": result.get("regime", "sideways"),
+            })
+        else:
+            # 降级：不跑 pipeline，直接用数据源的基本信息
+            items.append({
+                "index_code": code,
+                "index_name": data.get("index_name", code),
+                "close": data.get("close"),
+                "change_pct": data.get("change_pct"),
+                "composite_score": 50.0,
+                "sentiment_label": "B",
+                "signal_level": "B",
+                "confidence_stars": 2,
+                "regime": "sideways",
+            })
+
+    # 综合情绪（加权计算，与 multi-index 保持一致）
+    WEIGHT_MAP = {
+        "SH000001": 0.25,
+        "SH000300": 0.30,
+        "SZ399001": 0.25,
+        "SZ399006": 0.20,
+    }
+    weighted_score = 0.0
+    weighted_confidence = 0.0
+    total_weight = 0.0
+    regime_counts: dict[str, int] = {}
+
+    for item in items:
+        w = WEIGHT_MAP.get(item["index_code"], 0.0)
+        if w > 0:
+            weighted_score += item["composite_score"] * w
+            weighted_confidence += item["confidence_stars"] * w
+            total_weight += w
+            r = item.get("regime", "sideways")
+            regime_counts[r] = regime_counts.get(r, 0) + 1
+
+    composite_score = round(weighted_score / total_weight, 2) if total_weight > 0 else 50.0
+    composite_confidence = round(weighted_confidence / total_weight) if total_weight > 0 else 2
+    composite_regime = max(regime_counts, key=regime_counts.get) if regime_counts else "sideways"
+
+    # 综合信号等级（基于加权分数映射）
+    _signal_mapper = SignalMapper()
+    composite_signal = _signal_mapper.map(composite_score)[0] if total_weight > 0 else "B"
+
+    response = {
+        "code": 0,
+        "data": {
+            "indexes": items,
+            "global_sentiment": composite_signal,
+            "global_score": composite_score,
+            "composite_score": composite_score,
+            # V5 新增字段
+            "signal_level": composite_signal,
+            "confidence_stars": int(composite_confidence),
+            "regime": composite_regime,
+            "conclusion": _signal_mapper.get_conclusion(composite_signal),
+            "updated_at": datetime.now().isoformat(),
+        },
+        "message": "ok",
+    }
+
+    # 缓存结果 5 分钟
+    await cache_set(cache_key, response, ttl=300)
+
+    return response
+
+
+@router.get("/market/factor-heatmap")
+async def get_v5_factor_heatmap(
+    index_code: str = Query(default="SH000300", description="指数代码"),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    获取 V5.0 因子热力图数据
+
+    返回11因子的原始值、分位数、Sigmoid分数，用于调试和分析
+    """
+    result = await _run_v5_pipeline(index_code, db_session=session)
+
+    if "error" in result:
+        return {"code": 404, "data": None, "message": result["error"]}
+
+    return {
+        "code": 0,
+        "data": {
+            "index_code": index_code,
+            "composite_score": result["composite_score"],
+            "signal_level": result["signal_level"],
+            "factors": result["factor_details"],
+            "updated_at": datetime.now().isoformat(),
+        },
+        "message": "ok",
+    }
+
+
+# ============================================================
+# 板块行情接口
+# ============================================================
+@router.get("/market/sectors")
+async def get_v5_sectors(
+    sector_type: str = Query("concept", description="板块类型: concept=概念, industry=行业"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页条数"),
+    sort_by: str = Query("change_pct", description="排序字段: change_pct/main_net_inflow/main_pct"),
+    sort_order: str = Query("desc", description="排序方向: asc/desc"),
+):
+    """
+    获取板块行情列表（概念板块或行业板块）
+
+    数据来源：东方财富 push2 API → sector_scorer V5.0 增强评分
+    返回板块涨跌幅、主力净流入、情绪评分、信号等级、结构化理由等
+    """
+    if sector_type not in ("concept", "industry"):
+        return {"code": 400, "data": None, "message": "sector_type must be 'concept' or 'industry'"}
+
+    raw = await get_sector_list(
+        sector_type=sector_type,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+
+    # 通过 sector_scorer V5.0 增强评分（6因子+信号等级+结构化理由）
+    items = raw.get("items", []) if isinstance(raw, dict) else []
+    if items:
+        scored = await score_sectors(items)
+        # 保留分页信息
+        pagination = raw.get("pagination", {}) if isinstance(raw, dict) else {}
+        return {
+            "code": 0,
+            "data": {
+                "items": scored,
+                "pagination": pagination,
+            },
+            "message": "ok",
+        }
+
+    # 降级：原始数据无 items 时直接返回
+    return {
+        "code": 0,
+        "data": raw,
+        "message": "ok",
+    }
+
+
+@router.get("/market/sector/{code}")
+async def get_v5_sector_detail(
+    code: str,
+):
+    """
+    获取单个板块的成分股详情
+
+    返回板块内个股涨跌、主力净流入，以及涨幅前5/跌幅前5
+    """
+    result = await get_sector_detail(code)
+
+    if result is None:
+        return {"code": 404, "data": None, "message": f"板块 {code} 未找到"}
+
+    return {
+        "code": 0,
+        "data": result,
+        "message": "ok",
+    }
+
+
+# ============================================================
+# 定投建议接口
+# ============================================================
+@router.get("/advice/dca/{index_code}")
+async def get_v5_dca_advice(
+    index_code: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    获取 V5.0 定投调整建议
+
+    基于信号等级生成定投倍数和操作建议：
+    - S+ → 3倍定投（极度恐慌，加速建仓）
+    - S  → 2倍定投（恐慌，加码定投）
+    - A  → 1.5倍定投（偏恐慌，适度加仓）
+    - B  → 1倍标准定投（中性）
+    - C  → 0.5倍定投（偏贪婪，减半）
+    - D  → 暂停定投（贪婪，等待回调）
+    - E  → 建议赎回（极度贪婪，崩盘风险）
+    """
+    from app.engine.dca_advice import DcaAdviceEngine
+
+    # 运行 V5 pipeline 获取信号等级
+    result = await _run_v5_pipeline(index_code, db_session=session)
+    if "error" in result:
+        return {"code": 404, "data": None, "message": result["error"]}
+
+    signal_level = result["signal_level"]
+
+    # 生成定投建议
+    dca_engine = DcaAdviceEngine()
+    advice = dca_engine.get_advice(signal_level)
+
+    return {
+        "code": 0,
+        "data": {
+            "index_code": index_code,
+            "index_name": result.get("index_name", index_code),
+            "composite_score": result["composite_score"],
+            "signal_level": signal_level,
+            "confidence_stars": result["confidence_stars"],
+            "regime": result.get("regime", "sideways"),
+            "dca": advice.to_dict(),
+            "updated_at": datetime.now().isoformat(),
+        },
+        "message": "ok",
+    }
+
+
+# ============================================================
+# Phase D: 背离预警 + 因子雷达图
+# ============================================================
+
+@router.get("/market/divergence")
+async def get_divergence_alert(
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    全指数背离检测（Dashboard 顶部预警横幅数据源）
+
+    对4个默认指数运行价格-情绪背离检测，返回有背离信号的指数列表。
+    缓存5分钟。
+    """
+    import asyncio
+    from app.core.redis_client import cache_get, cache_set
+    from app.engine.factor_history import FactorHistoryStore
+    from app.engine.divergence_detector import DivergenceDetector
+
+    cache_key = "fsa:divergence-alert"
+    cached = await cache_get(cache_key)
+    if cached:
+        return cached
+
+    history_store = FactorHistoryStore()
+    detector = DivergenceDetector()
+
+    alerts = []
+    all_clear = True
+
+    for code in DEFAULT_INDEX_CODES:
+        try:
+            price_history = await history_store.get_series(
+                session, code, "CLOSE", lookback_days=30,
+            )
+            sentiment_history = await history_store.get_series(
+                session, code, "COMPOSITE", lookback_days=30,
+            )
+
+            if len(price_history) < 5 or len(sentiment_history) < 5:
+                continue
+
+            result = detector.detect(price_history, sentiment_history)
+            if result["divergence_type"]:
+                all_clear = False
+                # 获取指数名称
+                from app.utils.code_format import INDEX_REGISTRY
+                index_name = INDEX_REGISTRY.get(to_display(code), {}).get("name", code)
+                alerts.append({
+                    "index_code": to_display(code),
+                    "index_name": index_name,
+                    "divergence_type": result["divergence_type"],
+                    "strength": result["strength"],
+                    "description": result["description"],
+                    "price_trend": result["price_trend"],
+                    "sentiment_trend": result["sentiment_trend"],
+                })
+        except Exception as e:
+            logger.warning(f"背离检测异常 {code}: {e}")
+
+    response = {
+        "code": 0,
+        "data": {
+            "all_clear": all_clear,
+            "alerts": sorted(alerts, key=lambda x: x["strength"], reverse=True),
+            "checked_at": datetime.now().isoformat(),
+        },
+        "message": "ok",
+    }
+
+    await cache_set(cache_key, response, ttl=300)
+    return response
+
+
+@router.get("/market/factor-radar")
+async def get_factor_radar(
+    index_code: str = Query(default="SH000300"),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    因子雷达图数据（Dashboard 因子可视化）
+
+    返回14因子的当前分位数值（百分位数），供 ECharts 雷达图使用。
+    """
+    from app.core.redis_client import cache_get, cache_set
+    from app.engine.quantile import QuantileNorm
+    from app.engine.factor_engine import FACTOR_NAMES, FACTOR_CLASSES
+
+    ts_code = to_tushare(index_code)
+    cache_key = f"fsa:factor-radar:{ts_code}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return cached
+
+    trade_date = date.today().isoformat()
+    quantile = QuantileNorm(session=session)
+
+    factors = []
+    for name in FACTOR_NAMES:
+        factor_cls = FACTOR_CLASSES.get(name)
+        if not factor_cls:
+            continue
+        factor = factor_cls()
+        try:
+            raw_value_obj = await factor.fetch_raw(index_code, trade_date)
+            raw_value = raw_value_obj.raw_value
+        except Exception:
+            raw_value = factor._get_default_raw_value(index_code)
+
+        percentile = await quantile.calc_percentile(raw_value, index_code, name)
+
+        factors.append({
+            "name": name,
+            "label": factor.label,
+            "direction": factor.direction,
+            "percentile": round(percentile * 100, 1) if percentile else 50.0,
+            "weight": factor.weight,
+        })
+
+    response = {
+        "code": 0,
+        "data": {
+            "index_code": index_code,
+            "factors": factors,
+            "trade_date": trade_date,
+        },
+        "message": "ok",
+    }
+
+    await cache_set(cache_key, response, ttl=300)
+    return response

@@ -1,0 +1,125 @@
+version: '3.8'
+
+services:
+  # ============================================================
+  # FastAPI 后端
+  # ============================================================
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - USE_POSTGRES=${USE_POSTGRES:-false}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://user:password@db:5432/fund_sentiment}
+      - SQLITE_PATH=/data/fund_sentiment.db
+      - USE_REDIS=${USE_REDIS:-false}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - TUSHARE_TOKEN=${TUSHARE_TOKEN:-}
+      - USE_AKSHARE=${USE_AKSHARE:-true}
+      - SECRET_KEY=${SECRET_KEY:-change-me}
+      - ENVIRONMENT=production
+    volumes:
+      - api_data:/data
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================
+  # Celery Worker
+  # ============================================================
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.tasks worker --loglevel=info
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/1}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
+      - USE_POSTGRES=${USE_POSTGRES:-false}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - TUSHARE_TOKEN=${TUSHARE_TOKEN:-}
+      - USE_AKSHARE=${USE_AKSHARE:-true}
+    depends_on:
+      - redis
+      - db
+    restart: unless-stopped
+
+  # ============================================================
+  # Celery Beat (定时任务调度)
+  # ============================================================
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.tasks beat --loglevel=info
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/1}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # ============================================================
+  # PostgreSQL (生产环境)
+  # ============================================================
+  db:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=fund_sentiment
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-fund_sentiment_pass}
+      - POSTGRES_DB=fund_sentiment
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fund_sentiment"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # Redis
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ============================================================
+  # Nginx (前端静态文件 + API 反向代理)
+  # ============================================================
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend/dist:/usr/share/nginx/html:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  api_data:
+  pg_data:
+  redis_data:
