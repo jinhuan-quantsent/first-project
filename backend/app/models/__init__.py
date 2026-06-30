@@ -6,11 +6,9 @@ from app.models.user_portfolio import UserPortfolio
 from app.models.advice_log import AdviceLog
 from app.models.position_execution import PositionExecution
 from app.models.backtest_strategy import BacktestStrategy
-from app.models.backtest_result import BacktestResult
 from app.models.fund_basic import FundBasic
 from app.models.fund_nav import FundNav
 from app.models.nav_history import NavHistory
-from app.models.sector_heatmap_cache import SectorHeatmapCache
 
 __all__ = [
     "Base",
@@ -20,9 +18,7 @@ __all__ = [
     "AdviceLog",
     "PositionExecution",
     "BacktestStrategy",
-    "BacktestResult",
     "FundBasic",
     "FundNav",
     "NavHistory",
-    "SectorHeatmapCache",
 ]

@@ -130,7 +130,7 @@ def calculate_position_v5(
             "trend_signal": "上升" | "下降" | "震荡",
             "macd_signal": "金叉" | "死叉" | "中性",
             "oscillation_silence": bool,  # 是否震荡静音
-            "gate_triggered": str | None,  # 触发的闸门（gate1/gate2/gate3）
+            "gate_triggered": dict | None,  # 触发的闸门（gate1/gate2/gate3）
             "operation_suggestion": str,     # 操作建议
             "trend_narrative": str,         # 趋势解读文案（供前端展示）
         }
@@ -437,7 +437,7 @@ def _generate_trend_narrative(
     trend_signal: str,
     macd_signal: str,
     oscillation_silence: bool,
-    gate_triggered: Optional[str],
+    gate_triggered: Optional[dict],
     nav_history: list,
 ) -> str:
     """
@@ -446,11 +446,11 @@ def _generate_trend_narrative(
     返回：例如 "📈 趋势向上，MACD金叉，适合加仓"
     """
     # 闸门触发 → 紧急提示
-    if gate_triggered == "gate1":
+    if gate_triggered and gate_triggered.get("gate") == "gate1":
         return "⚠️ 市场过热（仓位>=70%），建议减仓至50%以下"
-    if gate_triggered == "gate2":
+    if gate_triggered and gate_triggered.get("gate") == "gate2":
         return "⚠️ 回撤过大（>=15%），建议止损清仓"
-    if gate_triggered == "gate3":
+    if gate_triggered and gate_triggered.get("gate") == "gate3":
         return "⚠️ 市场极端恐慌，建议暂停交易"
 
     # 震荡市静音
