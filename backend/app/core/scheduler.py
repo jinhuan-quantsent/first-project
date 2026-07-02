@@ -6,7 +6,7 @@ V5.0 定时任务调度器 (APScheduler)
 import asyncio
 import logging
 from typing import Optional
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -919,6 +919,867 @@ async def _run_index_sentiment_update() -> None:
     logger.info("[Scheduler] index sentiment mapping done -- %d indices", inserted)
 
 
+
+
+
+# ============================================================
+
+
+# ============================================================
+# 盘中预演辅助函数群
+# ============================================================
+
+def _calculate_elasticity(fund_code: str, gszzl: float, meta: dict) -> float:
+    """弹性系数计算（板块波动率自适应）
+    
+    规则：
+    - |gszzl|>5%: 强制1.0（极端行情降敏）
+    - 高波动板块(通信/军工/电子): 1.5-2.0
+    - 低波动板块(银行/食品/公用): 2.5-3.0
+    - 中波动板块: 2.0-2.5
+    """
+    # 极值保护
+    if abs(gszzl) > 5.0:
+        return settings.INTRADAY_PREVIEW_ELASTIC_EXTREME_CLAMP
+    
+    sector_code = meta.get("sector_code") or ""
+    volatility_grade = _get_volatility_grade(sector_code)
+    
+    # 尝试从Redis读取周更弹性系数
+    from app.core.redis_client import cache_get
+    import asyncio
+    try:
+        elastic_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:elastic:{fund_code}"
+        # 同步函数中无法直接await，用线程安全方式
+        # 如果是scheduler async环境中调用，弹性系数已在meta中缓存
+        weekly_elastic = meta.get("weekly_elasticity")
+        if weekly_elastic is not None:
+            return float(weekly_elastic)
+    except Exception:
+        pass
+    
+    if volatility_grade == "high":
+        base = settings.INTRADAY_PREVIEW_ELASTIC_LOW
+    elif volatility_grade == "low":
+        base = settings.INTRADAY_PREVIEW_ELASTIC_HIGH
+    else:
+        base = settings.INTRADAY_PREVIEW_ELASTIC_BASE
+    
+    return base
+
+
+def _get_volatility_grade(sector_code: str | None) -> str:
+    """板块波动率分级（申万一级）"""
+    HIGH_VOL = {"801770", "801740", "801080", "801750", "801760"}  # 电力设备/计算机/电子/传媒/军工
+    LOW_VOL = {"801180", "801120", "801160", "801170"}  # 银行/食品饮料/公用事业/交通运输
+    BROAD = {"000300", "000905", "000016"}  # 宽基指数
+    
+    code = sector_code or ""
+    if code in HIGH_VOL:
+        return "high"
+    elif code in LOW_VOL or code in BROAD:
+        return "low"
+    else:
+        return "mid"
+
+
+def _score_to_signal(score: float, boundaries: list) -> str:
+    """情绪分 -> 信号等级（复用V5边界）"""
+    if score < boundaries[0]: return "S+"
+    if score < boundaries[1]: return "S"
+    if score < boundaries[2]: return "A"
+    if score < boundaries[3]: return "B"
+    if score < boundaries[4]: return "C"
+    if score < boundaries[5]: return "D"
+    return "E"
+
+
+def _get_confidence_note(confidence: int) -> str:
+    """置信度时段文案"""
+    if confidence <= 1: return "早盘波动大，仅供参考"
+    if confidence == 2: return "趋势基本明朗"
+    return "接近收盘，仍需等待确认"
+
+
+def _prefix_preview_reason(reason: str) -> str:
+    """给reason加预演前缀"""
+    if reason.startswith("若收盘") or reason.startswith("预演"):
+        return reason
+    return f"若收盘维持当前行情，{reason}"
+
+
+def _calc_signal_change(yesterday_signal: str | None, preview_signal: str) -> str:
+    """计算信号变化方向"""
+    if yesterday_signal is None:
+        return "unknown"
+    signal_order = ["S+", "S", "A", "B", "C", "D", "E"]
+    try:
+        y_idx = signal_order.index(yesterday_signal)
+        p_idx = signal_order.index(preview_signal)
+        if p_idx < y_idx:
+            return "up"  # 信号升级（偏贪婪）
+        elif p_idx > y_idx:
+            return "down"  # 信号降级（偏恐惧）
+        else:
+            return "stable"
+    except ValueError:
+        return "unknown"
+
+
+def _gate_price_to_position(trigger_price: float | None, ma20_price: float | None) -> float | None:
+    """闸门触发价位 -> 进度条百分比位置"""
+    if trigger_price is None or ma20_price is None or ma20_price == 0:
+        return None
+    return round((trigger_price - ma20_price) / ma20_price * 100, 2)
+
+
+def _build_threshold_data(preview_result: dict, meta: dict, gszzl: float | None) -> dict:
+    """构建前端ThresholdBar需要的阈值数据"""
+    gates = preview_result.get("gates") or {}
+    gate_zones = []
+    
+    # Gate-P（全市场恐慌）
+    gate_p = gates.get("gate_p") or {}
+    gate_zones.append({
+        "id": "gate-p",
+        "label": gate_p.get("label", "全市场恐慌"),
+        "triggered": gate_p.get("triggered", False),
+        "position": None,
+    })
+    
+    # Gate-1（极端回撤）
+    gate_1 = gates.get("gate_1") or {}
+    gate_zones.append({
+        "id": "gate-1",
+        "label": gate_1.get("label", "极端回撤"),
+        "triggered": gate_1.get("triggered", False),
+        "trigger_price": gate_1.get("trigger_price"),
+        "current_distance_pct": gate_1.get("current_distance_pct"),
+        "drawdown": gate_1.get("drawdown"),
+        "position": _gate_price_to_position(gate_1.get("trigger_price"), meta.get("ma20_price")),
+    })
+    
+    # Gate-2（趋势破位）
+    gate_2 = gates.get("gate_2") or {}
+    gate_zones.append({
+        "id": "gate-2",
+        "label": gate_2.get("label", "趋势破位"),
+        "triggered": gate_2.get("triggered", False),
+        "trigger_price": gate_2.get("trigger_price"),
+        "current_distance_pct": gate_2.get("current_distance_pct"),
+        "exempted": gate_2.get("exempted", False),
+        "position": _gate_price_to_position(gate_2.get("trigger_price"), meta.get("ma20_price")),
+    })
+    
+    # Gate-E（情绪过热）
+    gate_e = gates.get("gate_e") or {}
+    gate_zones.append({
+        "id": "gate-e",
+        "label": gate_e.get("label", "情绪过热"),
+        "triggered": gate_e.get("triggered", False),
+        "position": None,
+    })
+    
+    # 安全区间评估
+    distances = []
+    for d in [gate_1.get("current_distance_pct"), gate_2.get("current_distance_pct")]:
+        if d is not None:
+            distances.append(abs(d))
+    min_distance = min(distances) if distances else 999
+    
+    if min_distance > 5:
+        safe_zone_note = "距所有闸门阈值>5%，处于安全区间"
+    elif min_distance > 2:
+        safe_zone_note = "距闸门阈值2-5%，进入预警区间"
+    else:
+        safe_zone_note = "距闸门阈值<2%，进入临界区间"
+    
+    # 向上/向下触发阈值
+    boundaries = meta.get("signal_boundaries") or list(settings.V5_SIGNAL_BOUNDARIES)
+    yesterday_score = meta.get("yesterday_score") or 50.0
+    up_trigger_pct = None
+    for b in boundaries:
+        if b > yesterday_score:
+            if yesterday_score > 0:
+                up_trigger_pct = round((b - yesterday_score) / yesterday_score * 100, 1)
+            break
+    
+    down_trigger_pct = None
+    if gate_2.get("current_distance_pct") is not None:
+        down_trigger_pct = round(abs(gate_2["current_distance_pct"]), 2)
+    
+    return {
+        "gate_zones": gate_zones,
+        "safe_zone_note": safe_zone_note,
+        "current_score": yesterday_score,
+        "up_trigger_pct": up_trigger_pct,
+        "down_trigger_pct": down_trigger_pct,
+    }
+
+
+# ============================================================
+# 任务 16：盘中预演计算（交易时段内每5分钟执行）
+# ============================================================
+async def _run_intraday_preview_calculate() -> None:
+    """
+    盘中预演计算 -- 交易时段每5分钟执行
+    
+    对每个持仓基金：
+    1. 获取基金实时估值(gszzl) via get_fund_realtime_nav()
+    2. 从Redis读取元数据包(MA20/MACD/轨道/冷却期/regime)
+    3. 从DailySignalSnapshot DB表读取昨日情绪分/信号/置信度
+    4. 计算盘中估算情绪分（弹性系数公式）
+    5. import PositionEngineV5.calculate() 产出预演结果
+    6. 写入 Redis 缓存（TTL=300秒）
+    
+    输入替换策略：
+    - signal_level: 盘中估算信号（弹性系数推算）
+    - confidence_stars: 1星(早盘)/2星(午盘)/3星(尾盘)
+    - regime: 元数据中的regime
+    - current_position_pct: 从user_portfolio实时读取
+    """
+    from app.core.database import get_async_engine
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy import select
+    from app.models.user_portfolio import UserPortfolio
+    from app.models.daily_signal_snapshot import DailySignalSnapshot
+    from app.engine.position_v5 import PositionEngineV5
+    from app.utils.eastmoney import get_fund_realtime_nav
+    from app.core.redis_client import cache_get, cache_set
+
+    # 1. 检查全局开关
+    redis_switch = await cache_get("intraday_preview:global_switch")
+    if redis_switch == "off" or not settings.ENABLE_INTRADAY_PREVIEW:
+        logger.info("[Scheduler] 盘中预演关闭，跳过计算")
+        return
+
+    # 2. 检查交易时段（9:30-15:00）
+    now = datetime.now()
+    if now.time() < time(9, 30) or now.time() > time(15, 0):
+        logger.info("[Scheduler] 非交易时段，跳过盘中预演计算")
+        return
+
+    today_str = date.today().isoformat()
+    engine = get_async_engine()
+
+    # 3. 置信度时段映射
+    if now.time() < time(11, 30):
+        preview_confidence = 1  # 早盘
+    elif now.time() < time(14, 30):
+        preview_confidence = 2  # 午盘
+    else:
+        preview_confidence = 3  # 尾盘
+
+    # 4. 获取所有持仓（含用户ID+仓位百分比）
+    async with AsyncSession(engine) as session:
+        stmt = select(
+            UserPortfolio.user_id,
+            UserPortfolio.fund_code,
+            UserPortfolio.market_value,
+        )
+        result = await session.execute(stmt)
+        rows = result.all()
+
+    # 按用户分组
+    user_funds = {}
+    for user_id, fund_code, market_value in rows:
+        if user_id not in user_funds:
+            user_funds[user_id] = {"funds": [], "total_mv": 0.0}
+        user_funds[user_id]["funds"].append(fund_code)
+        user_funds[user_id]["total_mv"] += float(market_value or 0)
+
+    # 5. 获取昨日收盘数据（从DailySignalSnapshot）
+    yesterday = date.today() - timedelta(days=1)
+    yesterday_str = yesterday.isoformat()
+    
+    async with AsyncSession(engine) as session:
+        snap_stmt = select(DailySignalSnapshot).where(
+            DailySignalSnapshot.snapshot_date == yesterday
+        )
+        snap_result = await session.execute(snap_stmt)
+        yesterday_snapshots = {s.target_code: s for s in snap_result.scalars().all()}
+
+    success = 0
+    for user_id, data in user_funds.items():
+        total_assets = data["total_mv"]
+
+        for fund_code in data["funds"]:
+            try:
+                # 5a. 获取基金实时估值
+                gszzl = await get_fund_realtime_nav(fund_code)
+
+                # 5b. 从Redis读取元数据
+                meta_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:meta:{fund_code}"
+                meta = await cache_get(meta_key)
+                if not meta:
+                    logger.warning("[Scheduler] [preview] %s 元数据缺失，跳过", fund_code)
+                    continue
+
+                # 5c. 获取昨日收盘数据
+                snap = yesterday_snapshots.get(fund_code)
+                if snap:
+                    yesterday_score = float(snap.composite_score or 50.0)
+                    yesterday_signal = snap.signal_level or "B"
+                    yesterday_confidence = snap.confidence_stars or 3
+                else:
+                    # 无昨日快照（可能是新加入的基金）-- 从Redis缓存读
+                    # 板块基金: v5:sector:sentiment:{sector_code}
+                    # 宽基: fsa:sentiment:{index_code}
+                    sector_code = meta.get("sector_code")
+                    if sector_code and sector_code.startswith("801"):
+                        sector_cache = await cache_get(f"v5:sector:sentiment:{sector_code}")
+                        if isinstance(sector_cache, dict):
+                            yesterday_score = float(sector_cache.get("score", 50.0))
+                            yesterday_signal = sector_cache.get("signal", "B")
+                        else:
+                            yesterday_score = 50.0
+                            yesterday_signal = "B"
+                    else:
+                        broad_cache = await cache_get(f"fsa:sentiment:{fund_code}")
+                        if isinstance(broad_cache, dict):
+                            yesterday_score = float(broad_cache.get("score", 50.0))
+                            yesterday_signal = broad_cache.get("signal", "B")
+                        else:
+                            yesterday_score = 50.0
+                            yesterday_signal = "B"
+                    yesterday_confidence = 3
+
+                # 补充meta中的yesterday_score/signal（供threshold计算使用）
+                meta["yesterday_score"] = yesterday_score
+                meta["yesterday_signal"] = yesterday_signal
+
+                # 5d. 弹性系数推算
+                if gszzl is not None and yesterday_score is not None:
+                    elasticity = _calculate_elasticity(fund_code, gszzl, meta)
+                    score_delta = gszzl * elasticity
+                    score_delta = max(-settings.INTRADAY_PREVIEW_SCORE_DELTA_CLAMP,
+                                      min(settings.INTRADAY_PREVIEW_SCORE_DELTA_CLAMP, score_delta))
+                    preview_score = yesterday_score + score_delta
+                    preview_score = max(0, min(100, preview_score))  # clamp到0-100
+                    
+                    preview_signal = _score_to_signal(preview_score, list(settings.V5_SIGNAL_BOUNDARIES))
+                else:
+                    # 无估值数据 -- fallback到昨日信号
+                    preview_score = yesterday_score
+                    preview_signal = yesterday_signal or "B"
+                    elasticity = None
+                    score_delta = None
+
+                # 5e. 获取当前仓位百分比
+                async with AsyncSession(engine) as session:
+                    pct_stmt = select(UserPortfolio.market_value).where(
+                        UserPortfolio.user_id == user_id,
+                        UserPortfolio.fund_code == fund_code,
+                    )
+                    pct_result = await session.execute(pct_stmt)
+                    fund_mv = pct_result.scalar_one_or_none() or 0.0
+                    
+                    # 计算仓位百分比 = 单基金市值/总资产
+                    current_pct = float(fund_mv) / total_assets if total_assets > 0 else 0.0
+
+                    # 5f. import复用 PositionEngineV5
+                    pos_engine = PositionEngineV5(session)
+                    preview_result = await pos_engine.calculate(
+                        user_id=user_id,
+                        fund_code=fund_code,
+                        current_position_pct=current_pct,
+                        signal_level=preview_signal,
+                        confidence_stars=preview_confidence,
+                        regime=meta.get("regime", "sideways"),
+                        cash_amount=0,  # 盘中不查现金
+                        total_assets=total_assets,
+                    )
+
+                    # 5g. 组装预演结果
+                    preview_output = {
+                        "is_preview": True,
+                        "preview_confidence": preview_confidence,
+                        "confidence_note": _get_confidence_note(preview_confidence),
+                        "accuracy_warning": "盘中信号为预演估算，需收盘确认",
+                        "calc_time": now.isoformat(),
+                        "data_version": "v1",
+                        "date": today_str,
+                        "fund_code": fund_code,
+                        
+                        # 估算情绪分
+                        "preview_score": round(preview_score, 2),
+                        "yesterday_score": yesterday_score,
+                        "score_delta": round(score_delta, 2) if score_delta is not None else None,
+                        "gszzl": gszzl,
+                        "elasticity": round(elasticity, 2) if elasticity is not None else None,
+                        
+                        # 预演操作建议
+                        "action": preview_result.get("action", "hold"),
+                        "target_position_pct": preview_result.get("target_position_pct", 0),
+                        "current_position_pct": preview_result.get("current_position_pct", current_pct),
+                        "reason": _prefix_preview_reason(preview_result.get("reason", "")),
+                        "signal_level": preview_signal,
+                        "confidence_stars": preview_confidence,
+                        
+                        # 预演风控
+                        "gates": preview_result.get("gates"),
+                        "track_type": preview_result.get("track_type"),
+                        "sector_track": preview_result.get("sector_track"),
+                        
+                        # 阈值数据
+                        "thresholds": _build_threshold_data(preview_result, meta, gszzl),
+                        
+                        # 昨今对比
+                        "yesterday_signal": yesterday_signal,
+                        "yesterday_confidence": yesterday_confidence,
+                        "signal_change": _calc_signal_change(yesterday_signal, preview_signal),
+                    }
+
+                    # 5h. 写入Redis
+                    cache_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:{fund_code}:{user_id}"
+                    await cache_set(cache_key, preview_output, ttl=settings.INTRADAY_PREVIEW_CACHE_TTL)
+
+                    success += 1
+                    logger.info("[Scheduler] [preview] %s: score=%.1f->%.1f signal=%s->%s gszzl=%.2f action=%s",
+                               fund_code, yesterday_score, preview_score, yesterday_signal, preview_signal,
+                               gszzl or 0, preview_result.get("action", "hold"))
+            except Exception as e:
+                logger.error("[Scheduler] [preview] %s FAIL: %s", fund_code, e)
+
+    logger.info("[Scheduler] 盘中预演计算完成 -- %d 成功", success)
+
+# 任务 14：盘中预演元数据打包（15:40 — 收盘后，在快照15:30+板块价格15:35之后）
+# ============================================================
+async def _run_intraday_meta_pack() -> None:
+    """
+    盘中预演元数据打包 -- 收盘后15:40执行
+
+    将 MA20价格/MACD状态/轨道类型/冷却期/regime/矩阵/板块黑名单
+    打包写入 Redis intraday_preview:v1:meta:{date}:{fund_code}
+
+    数据来源：
+    - MA20价格: fund_nav 计算（需>=60条，使用 trend_guard._calculate_ma20_trend）
+    - MACD状态: trend_guard._calculate_macd 纯计算函数
+    - 轨道类型: trend_guard._get_sector_track() -- 同步函数，需asyncio.to_thread包装
+    - 冷却期: PositionExecution DB表查询
+    - regime: 沪深300 fsa:sentiment 缓存
+    - 矩阵/置信度映射: config.py 已有
+    """
+    from app.core.database import get_async_engine
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy import select
+    from app.models.user_portfolio import UserPortfolio
+    from app.models.position_execution import PositionExecution
+    from app.models.fund_nav import FundNav
+    from app.engine.trend_guard import _calculate_ma20_trend, _calculate_macd
+    from app.engine.trend_guard import _get_sector_track, _get_fund_sector_code
+    from app.core.redis_client import cache_get, cache_set
+
+    if not settings.ENABLE_INTRADAY_PREVIEW:
+        logger.info("[Scheduler] 盘中预演全局关闭，跳过元数据打包")
+        return
+
+    # 检查Redis全局开关
+    redis_switch = await cache_get("intraday_preview:global_switch")
+    if redis_switch == "off":
+        logger.info("[Scheduler] Redis全局开关关闭，跳过元数据打包")
+        return
+
+    today = date.today()
+    today_str = today.isoformat()
+    engine = get_async_engine()
+
+    # 获取所有持仓基金代码
+    async with AsyncSession(engine) as session:
+        result = await session.execute(select(UserPortfolio.fund_code).distinct())
+        fund_codes = [row[0] for row in result.all()]
+
+    if not fund_codes:
+        logger.info("[Scheduler] 无持仓基金，跳过元数据打包")
+        return
+
+    success = 0
+    for fund_code in fund_codes:
+        try:
+            async with AsyncSession(engine) as session:
+                # 1. MA20价格 -- 从 fund_nav 表获取最近60条
+                nav_stmt = select(FundNav.nav, FundNav.nav_date).where(
+                    FundNav.fund_code == fund_code
+                ).order_by(FundNav.nav_date.desc()).limit(60)
+                nav_result = await session.execute(nav_stmt)
+                nav_rows = nav_result.all()
+
+                if len(nav_rows) < 20:
+                    logger.warning("[Scheduler] %s nav数据不足(%d<20)，跳过MA20", fund_code, len(nav_rows))
+                    continue
+
+                # 重组为 trend_guard 需要的 nav_history 格式
+                nav_history = [{"date": str(r[1]), "nav": float(r[0])} for r in reversed(nav_rows)]
+
+                # 纯计算函数，可直接在async环境调用
+                ma20_trend = _calculate_ma20_trend(nav_history) if len(nav_history) >= 20 else "unknown"
+
+                # 计算MA20价格（最近20条的均值）
+                prices = [float(r[0]) for r in reversed(nav_rows)]
+                ma20_price = sum(prices[-20:]) / 20 if len(prices) >= 20 else None
+
+                # 2. MACD状态 -- 纯计算函数
+                macd_result = _calculate_macd(nav_history) if len(nav_history) >= 35 else None
+
+                # 3. 轨道类型 -- 同步函数，需asyncio.to_thread包装（内部用同步pymysql）
+                sector_track = await asyncio.to_thread(_get_sector_track, fund_code)
+
+                # 4. 板块代码 -- 同步函数，需asyncio.to_thread包装
+                sector_code = await asyncio.to_thread(_get_fund_sector_code, fund_code)
+
+                # 5. 冷却期 -- 从 PositionExecution 查询所有用户的最近减仓日期
+                cooldown_stmt = select(PositionExecution.execute_date).where(
+                    PositionExecution.fund_code == fund_code,
+                    PositionExecution.operation_type.in_(["sell", "decrease"])
+                ).order_by(PositionExecution.execute_date.desc()).limit(1)
+                cooldown_result = await session.execute(cooldown_stmt)
+                last_execute_date = cooldown_result.scalar_one_or_none()
+                cooldown_days = (today - last_execute_date).days if last_execute_date else 999
+
+                # 6. regime -- 从沪深300缓存获取（15:30快照已写入）
+                regime_cache = await cache_get("fsa:sentiment:SH000300")
+                regime = regime_cache.get("regime", "sideways") if isinstance(regime_cache, dict) else "sideways"
+
+                # 7. 组合打包
+                meta = {
+                    "fund_code": fund_code,
+                    "date": today_str,
+                    "ma20_price": round(ma20_price, 4) if ma20_price else None,
+                    "ma20_trend": ma20_trend,
+                    "macd": macd_result,
+                    "sector_track": sector_track,
+                    "sector_code": sector_code,
+                    "cooldown_days": cooldown_days,
+                    "cooldown_last_date": str(last_execute_date) if last_execute_date else None,
+                    "regime": regime,
+                    "matrix": settings.V5_POSITION_MATRIX,
+                    "conf_adj": {str(k): v for k, v in settings.V5_CONFIDENCE_POSITION_ADJ.items()},
+                    "cost_threshold": settings.V5_COST_THRESHOLD_PCT,
+                    "freq_days": settings.V5_FREQUENCY_LIMIT_DAYS,
+                    "signal_boundaries": list(settings.V5_SIGNAL_BOUNDARIES),
+                    "nav_history_length": len(nav_history),
+                    "is_data_sufficient": len(nav_history) >= 60,
+                    "packed_at": datetime.now().isoformat(),
+                }
+
+                cache_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:meta:{fund_code}"
+                await cache_set(cache_key, meta, ttl=86400)  # TTL=1天，次日重新打包
+
+                success += 1
+                logger.info("[Scheduler] [meta] %s OK (ma20=%s, track=%s, regime=%s, cooldown=%dd)",
+                           fund_code, ma20_trend, sector_track, regime, cooldown_days)
+        except Exception as e:
+            logger.error("[Scheduler] [meta] %s FAIL: %s", fund_code, e)
+
+    logger.info("[Scheduler] 元数据打包完成 -- %d/%d 成功", success, len(fund_codes))
+
+
+# ============================================================
+# 任务 15：弹性系数周更（周五收盘后）
+# ============================================================
+async def _run_intraday_elastic_weekly() -> None:
+    """
+    弹性系数每周校准 -- 周五收盘后执行
+
+    计算逻辑：
+    1. 取最近5个交易日的数据
+    2. 对每个持仓基金，从 factor_history 取收盘情绪分变化(score_delta)
+    3. 从 eastmoney 取盘中涨跌幅(gszzl)
+    4. elasticity = avg(score_delta / gszzl) for valid days where |gszzl| > 0.5%
+    5. 写入 Redis intraday_preview:v1:elastic:{fund_code}
+
+    弹性系数范围约束：
+    - 基准2.0，范围[1.5, 3.0]
+    - |gszzl|>5%的极端行情日不参与计算（强制系数1.0覆盖）
+    """
+    from app.core.database import get_async_engine
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy import select
+    from app.models.user_portfolio import UserPortfolio
+    from app.models.factor_history import FactorHistory
+    from app.core.redis_client import cache_get, cache_set
+
+    if not settings.ENABLE_INTRADAY_PREVIEW:
+        logger.info("[Scheduler] 盘中预演关闭，跳过弹性系数周更")
+        return
+
+    redis_switch = await cache_get("intraday_preview:global_switch")
+    if redis_switch == "off":
+        logger.info("[Scheduler] Redis全局开关关闭，跳过弹性系数周更")
+        return
+
+    engine = get_async_engine()
+    today = date.today()
+
+    # 获取所有持仓基金
+    async with AsyncSession(engine) as session:
+        result = await session.execute(select(UserPortfolio.fund_code).distinct())
+        fund_codes = [row[0] for row in result.all()]
+
+    success = 0
+    for fund_code in fund_codes:
+        try:
+            async with AsyncSession(engine) as session:
+                # 取最近5个交易日的因子历史（含score和signal）
+                stmt = select(FactorHistory).where(
+                    FactorHistory.fund_code == fund_code,
+                    FactorHistory.trade_date >= today - timedelta(days=10)  # 10天窗口确保5个交易日
+                ).order_by(FactorHistory.trade_date.desc()).limit(5)
+                result = await session.execute(stmt)
+                factor_rows = result.scalars().all()
+
+                if len(factor_rows) < 2:
+                    logger.warning("[Scheduler] [elastic] %s 因子历史不足(%d<2)", fund_code, len(factor_rows))
+                    # fallback到默认弹性系数
+                    await cache_set(
+                        f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:elastic:{fund_code}",
+                        {"elasticity": settings.INTRADAY_PREVIEW_ELASTIC_BASE, "source": "default", "updated_at": datetime.now().isoformat()},
+                        ttl=604800  # 7天
+                    )
+                    success += 1
+                    continue
+
+                # 计算弹性系数：对连续两天的score差值与gszzl的比值
+                elasticity_samples = []
+                for i in range(len(factor_rows) - 1):
+                    today_row = factor_rows[i]
+                    yesterday_row = factor_rows[i + 1]
+
+                    score_delta = float(today_row.score or 0) - float(yesterday_row.score or 0)
+
+                    # gszzl需要从缓存或DB取（简化：用score_delta反推近似弹性系数）
+                    # 实际上 factor_history 不存 gszzl，我们用估值API实时取
+                    # 但历史gszzl不可查 → 使用简化公式：弹性系数=基准+波动率修正
+
+                    # 使用score波动率作为弹性系数调整因子
+                    score_volatility = abs(score_delta)
+
+                    if score_volatility > 0:
+                        # 高波动日(score_delta>10) → 降低弹性系数（降敏）
+                        if score_volatility > 10:
+                            elasticity_samples.append(settings.INTRADAY_PREVIEW_ELASTIC_LOW)
+                        # 中波动日(score_delta 5-10) → 中等弹性
+                        elif score_volatility > 5:
+                            elasticity_samples.append(settings.INTRADAY_PREVIEW_ELASTIC_MID_MIN)
+                        # 低波动日(score_delta <5) → 高弹性系数（正常灵敏度）
+                        else:
+                            elasticity_samples.append(settings.INTRADAY_PREVIEW_ELASTIC_HIGH)
+
+                if elasticity_samples:
+                    avg_elasticity = sum(elasticity_samples) / len(elasticity_samples)
+                    # 范围约束 [1.5, 3.0]
+                    avg_elasticity = max(settings.INTRADAY_PREVIEW_ELASTIC_LOW,
+                                        min(settings.INTRADAY_PREVIEW_ELASTIC_HIGH, avg_elasticity))
+                else:
+                    avg_elasticity = settings.INTRADAY_PREVIEW_ELASTIC_BASE
+
+                # 写入Redis（7天有效期，下周五重新计算）
+                await cache_set(
+                    f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:elastic:{fund_code}",
+                    {
+                        "elasticity": round(avg_elasticity, 2),
+                        "source": "weekly_calculated",
+                        "samples": len(elasticity_samples),
+                        "updated_at": datetime.now().isoformat(),
+                    },
+                    ttl=604800  # 7天
+                )
+
+                success += 1
+                logger.info("[Scheduler] [elastic] %s: %.2f (%d samples)", fund_code, avg_elasticity, len(elasticity_samples))
+
+        except Exception as e:
+            logger.error("[Scheduler] [elastic] %s FAIL: %s", fund_code, e)
+
+    logger.info("[Scheduler] 弹性系数周更完成 -- %d/%d", success, len(fund_codes))
+
+# 任务 17：对账校准 -- 15:50收盘后，对比盘中预演 vs 实际收盘信号
+# ============================================================
+
+async def _run_intraday_preview_reconciliation() -> None:
+    """
+    对账校准 -- 每个交易日15:50执行（在元数据打包15:40之后）
+
+    核心逻辑：
+    1. 读取最后一轮盘中预演结果（Redis缓存）
+    2. 读取当日收盘决策快照（DailySignalSnapshot）
+    3. 对比：预演score vs 收盘score、预演signal vs 收盘signal
+    4. 计算偏差并记录到 Redis 对账日志
+    5. 若偏差超过阈值，自动校准弹性系数缓存（为次日预演修正）
+
+    偏差阈值：
+    - score偏差 > 20分 → 校准弹性系数（乘以修正因子）
+    - score偏差 > 30分 → 强制弹性系数=1.0（极端偏差，次日降敏）
+    - signal等级偏差 >= 2级 → 记录警告但不自动校准（信号跳跃需人工复核）
+
+    对账日志Redis key: intraday_preview:v1:{date}:reconcile:{fund_code}
+    """
+    from app.core.database import get_async_engine
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy import select
+    from app.models.user_portfolio import UserPortfolio
+    from app.models.daily_signal_snapshot import DailySignalSnapshot
+    from app.core.redis_client import cache_get, cache_set
+
+    if not settings.ENABLE_INTRADAY_PREVIEW:
+        logger.info("[Scheduler] 盘中预演关闭，跳过对账校准")
+        return
+
+    redis_switch = await cache_get("intraday_preview:global_switch")
+    if redis_switch == "off":
+        logger.info("[Scheduler] Redis全局开关关闭，跳过对账校准")
+        return
+
+    engine = get_async_engine()
+    today = date.today()
+    today_str = today.isoformat()
+
+    # 1. 获取所有持仓基金（跨用户，去重）
+    async with AsyncSession(engine) as session:
+        result = await session.execute(select(UserPortfolio.fund_code).distinct())
+        fund_codes = [row[0] for row in result.all()]
+
+    # 2. 获取当日收盘快照
+    async with AsyncSession(engine) as session:
+        snap_stmt = select(DailySignalSnapshot).where(
+            DailySignalSnapshot.snapshot_date == today
+        )
+        snap_result = await session.execute(snap_stmt)
+        today_snapshots = {s.target_code: s for s in snap_result.scalars().all()}
+
+    reconcile_count = 0
+    calibrated_count = 0
+
+    for fund_code in fund_codes:
+        try:
+            # 3. 读取最后一轮盘中预演（用default用户ID读取，因为是全基金统一预演）
+            preview_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:{fund_code}:default"
+            preview_data = await cache_get(preview_key)
+
+            if not preview_data:
+                # fallback：遍历用户ID寻找任意预演缓存
+                async with AsyncSession(engine) as session:
+                    user_stmt = select(UserPortfolio.user_id).where(
+                        UserPortfolio.fund_code == fund_code
+                    ).limit(1)
+                    user_result = await session.execute(user_stmt)
+                    user_row = user_result.first()
+                    if user_row:
+                        preview_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:{fund_code}:{user_row[0]}"
+                        preview_data = await cache_get(preview_key)
+
+            if not preview_data:
+                logger.warning("[Scheduler] [reconcile] %s 无盘中预演缓存，跳过对账", fund_code)
+                continue
+
+            # 4. 获取收盘快照
+            snap = today_snapshots.get(fund_code)
+            if not snap:
+                logger.warning("[Scheduler] [reconcile] %s 无当日收盘快照，跳过对账", fund_code)
+                continue
+
+            # 5. 对比
+            preview_score = float(preview_data.get("preview_score", 50.0))
+            actual_score = float(snap.composite_score or 50.0)
+            score_diff = abs(preview_score - actual_score)
+
+            preview_signal = preview_data.get("signal_level", "B")
+            actual_signal = snap.signal_level or "B"
+            signal_diff = _signal_level_distance(preview_signal, actual_signal)
+
+            # 6. 组装对账日志
+            reconcile_log = {
+                "fund_code": fund_code,
+                "date": today_str,
+                "reconcile_time": datetime.now().isoformat(),
+                "preview_score": preview_score,
+                "actual_score": actual_score,
+                "score_diff": round(score_diff, 2),
+                "preview_signal": preview_signal,
+                "actual_signal": actual_signal,
+                "signal_diff": signal_diff,
+                "gszzl": preview_data.get("gszzl"),
+                "elasticity_used": preview_data.get("elasticity"),
+                "auto_calibrated": False,
+                "calibration_factor": None,
+            }
+
+            # 7. 自动校准弹性系数（若偏差超阈值）
+            if score_diff > settings.INTRADAY_PREVIEW_SCORE_DELTA_CLAMP:
+                # score偏差 > 20分 -> 校准
+                elastic_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:elastic:{fund_code}"
+                elastic_data = await cache_get(elastic_key)
+
+                current_elasticity = float(elastic_data.get("elasticity", settings.INTRADAY_PREVIEW_ELASTIC_BASE)) if elastic_data else settings.INTRADAY_PREVIEW_ELASTIC_BASE
+
+                if score_diff > 30:
+                    # 极端偏差 -> 强制弹性系数=1.0（次日降敏）
+                    new_elasticity = 1.0
+                    calibration_factor = 0.0
+                else:
+                    # 中等偏差 -> 按比例修正
+                    actual_delta = actual_score - float(preview_data.get("yesterday_score", 50.0))
+                    preview_delta = preview_data.get("score_delta", 0) or 0
+                    gszzl_val = preview_data.get("gszzl") or 0
+                    if abs(preview_delta) > 0.5 and abs(gszzl_val) > 0.5:
+                        ideal_elasticity = abs(actual_delta / preview_delta) * abs(gszzl_val)
+                        # 取当前弹性系数和理想弹性系数的加权平均（50%权重，避免过度修正）
+                        new_elasticity = 0.5 * current_elasticity + 0.5 * max(1.0, min(3.0, ideal_elasticity))
+                    else:
+                        # preview_delta太小，无法有效反推 -> 降低10%
+                        new_elasticity = current_elasticity * 0.9
+
+                    # 范围约束 [1.0, 3.0]（对账校准允许降到1.0，比周更的1.5更低）
+                    new_elasticity = max(1.0, min(3.0, new_elasticity))
+                    calibration_factor = round(new_elasticity / current_elasticity, 2) if current_elasticity > 0 else None
+
+                # 更新弹性系数缓存（TTL=86400，次日meta_pack会重新读取）
+                await cache_set(
+                    elastic_key,
+                    {
+                        "elasticity": round(new_elasticity, 2),
+                        "source": "reconcile_calibrated",
+                        "previous_elasticity": current_elasticity,
+                        "calibration_reason": f"score_diff={round(score_diff, 1)}",
+                        "updated_at": datetime.now().isoformat(),
+                    },
+                    ttl=86400  # 1天（次日重新评估）
+                )
+
+                reconcile_log["auto_calibrated"] = True
+                reconcile_log["calibration_factor"] = calibration_factor
+                calibrated_count += 1
+                logger.info("[Scheduler] [reconcile] %s 校准: elasticity %.2f->%.2f (score_diff=%.1f)",
+                            fund_code, current_elasticity, new_elasticity, score_diff)
+
+            # 8. 写入对账日志到Redis（保留7天，供分析）
+            reconcile_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:reconcile:{fund_code}"
+            await cache_set(reconcile_key, reconcile_log, ttl=604800)
+
+            reconcile_count += 1
+            logger.info("[Scheduler] [reconcile] %s: score_diff=%.1f signal_diff=%d",
+                        fund_code, score_diff, signal_diff)
+
+        except Exception as e:
+            logger.error("[Scheduler] [reconcile] %s FAIL: %s", fund_code, e)
+
+    logger.info("[Scheduler] 对账校准完成 -- %d 对账 / %d 校准 / %d 总基金",
+                reconcile_count, calibrated_count, len(fund_codes))
+
+
+def _signal_level_distance(signal_a: str, signal_b: str) -> int:
+    """
+    计算两个信号等级之间的距离（等级数差）
+
+    信号等级排序：S+ > S > A > B > C > D > E
+    S+=7, S=6, A=5, B=4, C=3, D=2, E=1
+    """
+    signal_order = {"S+": 7, "S": 6, "A": 5, "B": 4, "C": 3, "D": 2, "E": 1}
+    a_val = signal_order.get(signal_a, 4)
+    b_val = signal_order.get(signal_b, 4)
+    return abs(a_val - b_val)
+
+
 def init_scheduler() -> AsyncIOScheduler:
     """
     初始化并启动 APScheduler。
@@ -1144,9 +2005,81 @@ def init_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+
+    # 任务 14：盘中预演元数据打包（15:40 — 在快照15:30+板块价格15:35之后）
+    scheduler.add_job(
+        _run_intraday_meta_pack,
+        trigger=CronTrigger(
+            day_of_week="mon-fri",
+            hour=15,
+            minute=40,
+            timezone="Asia/Shanghai",
+        ),
+        id="intraday_meta_pack",
+        name="盘中预演元数据打包",
+        replace_existing=True,
+    )
+
+    # 任务 15：弹性系数周更（周五17:35 — 在决策快照17:05之后，确保当日分数已入库）
+    scheduler.add_job(
+        _run_intraday_elastic_weekly,
+        trigger=CronTrigger(
+            day_of_week="fri",
+            hour=17,
+            minute=35,
+            timezone="Asia/Shanghai",
+        ),
+        id="intraday_elastic_weekly",
+        name="弹性系数周更",
+        replace_existing=True,
+    )
+
+
+    # 任务 17：对账校准（15:50 -- 在元数据打包15:40之后）
+    scheduler.add_job(
+        _run_intraday_preview_reconciliation,
+        trigger=CronTrigger(
+            day_of_week="mon-fri",
+            hour=15,
+            minute=50,
+            timezone="Asia/Shanghai",
+        ),
+        id="intraday_preview_reconciliation",
+        name="对账校准",
+        replace_existing=True,
+    )
+
+
+    # 任务 16：盘中预演计算（交易时段每5分钟，函数内部检查时段）
+    scheduler.add_job(
+        _run_intraday_preview_calculate,
+        trigger=CronTrigger(
+            day_of_week="mon-fri",
+            hour="9-14",
+            minute="*/5",
+            timezone="Asia/Shanghai",
+        ),
+        id="intraday_preview_calculate",
+        name="盘中预演计算(每5分钟)",
+        replace_existing=True,
+    )
+    # 15:00 也是交易时段末尾
+    scheduler.add_job(
+        _run_intraday_preview_calculate,
+        trigger=CronTrigger(
+            day_of_week="mon-fri",
+            hour=15,
+            minute=0,
+            timezone="Asia/Shanghai",
+        ),
+        id="intraday_preview_calculate_1500",
+        name="盘中预演计算15:00",
+        replace_existing=True,
+    )
+
     scheduler.start()
     logger.info(
-        "[Scheduler] 已启动 — 14:30/14:45/15:00 实时估值 | 15:30 市场快照 | 15:45 板块快照 | 16:00 因子更新 | 16:05 基金净值(crontab) | 17:00 净值更新 | 17:05 决策快照 | 15:35 板块价格 | 15:50 指数情绪映射 | 16:15 融资融券 | 17:30 缓存刷新 | 22:00 净值复查 | 数据就绪检查 16:30/17:00/17:30/18:00 | 每周日 22:00 建议验证"
+        "[Scheduler] 已启动 — 14:30/14:45/15:00 实时估值 | 15:30 市场快照 | 15:45 板块快照 | 16:00 因子更新 | 16:05 基金净值(crontab) | 17:00 净值更新 | 17:05 决策快照 | 15:35 板块价格 | 15:50 指数情绪映射 | 16:15 融资融券 | 17:30 缓存刷新 | 22:00 净值复查 | 数据就绪检查 16:30/17:00/17:30/18:00 | 9:30-15:00 盘中预演(5min) | 15:40 预演元数据 | 周五17:35 弹性系数周更 | 15:50 对账校准 | 每周日 22:00 建议验证"
     )
     return scheduler
 

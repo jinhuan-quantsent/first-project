@@ -3,6 +3,7 @@
  */
 import client from './client';
 import type { ApiResponse, PortfolioItem, PortfolioSummary, PositionAdviceData } from '../types';
+import type { IntradayPreviewData } from '../components/portfolio/types';
 
 /** 获取持仓列表 */
 export async function fetchPortfolioV5(): Promise<{ items: PortfolioItem[]; summary: PortfolioSummary }> {
@@ -18,6 +19,7 @@ export async function addPortfolioV5(params: {
   holding_shares?: number;
   cost_nav?: number;
   current_nav?: number;
+  market_value?: number;
   buy_date?: string;
   portfolio_tag?: string;
   weight_pct?: number;
@@ -60,6 +62,37 @@ export async function updatePortfolioMarketValue(
   return res.data.data;
 }
 
+/** 删除持仓 */
+export async function deletePortfolioV5(itemId: number): Promise<void> {
+  await client.delete(`/api/v5/portfolio/${itemId}`);
+}
+
+/** 手动加仓 */
+export async function increasePosition(
+  itemId: number,
+  amount: number,
+  date?: string,
+): Promise<{ id: number; fund_code: string; holding_shares: number; market_value: number; current_nav: number; total_return: number; return_rate: number }> {
+  const res = await client.post<ApiResponse<any>>(`/api/v5/portfolio/${itemId}/increase`, {
+    amount,
+    date: date || new Date().toISOString().slice(0, 10),
+  });
+  return res.data.data;
+}
+
+/** 手动减仓 */
+export async function decreasePosition(
+  itemId: number,
+  amount: number,
+  date?: string,
+): Promise<{ id: number; fund_code: string; holding_shares: number; market_value: number; current_nav: number; total_return: number; return_rate: number }> {
+  const res = await client.post<ApiResponse<any>>(`/api/v5/portfolio/${itemId}/decrease`, {
+    amount,
+    date: date || new Date().toISOString().slice(0, 10),
+  });
+  return res.data.data;
+}
+
 /** 获取历史建议 */
 export async function fetchAdviceHistoryV5(
   fundCode?: string,
@@ -82,4 +115,29 @@ export async function fetchTradeRecordsV5(
   if (page)       params.page       = page;
   const res = await client.get<ApiResponse<any>>('/api/v5/portfolio/trade-records', { params });
   return res.data.data;
+}
+
+/** 获取用户现金 */
+export async function fetchCashV5(): Promise<{ cash_amount: number; updated_at: string }> {
+  const res = await client.get<ApiResponse<any>>('/api/v5/portfolio/cash');
+  return res.data.data;
+}
+
+/** 更新用户现金 */
+export async function updateCashV5(cashAmount: number): Promise<{ cash_amount: number; updated_at: string }> {
+  const res = await client.post<ApiResponse<any>>('/api/v5/portfolio/cash', { cash_amount: cashAmount });
+  return res.data.data;
+}
+
+
+/** 获取盘中预演数据 */
+export async function fetchIntradayPreview(
+  fundCode: string,
+): Promise<IntradayPreviewData | null> {
+  const res = await client.get<ApiResponse<any>>(`/api/v5/intraday-preview/${fundCode}`);
+  if (res.data.code === 0 && res.data.data?.is_preview) {
+    return res.data.data;
+  }
+  // 数据未就绪或功能关闭
+  return res.data.data || null;
 }

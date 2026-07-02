@@ -155,14 +155,35 @@ class Settings(BaseSettings):
         "INDUSTRY_DIVERGENCE": {"label": "行业分歧度", "direction": "fear", "weight": 0.03, "sigmoid_c": 0.50, "sigmoid_k": 2.0, "source": "sector"},
     })
 
+
+
+    # --- V5.0 板块因子配置 (独立于 V5_FACTOR_CONFIG, 5因子方案) ---
+    # IC/IR 验证后定稿: TURN/VOL/NHNL/RSI 有效, MOM/ADR 剔除
+    # direction: greed=高值利多, fear=高值利空
+    # reverse: True=信号需翻转 (fear方向因子在Sigmoid后做100-score)
+    V5_SECTOR_FACTOR_CONFIG: dict = Field(default_factory=lambda: {
+        "TURN": {"weight": 0.28, "direction": "fear",  "sigmoid_c": 0.50, "sigmoid_k": 2.0, "reverse": True},
+        "VOL":  {"weight": 0.25, "direction": "greed", "sigmoid_c": 0.50, "sigmoid_k": 3.0, "reverse": False},
+        "NHNL": {"weight": 0.20, "direction": "greed", "sigmoid_c": 0.60, "sigmoid_k": 2.5, "reverse": False},
+        "RSI":  {"weight": 0.15, "direction": "greed", "sigmoid_c": 0.50, "sigmoid_k": 2.5, "reverse": False},
+        "DIV":  {"weight": 0.12, "direction": "fear",  "sigmoid_c": 0.50, "sigmoid_k": 2.0, "reverse": True},
+    })
     # --- V5.0 分位数标准化窗口 ---
     V5_QUANTILE_WINDOW_DAYS: int = 1260  # 5年 × 252交易日
     V5_QUANTILE_MIN_SAMPLES: int = 252   # 最少1年数据
 
     # --- V5.0 分歧度动态加权 ---
-    V5_DIVERGENCE_PENALTY_MIN: float = 0.5   # 最大分歧时惩罚系数
+    V5_DIVERGENCE_PENALTY_MIN: float = 0.85   # 最大分歧时惩罚系数
     V5_DIVERGENCE_PENALTY_MAX: float = 1.0   # 无分歧时惩罚系数
-    V5_DIVERGENCE_STD_THRESHOLD: float = 15.0  # 触发防线的factor_std阈值（Sigmoid得分0-100范围）
+    V5_DIVERGENCE_STD_THRESHOLD: float = 30.0  # 触发防线的factor_std阈值（Sigmoid得分0-100范围）
+
+    # --- V5.0 板块引擎独立信号边界 ---
+    # 5因子加权平均自然范围[25,72]比14因子[8,85]窄，用独立边界避免极端信号永远不触发
+    # 训练期P3/P8/P20/P80/P90/P95分位数校准: S+<36, S<40, A<45, B<55, C<58, D<62, E>=62
+    V5_SECTOR_SIGNAL_THRESHOLDS: List[float] = Field(default_factory=lambda: [36, 40, 45, 55, 58, 62])
+
+    # ── 建仓评级开关 ──
+    ENABLE_BUILD_RATING: bool = True  # False时隐藏所有评级字段
 
     # --- V5.0 防跳变规则 ---
     V5_ANTI_JUMP_SMALL_DIFF: int = 10   # 分数差<10 → 最多变1级
@@ -193,6 +214,16 @@ class Settings(BaseSettings):
     V5_COST_THRESHOLD_PCT: float = 0.015  # 1.5% 低于此不操作
     V5_FREQUENCY_LIMIT_DAYS: int = 7      # 7天内同基金只能执行一次
 
+    # --- V5.1 仓位分母配置 ---
+    V5_POSITION_DENOMINATOR: str = 'total_assets'  # 分母类型: 'total_assets'(总资产=市值+现金) 或 'market_value'(旧=仅市值)
+
+    # --- V5.1 组合约束配置 ---
+    V5_TOTAL_POSITION_CAP: float = 0.80     # 总仓位上限 (Sigma target_pct <= 80%, 留20%现金缓冲)
+    V5_SECTOR_POSITION_CAP: float = 0.25    # 板块仓位上限 (同板块Sigma target_pct <= 25%)
+    V5_SINGLE_FUND_CAP: float = 0.30        # 单基金上限 (target_pct <= 30%, 防集中度)
+    V5_CASH_BUFFER_RATIO: float = 0.20      # 现金缓冲比例 (总资产 x 20%作为最低现金持有)
+    ENABLE_PORTFOLIO_CONSTRAINTS: bool = True  # 组合约束开关 (关闭后跳过裁剪, 回到纯矩阵查表)
+
     # --- V5.0 四道假信号防线 ---
     V5_DEFENSE_EXTREME_VOLATILITY: bool = True  # 防线1: 市场极端波动
     V5_DEFENSE_JUMP_GT_15: bool = True         # 防线2: 信号跳变>15分
@@ -203,10 +234,10 @@ class Settings(BaseSettings):
     # 方案B: 板块过滤器 + 趋势卫士
     # ============================================================
     # --- 板块过滤器开关 ---
-    ENABLE_SECTOR_FILTER: bool = False  # 板块过滤器（建仓拦截）
+    ENABLE_SECTOR_FILTER: bool = True  # 板块过滤器（建仓拦截）
 
     # --- 趋势卫士开关 ---
-    ENABLE_TREND_GUARD: bool = False   # 趋势卫士（持仓文案引导）
+    ENABLE_TREND_GUARD: bool = True   # 趋势卫士（持仓文案引导）
 
     # --- 板块过滤器阈值 (可选，默认使用硬编码值) ---
     SECTOR_FILTER_UP_DAYS_RATIO_THRESHOLD: float = 0.50   # 20日上涨占比阈值 (50%)
@@ -221,6 +252,40 @@ class Settings(BaseSettings):
     TREND_GUARD_OSCILLATION_DAYS: int = 20   # 震荡判断周期
     TREND_GUARD_OSCILLATION_CROSS_THRESHOLD: int = 3  # 震荡判断穿越次数阈值
     TREND_GUARD_OSCILLATION_AMPLITUDE_THRESHOLD: float = 0.05  # 震荡判断振幅阈值 (5%)
+
+    # ============================================================
+    # 盘中预演配置 (Intraday Preview)
+    # ============================================================
+    # 全局开关（与Redis开关 intraday_preview:global_switch 双保险）
+    ENABLE_INTRADAY_PREVIEW: bool = True
+    # Redis缓存key前缀
+    INTRADAY_PREVIEW_CACHE_PREFIX: str = "intraday_preview:v1"
+    # 盘中预计算结果缓存TTL（秒）— 与scheduler每5分钟刷新对齐
+    INTRADAY_PREVIEW_CACHE_TTL: int = 300
+    # 缓存异步续期偏移（第240秒=300-60触发续期，避免前端读到过期数据）
+    INTRADAY_PREVIEW_RENEWAL_OFFSET: int = 60
+    # ── 弹性系数参数 ──
+    # 基准2.0（从3.0修正，实测沪深300涨1%→变动2-2.5分）
+    INTRADAY_PREVIEW_ELASTIC_BASE: float = 2.0
+    INTRADAY_PREVIEW_ELASTIC_LOW: float = 1.5      # 高波动(|gszzl|>3%)范围下限
+    INTRADAY_PREVIEW_ELASTIC_MID_MIN: float = 2.0   # 中波动范围下限
+    INTRADAY_PREVIEW_ELASTIC_MID_MAX: float = 2.5   # 中波动范围上限
+    INTRADAY_PREVIEW_ELASTIC_HIGH: float = 3.0      # 低波动(|gszzl|<1%)范围上限
+    INTRADAY_PREVIEW_ELASTIC_EXTREME_CLAMP: float = 1.0  # |gszzl|>5%强制系数（极端行情降敏）
+    INTRADAY_PREVIEW_SCORE_DELTA_CLAMP: float = 20.0     # score_delta clamp范围（防信号跳变）
+    INTRADAY_PREVIEW_GSZZL_ANOMALY_THRESHOLD: float = 10.0  # ±10%涨跌幅异常阈值（丢弃异常估值）
+    # ── Scheduler时间配置 ──
+    INTRADAY_PREVIEW_META_PACK_TIME: str = "15:40"  # 元数据打包时间（收盘后）
+    INTRADAY_PREVIEW_SCHEDULE_TIMES: list = Field(default_factory=lambda: [
+        "9:35", "10:00", "10:30", "11:00",
+        "13:05", "13:30", "14:00", "14:30", "14:45",
+    ])  # 盘中预计算时间点（避开开收盘波动+午休）
+    # ── 对账校准 ──
+    INTRADAY_PREVIEW_RECONCILE_TIME: str = "15:50"  # 对账校准时间
+    INTRADAY_PREVIEW_ELASTIC_WEEKLY_UPDATE_DAY: str = "fri"  # 弹性系数周更日
+    INTRADAY_PREVIEW_ELASTIC_WEEKLY_UPDATE_TIME: str = "15:45"  # 弹性系数周更时间
+
+
 
     model_config = {
         "env_file": ".env",
