@@ -16,6 +16,20 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import settings
 
+# --- aiomysql 兼容性修复 ---
+# pool_pre_ping=True 要求 ping(retry=True)，但 aiomysql.Connection.ping()
+# 不接受 retry 参数。Monkey-patch 使其兼容 SQLAlchemy 的连接健康检查。
+try:
+    import aiomysql
+    if not hasattr(aiomysql.Connection, '_original_ping'):
+        aiomysql.Connection._original_ping = aiomysql.Connection.ping
+        async def _patched_ping(self, retry=True):
+            return await self._original_ping()
+        aiomysql.Connection.ping = _patched_ping
+        print("aiomysql ping() monkey-patch applied")
+except ImportError:
+    pass
+
 
 class Base(DeclarativeBase):
     """SQLAlchemy Base Model"""
@@ -41,7 +55,7 @@ async def init_db() -> None:
     # 构建 engine 参数
     engine_args = {
         "echo": settings.DEBUG,
-        "pool_pre_ping": False,
+        "pool_pre_ping": True,
     }
     
     # SQLite 不需要连接池参数

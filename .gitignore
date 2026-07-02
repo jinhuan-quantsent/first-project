@@ -1,43 +1,23 @@
-# 备份文件
-*.bak_*
-*.bak_scorev4_*
-
-# SQLite 数据库
-*.db
-data/*.db
-
-# Python
 __pycache__/
-*.py[cod]
-*.class
-*.so
-.Python
+*.pyc
+*.pyo
+*.bak
+*.env
+*.pem
+*.log
+node_modules/
+dist/
+.DS_Store
+.venv/
 venv/
-env/
-
-# 环境变量
-.env
-
-# IDE
-.vscode/
-.idea/
 *.swp
 *.swo
-
-# 日志
-*.log
-
-# 前端
+*~
+venv/
+.venv/
+env/
+node_modules/
+*.egg-info/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
-test_bclass_factors.py
-
-# 临时/备份文件
-*.bak
-backend/b1_fix_composite_backfill.py
-backend/b2_fix_sectors.py
-backend/migrate_codes.py
-backend/verify_b1.py
-backend/data/
-backend/app/engine/v5.py

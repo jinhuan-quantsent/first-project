@@ -95,7 +95,7 @@ async def search_funds_em(
     """
     东方财富基金搜索
 
-    接口: http://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx
+    接口: https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx
     支持按代码、名称、拼音首字母搜索
 
     Returns:
@@ -112,7 +112,7 @@ async def search_funds_em(
     if cached is not None:
         return cached
 
-    url = "http://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx"
+    url = "https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx"
     params = {
         "callback": "",
         "m": "1",
@@ -122,7 +122,7 @@ async def search_funds_em(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(url, params=params)
             resp.raise_for_status()
             data = resp.json()
@@ -184,7 +184,7 @@ async def get_fund_realtime(code: str) -> Optional[dict]:
     """
     获取基金实时估值（仅交易时间有效）
 
-    接口: http://fundgz.1234567.com.cn/js/{code}.js
+    接口: https://fundgz.1234567.com.cn/js/{code}.js
     返回JSONP格式: jsonpgz({...})
 
     Returns:
@@ -203,9 +203,9 @@ async def get_fund_realtime(code: str) -> Optional[dict]:
     if cached is not None:
         return cached
 
-    url = f"http://fundgz.1234567.com.cn/js/{code}.js"
+    url = f"https://fundgz.1234567.com.cn/js/{code}.js"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             text = resp.text
@@ -242,7 +242,7 @@ async def get_fund_holdings(code: str) -> Optional[list[dict]]:
     """
     获取基金持仓股票信息
 
-    接口: http://fund.eastmoney.com/pingzhongdata/{code}.js
+    接口: https://fund.eastmoney.com/pingzhongdata/{code}.js
     解析 stockCodes 变量
 
     Returns:
@@ -253,9 +253,9 @@ async def get_fund_holdings(code: str) -> Optional[list[dict]]:
     if cached is not None:
         return cached
 
-    url = f"http://fund.eastmoney.com/pingzhongdata/{code}.js"
+    url = f"https://fund.eastmoney.com/pingzhongdata/{code}.js"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             text = resp.text
@@ -287,6 +287,82 @@ async def get_fund_holdings(code: str) -> Optional[list[dict]]:
         return None
 
 
+
+# ============================================================
+# 3b. 批量获取股票名称和实时行情
+# ============================================================
+async def get_stock_info_batch(stocks: list[dict]) -> dict:
+    """
+    批量获取股票名称和实时行情（腾讯财经 API）
+
+    东方财富 push2 API 从云服务器 IP 返回空响应，改用腾讯财经 API。
+    一次请求可查多个股票（逗号分隔），效率更高。
+
+    Args:
+        stocks: [{"stock_code": "600519", "exchange": "SH"}, ...]
+
+    Returns:
+        {"600519": {"name": "贵州茅台", "price": 1689.0, "change_pct": 1.23}, ...}
+    """
+    result: dict = {}
+    if not stocks:
+        return result
+
+    query_parts = []
+    code_to_query = {}
+    for s in stocks:
+        stock_code = s.get("stock_code", "")
+        exchange = s.get("exchange", "").upper()
+        if not stock_code:
+            continue
+        prefix = "sh" if exchange == "SH" else "sz"
+        query_key = f"{prefix}{stock_code}"
+        query_parts.append(query_key)
+        code_to_query[stock_code] = query_key
+
+    if not query_parts:
+        return result
+
+    url = f"http://qt.gtimg.cn/q={','.join(query_parts)}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            text = resp.text
+
+        for line in text.strip().split("\n"):
+            line = line.strip()
+            if not line or "=" not in line:
+                continue
+            key_part = line.split("=")[0].strip()
+            query_key = key_part.replace("v_", "")
+            if '="' in line:
+                value_part = line.split('="', 1)[1]
+                if value_part.endswith('";'):
+                    value_part = value_part[:-2]
+                elif value_part.endswith('"'):
+                    value_part = value_part[:-1]
+            else:
+                continue
+            fields = value_part.split("~")
+            if len(fields) < 4:
+                continue
+            stock_name = fields[1] if len(fields) > 1 else ""
+            price = _safe_float(fields[3]) if len(fields) > 3 else None
+            change_pct = _safe_float(fields[32]) if len(fields) > 32 else 0.0
+
+            for sc, qk in code_to_query.items():
+                if qk == query_key:
+                    result[sc] = {
+                        "name": stock_name,
+                        "price": price,
+                        "change_pct": round(change_pct, 2) if change_pct is not None else 0.0,
+                    }
+                    break
+    except Exception as e:
+        logger.warning("腾讯财经API批量获取股票信息失败: %s", e)
+
+    return result
 # ============================================================
 # 4. Tushare 基金基础信息
 # ============================================================
@@ -307,7 +383,6 @@ async def get_fund_basic_tushare(ts_code: str) -> Optional[dict]:
 
     try:
         from app.utils.data_source import data_source
-        await data_source.initialize()
         if not data_source._tushare_pro:
             return None
 
@@ -378,7 +453,6 @@ async def get_fund_nav_history(
 
     try:
         from app.utils.data_source import data_source
-        await data_source.initialize()
         if not data_source._tushare_pro:
             return None
 
@@ -732,26 +806,44 @@ _SW_INDUSTRY_TO_CSI = {
 
 # 热门概念板块 → 腾讯可查指数代码
 _CONCEPT_SECTORS = {
-    "白酒": "sz399997",
-    "新能源车": "sz399976",
-    "锂电池": "sz399928",
-    "半导体": "sz399959",
-    "人工智能": "sh000938",
-    "光伏": "sz399808",
-    "军工": "sz399967",
-    "医药": "sz399975",
-    "消费": "sz399932",
-    "芯片": "sz399959",
-    "5G": "sz399941",
-    "碳中和": "sh000960",
-    "稀土": "sz399810",
-    "医美": "sz399970",
-    "机器人": "sz399997",
-    "数字经济": "sh000938",
-    "元宇宙": "sz399971",
-    "储能": "sz399808",
-    "氢能源": "sz399808",
-    "CRO": "sz399975",
+    # 热门概念板块（腾讯API代码，2026-06实测验证）
+    "白酒": "sz399997",          # 中证白酒
+    "新能源车": "sz399976",      # CS新能车
+    "新能源": "sz399941",        # 新能源
+    "光伏": "sz399808",         # 中证新能
+    "储能": "sz399808",         # 中证新能
+    "军工": "sz399967",         # 中证军工
+    "国防": "sz399973",         # 中证国防
+    "消费": "sz399932",         # 中证消费
+    "电子": "sz399811",         # CSSW电子（含半导体/芯片）
+    "半导体": "sz399811",       # CSSW电子（无独立指数，用电子替代）
+    "芯片": "sz399811",         # CSSW电子
+    "传媒": "sz399971",         # 中证传媒
+    "移动互联": "sz399970",      # 移动互联
+    "人工智能": "sz399970",      # 移动互联（最接近）
+    "数字经济": "sz399970",      # 移动互联
+    "信息安全": "sz399994",      # 信息安全
+    "医药": "sz399933",         # 中证医药（修复：原sz399975错误）
+    "医疗": "sz399989",         # 中证医疗
+    "CXO": "sz399989",         # 中证医疗
+    "中证酒": "sz399987",       # 中证酒
+    "证券": "sz399975",         # 证券公司
+    "金融科技": "sz399805",      # 互联金融
+    "环境治理": "sz399806",      # 环境治理
+    "国企改革": "sz399974",      # 国企改革
+    "一带一路": "sz399991",      # 一带一路
+    "基建工程": "sz399995",      # 基建工程
+    "中证煤炭": "sz399998",      # 中证煤炭
+    "大宗商品": "sz399979",      # 大宗商品
+    "工业4.0": "sz399803",     # 工业4.0
+    "高铁": "sz399807",         # 高铁产业
+    "养老": "sz399812",         # 养老产业
+    "农业": "sz399814",         # 大农业
+    "低碳": "sz399977",         # 内地低碳
+    "稀土": "sz399928",         # 中证材料（最接近）
+    "房地产": "sz399948",       # 内地地产
+    "银行": "sz399986",         # 中证银行
+    "保险": "sz399809",         # 保险主题
 }
 
 
@@ -820,78 +912,6 @@ def _parse_tencent_quote(raw: str) -> Optional[dict]:
         return None
 
 
-def _get_mock_sector_data(sector_type: str) -> list:
-    """
-    生成 mock 板块数据（格式与腾讯API一致）
-    用于腾讯API不可用时的兜底
-    """
-    import random
-    
-    if sector_type == "industry":
-        # 申万一级行业
-        sectors = [
-            ("801010", "农林牧渔", 2850.0),
-            ("801020", "采掘", 1250.0),
-            ("801030", "化工", 3850.0),
-            ("801040", "钢铁", 2450.0),
-            ("801050", "有色金属", 4250.0),
-            ("801080", "建筑材料", 5650.0),
-            ("801880", "汽车", 6250.0),
-            ("801110", "家用电器", 7250.0),
-            ("801120", "食品饮料", 18500.0),
-            ("801130", "纺织服装", 1650.0),
-            ("801140", "轻工制造", 2250.0),
-            ("801200", "商业贸易", 2850.0),
-            ("801750", "计算机", 4250.0),
-            ("801770", "通信", 2850.0),
-            ("801780", "银行", 3650.0),
-            ("801790", "非银金融", 4850.0),
-            ("801800", "房地产", 1250.0),
-            ("801810", "电子", 5250.0),
-            ("801820", "电气设备", 6850.0),
-        ]
-    else:
-        # 热门概念板块
-        sectors = [
-            ("BK001", "人工智能", 1250.0),
-            ("BK002", "芯片概念", 850.0),
-            ("BK003", "新能源车", 950.0),
-            ("BK004", "光伏", 650.0),
-            ("BK005", "半导体", 1050.0),
-            ("BK006", "5G概念", 750.0),
-            ("BK007", "生物医药", 1450.0),
-            ("BK008", "云计算", 1150.0),
-            ("BK009", "大数据", 950.0),
-            ("BK010", "车联网", 820.0),
-        ]
-    
-    items = []
-    for code, name, base_price in sectors:
-        change_pct = round((random.random() - 0.45) * 5, 2)  # -2.25% ~ 2.75%
-        price = round(base_price * (1 + change_pct / 100), 2)
-        change_amt = round(price - base_price, 2)
-        volume = round(random.random() * 1000000, 0)
-        amount = round(random.random() * 500000, 2)
-        turnover = round(random.random() * 5, 2)
-        high = round(price * 1.02, 2)
-        low = round(price * 0.98, 2)
-        
-        items.append({
-            "code": code,
-            "name": name,
-            "price": price,
-            "change_pct": change_pct,
-            "change_amt": change_amt,
-            "volume": volume,
-            "amount": amount,
-            "turn_over": turnover,
-            "high": high,
-            "low": low,
-        })
-    
-    return items
-
-
 async def get_sector_list(
     sector_type: str = "industry",
     page: int = 1,
@@ -938,7 +958,7 @@ async def get_sector_list(
         batch = tencent_codes[i:i + batch_size]
         query = ",".join(batch)
         try:
-            async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
                 resp = await client.get(f"http://qt.gtimg.cn/q={query}")
                 text = resp.text
 
@@ -964,13 +984,6 @@ async def get_sector_list(
                     })
         except Exception as e:
             logger.warning("腾讯行情批量获取失败: %s", e)
-            # 生成 mock 数据兜底
-            items = _get_mock_sector_data(sector_type)
-
-    # 如果没有获取到真实数据，使用 mock 数据兜底
-    if not items:
-        logger.warning("腾讯API无数据，使用 mock 数据")
-        items = _get_mock_sector_data(sector_type)
 
     # 排序
     reverse = sort_order == "desc"
@@ -1027,7 +1040,7 @@ async def get_sector_detail(code: str) -> Optional[dict]:
             name = concept_name
 
     try:
-        async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "Mozilla/5.0"}) as client:
+        async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True) as client:
             resp = await client.get(f"http://qt.gtimg.cn/q={tencent_code}")
             parsed = _parse_tencent_quote(resp.text)
 

@@ -13,6 +13,16 @@ from app.core.config import settings
 from app.core.database import init_db, close_db
 from app.core.redis_client import init_redis, close_redis
 
+import logging
+import sys as _sys
+
+# 确保 app 命名空间日志输出到 stderr (uvicorn 默认只配置 uvicorn namespace)
+_app_log_handler = logging.StreamHandler(_sys.stderr)
+_app_log_handler.setLevel(logging.INFO)
+_app_log_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s'))
+logging.getLogger('app').addHandler(_app_log_handler)
+logging.getLogger('app').setLevel(logging.INFO)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -20,6 +30,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 启动
     await init_db()
     await init_redis()
+
+    # 初始化数据源（Tushare Pro + AKShare），确保 eastmoney.py 等模块可用
+    from app.utils.data_source import data_source
+    await data_source.initialize()
 
     # 启动定时任务调度器（每日收盘后自动快照）
     from app.core.scheduler import init_scheduler
@@ -77,6 +91,7 @@ from app.api.review_v5 import router as review_v5_router
 from app.api.portfolio import router as portfolio_router
 from app.api.watchlist import router as watchlist_router
 from app.api.market import router as market_router
+from app.api.admin import router as admin_router
 
 # V5 核心路由（已自带 /api/v5 前缀）
 app.include_router(health_router, prefix="", tags=["健康检查"])
@@ -97,6 +112,9 @@ app.include_router(watchlist_router, prefix="", tags=["自选基金"])
 
 # 回测引擎（保留原始前缀 /api/v5/backtest）
 app.include_router(review_v5_router, prefix="", tags=["V5.0回测引擎"])
+
+# Manage operations (manual backfill, etc.)
+app.include_router(admin_router, prefix="", tags=["Manage"])
 
 
 @app.get("/")

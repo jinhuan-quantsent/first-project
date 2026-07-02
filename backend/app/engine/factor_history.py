@@ -24,20 +24,23 @@ DEFAULT_LOOKBACK = 750
 
 
 # ============================================================
-# V5.0 新增：11因子元数据配置
+# V5.0：14因子元数据配置（与 config.py V5_FACTOR_CONFIG 对齐）
 # ============================================================
 V5_FACTOR_META: list[dict] = [
-    {"name": "VOL",  "label": "波动率", "direction": "fear", "weight": 0.12, "source": "index_daily"},
-    {"name": "ADR",  "label": "涨跌比", "direction": "greed", "weight": 0.12, "source": "limit_list_d"},
-    {"name": "ERP",  "label": "股债性价比", "direction": "fear", "weight": 0.12, "source": "index_dailybasic+bond"},
-    {"name": "FLOW", "label": "资金流", "direction": "greed", "weight": 0.10, "source": "fund_daily"},
-    {"name": "ETF",  "label": "ETF份额", "direction": "greed", "weight": 0.08, "source": "fund_daily"},
-    {"name": "NHNL", "label": "新高占比", "direction": "greed", "weight": 0.08, "source": "index_daily"},
-    {"name": "TURN", "label": "换手率", "direction": "fear", "weight": 0.08, "source": "index_dailybasic"},
-    {"name": "POS",  "label": "基金仓位", "direction": "greed", "weight": 0.08, "source": "fund_portfolio"},
+    {"name": "VOL",  "label": "波动率", "direction": "fear", "weight": 0.11, "source": "index_daily"},
+    {"name": "ADR",  "label": "涨跌比", "direction": "greed", "weight": 0.11, "source": "limit_list_d"},
+    {"name": "ERP",  "label": "股债性价比", "direction": "fear", "weight": 0.11, "source": "index_dailybasic+bond"},
+    {"name": "FLOW", "label": "资金流", "direction": "greed", "weight": 0.09, "source": "fund_daily"},
+    {"name": "ETF",  "label": "ETF份额", "direction": "greed", "weight": 0.07, "source": "fund_daily"},
+    {"name": "NHNL", "label": "新高占比", "direction": "greed", "weight": 0.07, "source": "index_daily"},
+    {"name": "TURN", "label": "换手率", "direction": "fear", "weight": 0.07, "source": "index_dailybasic"},
+    {"name": "POS",  "label": "基金仓位", "direction": "greed", "weight": 0.07, "source": "fund_portfolio"},
     {"name": "NBF",  "label": "北向资金", "direction": "greed", "weight": 0.06, "source": "moneyflow_hsgt"},
     {"name": "PCR",  "label": "认沽认购比", "direction": "fear", "weight": 0.02, "source": "opt_daily"},
     {"name": "NEWF", "label": "新发基金热度", "direction": "greed", "weight": 0.04, "source": "fund_basic"},
+    {"name": "MARGIN", "label": "融资融券", "direction": "greed", "weight": 0.04, "source": "tushare_margin"},
+    {"name": "RSI",  "label": "RSI指标", "direction": "fear", "weight": 0.03, "source": "index_daily"},
+    {"name": "INDUSTRY_DIVERGENCE", "label": "行业分歧度", "direction": "fear", "weight": 0.03, "source": "sector"},
 ]
 
 
@@ -50,7 +53,7 @@ def get_factor_meta(factor_name: str) -> dict | None:
 
 
 def get_all_factor_names() -> list[str]:
-    """获取全部11因子名称"""
+    """获取全部14因子名称"""
     return [m["name"] for m in V5_FACTOR_META]
 
 
@@ -100,13 +103,19 @@ class FactorHistoryStore:
                     constraint="uq_factor_history",
                 )
             else:
-                # SQLite 模式：INSERT OR IGNORE（语义等价，同样利用唯一约束去重）
-                stmt = Insert(FactorHistory).prefix_with("OR IGNORE").values(**values)
-            await session.execute(stmt)
-            await session.commit()
+                # MySQL 用 INSERT IGNORE，SQLite 用 INSERT OR IGNORE
+                db_url_lower = settings.db_url.lower()
+                if 'mysql' in db_url_lower:
+                    from sqlalchemy.dialects.mysql import insert as mysql_insert
+                    stmt = mysql_insert(FactorHistory).values(**values).on_duplicate_key_update(
+                        raw_value=values["raw_value"],
+                    )
+                else:
+                    stmt = Insert(FactorHistory).prefix_with("OR IGNORE").values(**values)
+            async with session.begin_nested():
+                await session.execute(stmt)
             return True
         except Exception as e:
-            await session.rollback()
             print(f"⚠️ factor_history insert error: {e}")
             return False
 
@@ -132,13 +141,19 @@ class FactorHistoryStore:
                         constraint="uq_factor_history",
                     )
                 else:
-                    # SQLite 模式：INSERT OR IGNORE
-                    stmt = Insert(FactorHistory).prefix_with("OR IGNORE").values(**values)
-                await session.execute(stmt)
+                    # MySQL 用 INSERT IGNORE，SQLite 用 INSERT OR IGNORE
+                    db_url_lower = settings.db_url.lower()
+                    if 'mysql' in db_url_lower:
+                        from sqlalchemy.dialects.mysql import insert as mysql_insert
+                        stmt = mysql_insert(FactorHistory).values(**values).on_duplicate_key_update(
+                            raw_value=values["raw_value"],
+                        )
+                    else:
+                        stmt = Insert(FactorHistory).prefix_with("OR IGNORE").values(**values)
+                async with session.begin_nested():
+                    await session.execute(stmt)
                 count += 1
-            await session.commit()
         except Exception as e:
-            await session.rollback()
             print(f"⚠️ factor_history batch insert error: {e}")
         return count
 
@@ -151,10 +166,10 @@ class FactorHistoryStore:
     ) -> list[float]:
         """获取历史序列，按日期升序"""
         try:
-            # trade_date 在 DB 中存储为 "YYYYMMDD" 格式（无横线）
+            # trade_date 在 DB 中存储为 "YYYY-MM-DD" 格式（ISO 8601）
             # 必须用相同格式比较，否则字符串排序会出错
             cutoff_date = date.today() - timedelta(days=lookback_days)
-            cutoff = cutoff_date.strftime("%Y%m%d")
+            cutoff = cutoff_date.strftime("%Y-%m-%d")
             stmt = (
                 select(FactorHistory.raw_value)
                 .where(
@@ -168,6 +183,32 @@ class FactorHistoryStore:
             return list(result.scalars().all())
         except Exception as e:
             print(f"⚠️ factor_history get_series error: {e}")
+            return []
+
+    async def get_series_with_dates(
+        self,
+        session: AsyncSession,
+        index_code: str,
+        factor_name: str,
+        lookback_days: int = DEFAULT_LOOKBACK,
+    ) -> list[tuple[str, float]]:
+        """获取历史序列（含日期），按日期升序，返回 (trade_date, raw_value) 元组列表"""
+        try:
+            cutoff_date = date.today() - timedelta(days=lookback_days)
+            cutoff = cutoff_date.strftime("%Y-%m-%d")
+            stmt = (
+                select(FactorHistory.trade_date, FactorHistory.raw_value)
+                .where(
+                    FactorHistory.index_code == _normalize_code(index_code),
+                    FactorHistory.factor_name == factor_name,
+                    FactorHistory.trade_date >= cutoff,
+                )
+                .order_by(FactorHistory.trade_date.asc())
+            )
+            result = await session.execute(stmt)
+            return [(str(row[0]), float(row[1])) for row in result.all()]
+        except Exception as e:
+            print(f"⚠️ factor_history get_series_with_dates error: {e}")
             return []
 
     async def get_percentile(
@@ -262,6 +303,9 @@ class FactorHistoryStore:
             if df_basic is not None and not df_basic.empty:
                 for _, row in df_basic.iterrows():
                     td = str(row.get("trade_date", ""))
+                    # 转换 Tushare YYYYMMDD → ISO YYYY-MM-DD
+                    if len(td) == 8 and td.isdigit():
+                        td = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
                     turnover_map[td] = float(row.get("turnover_rate", 0))
                     pe_val = row.get("pe")
                     pe_map[td] = float(pe_val) if pe_val else 0
@@ -280,6 +324,9 @@ class FactorHistoryStore:
             if df_margin is not None and not df_margin.empty:
                 for _, row in df_margin.iterrows():
                     td = str(row.get("trade_date", ""))
+                    # 转换 Tushare YYYYMMDD → ISO YYYY-MM-DD
+                    if len(td) == 8 and td.isdigit():
+                        td = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
                     margin_map[td] = float(row.get("rzye", 0))
 
             # 4. 获取北向资金数据
@@ -296,6 +343,9 @@ class FactorHistoryStore:
             if df_flow is not None and not df_flow.empty:
                 for _, row in df_flow.iterrows():
                     td = str(row.get("trade_date", ""))
+                    # 转换 Tushare YYYYMMDD → ISO YYYY-MM-DD
+                    if len(td) == 8 and td.isdigit():
+                        td = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
                     flow_map[td] = float(row.get("north_money", 0))
 
             # 5. 逐日计算因子
@@ -303,6 +353,10 @@ class FactorHistoryStore:
 
             for i in range(len(closes)):
                 td = str(trade_dates[i])
+                
+                # 转换 Tushare YYYYMMDD → ISO YYYY-MM-DD
+                if len(td) == 8 and td.isdigit():
+                    td = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
 
                 # CLOSE: 始终存储
                 records.append((ts_code, "CLOSE", td, float(closes[i])))

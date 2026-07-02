@@ -9,7 +9,6 @@
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
-import random
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +48,11 @@ SW_INDUSTRY_MAPPING = {
 def fetch_index_hist(index_code: str, days: int = 60) -> List[Dict]:
     """
     获取指数历史数据（支持沪深300、上证指数等）
-    使用AKShare指数历史数据接口
+    使用AKShare东方财富指数历史接口(stock_zh_index_daily_em)
     
     Args:
-        index_code: 指数代码，例如 "000300"（沪深300）、"000001"（上证指数）
+        index_code: 指数代码，支持多种格式：
+            "000300" / "000300.SH" / "sh000300" 均可
         days: 获取最近N天的数据
     
     Returns:
@@ -61,21 +61,42 @@ def fetch_index_hist(index_code: str, days: int = 60) -> List[Dict]:
     try:
         import akshare as ak
         
-        # 获取指数历史数据
-        df = ak.index_hist_cg(symbol=index_code, period="day")
+        # 统一转换 index_code 为 akshare 格式: sh000300 / sz399001
+        # 支持: "000300", "000300.SH", "sh000300"
+        code = index_code.replace(".SH", "").replace(".SZ", "")
+        if code.startswith("sh") or code.startswith("sz"):
+            ak_code = code
+        elif code.startswith("3"):
+            ak_code = f"sz{code}"
+        else:
+            ak_code = f"sh{code}"
+        
+        # 获取指数历史数据 - 使用东方财富接口
+        df = ak.stock_zh_index_daily_em(symbol=ak_code)
         
         if df is None or df.empty:
             logger.warning(f"AKShare获取指数 {index_code} 历史数据失败")
             return []
         
-        # 转换为标准格式
+        # 确保按日期正序排列
+        if "date" in df.columns:
+            df = df.sort_values("date", ascending=True)
+        
+        # 转换为标准格式 - stock_zh_index_daily_em 列名为英文
         data = []
         for _, row in df.iterrows():
+            close_val = float(row["close"])
             data.append({
-                "date": row["日期"].strftime("%Y-%m-%d"),
-                "close": float(row["收盘"]),
-                "change_pct": float(row["涨跌幅"]) if "涨跌幅" in row else 0.0
+                "date": str(row["date"])[:10] if not isinstance(row["date"], str) else row["date"][:10],
+                "close": close_val,
+                "change_pct": 0.0  # 留空，后续批量计算
             })
+        
+        # 计算涨跌幅 change_pct = (curr - prev) / prev * 100
+        for i in range(1, len(data)):
+            prev_close = data[i-1]["close"]
+            if prev_close > 0:
+                data[i]["change_pct"] = (data[i]["close"] - prev_close) / prev_close * 100
         
         # 返回最近N天的数据
         return data[-days:]
@@ -135,8 +156,8 @@ def fetch_sw_industry_hist(symbol: str, days: int = 60) -> List[Dict]:
         df = ak.index_hist_sw(symbol=symbol)
         
         if df is None or df.empty:
-            logger.warning(f"AKShare获取 {symbol} 历史数据失败，返回模拟数据")
-            return _generate_mock_industry_data(symbol, days)
+            logger.warning(f"AKShare获取 {symbol} 历史数据失败，返回空列表（不使用mock数据）")
+            return []
         
         # 只保留最近N天
         df = df.tail(days)
@@ -157,7 +178,8 @@ def fetch_sw_industry_hist(symbol: str, days: int = 60) -> List[Dict]:
         
     except Exception as e:
         logger.error(f"❌ 获取 {symbol} 历史数据失败: {e}")
-        return _generate_mock_industry_data(symbol, days)
+        logger.warning(f"返回空列表（不使用mock数据）")
+        return []
 
 
 def fetch_sector_historical_data(sector_code: str, days: int = 60) -> List[Dict]:
@@ -226,81 +248,76 @@ def calculate_sector_filter(sector_code: str) -> Dict:
 
 def fetch_fund_nav_history(fund_code: str, days: int = 60) -> List[Dict]:
     """
-    获取基金净值历史数据（方案B）
-    优先级：A（Tushare） → D（模拟数据）
-    
-    Args:
-        fund_code: 基金代码，例如 "110022"
-        days: 获取最近N天的数据
-    
-    Returns:
-        净值历史数据列表，每个元素包含 date, nav, change_pct
+    Get fund NAV history (supports both OTC funds and ETFs)
+    Uses code_to_tushare() to determine correct suffix, with fallback.
     """
-    logger.info(f"获取基金 {fund_code} 的净值历史数据（{days}天）")
-    
-    # 优先级A - Tushare获取真实净值数据
+    logger.info(f"Fetching fund {fund_code} NAV history ({days} days)")
+
     try:
         import tushare as ts
         import os
         from dotenv import load_dotenv
-        
-        # 加载环境变量
+        from app.utils.eastmoney import code_to_tushare
+
         load_dotenv()
         token = os.getenv("TUSHARE_TOKEN")
-        
+
         if token:
             ts.set_token(token)
             pro = ts.pro_api()
-            
-            # 转换基金代码格式（110022 → 110022.OF）
-            if not fund_code.endswith(".OF"):
-                ts_code = f"{fund_code}.OF"
-            else:
-                ts_code = fund_code
-            
-            # 计算起始日期
+
+            ts_code = code_to_tushare(fund_code)
+            base_code = ts_code.split(".")[0]
+            primary_suffix = ts_code.split(".")[-1] if "." in ts_code else "OF"
+
+            suffixes = [primary_suffix]
+            if primary_suffix == "OF":
+                suffixes.extend(["SH", "SZ"])
+            elif primary_suffix in ("SH", "SZ"):
+                suffixes.extend(["OF", "SZ" if primary_suffix == "SH" else "SH"])
+
             from datetime import datetime, timedelta
             end_date = datetime.now().strftime("%Y%m%d")
-            start_date = (datetime.now() - timedelta(days=days*2)).strftime("%Y%m%d")  # 多拉一些数据
-            
-            # 调用 Tushare API
-            df = pro.fund_nav(ts_code=ts_code, start_date=start_date, end_date=end_date)
-            
+            start_date = (datetime.now() - timedelta(days=days*2)).strftime("%Y%m%d")
+
+            df = None
+            used_suffix = None
+            for suf in suffixes:
+                try_code = f"{base_code}.{suf}"
+                df = pro.fund_nav(ts_code=try_code, start_date=start_date, end_date=end_date)
+                if df is not None and len(df) > 0:
+                    used_suffix = suf
+                    break
+                df = None
+
             if df is not None and len(df) > 0:
-                # 转换为标准格式
+                logger.info(f"Tushare got {fund_code} data with .{used_suffix}, {len(df)} rows")
+                df = df.sort_values("nav_date", ascending=True)
                 data = []
                 prev_nav = None
                 for _, row in df.iterrows():
                     unit_nav = float(row["unit_nav"])
                     nav_date = str(row["nav_date"])
-                    
-                    # 计算涨跌幅
                     change_pct = 0.0
                     if prev_nav is not None and prev_nav > 0:
                         change_pct = (unit_nav - prev_nav) / prev_nav * 100
                     prev_nav = unit_nav
-                    
-                    data.append({
-                        "date": nav_date,
-                        "nav": unit_nav,
-                        "change_pct": round(change_pct, 2)
-                    })
-                
-                # 返回最近N天的数据
-                logger.info(f"✅ Tushare获取 {fund_code} 净值数据成功，共 {len(data)} 条")
+                    data.append({"date": nav_date, "nav": unit_nav, "change_pct": round(change_pct, 2)})
+                logger.info(f"Tushare got {fund_code} NAV data, {len(data)} records")
                 return data[-days:]
             else:
-                logger.warning(f"Tushare获取 {fund_code} 数据为空，降级到模拟数据")
+                logger.warning(f"Tushare got {fund_code} empty data (tried: {suffixes})")
         else:
-            logger.warning("未配置 TUSHARE_TOKEN，降级到模拟数据")
+            logger.warning("TUSHARE_TOKEN not configured, returning empty list")
     except ImportError:
-        logger.warning("未安装 tushare 包，降级到模拟数据")
+        logger.warning("tushare package not installed, returning empty list")
     except Exception as e:
-        logger.error(f"Tushare获取 {fund_code} 失败：{e}，降级到模拟数据")
-    
-    # 优先级D：返回模拟数据
-    logger.info(f"返回模拟数据：{fund_code}")
-    return _generate_mock_nav_data(fund_code, days)
+        logger.error(f"Tushare failed for {fund_code}: {e}, returning empty list")
+
+    logger.warning(f"Tushare failed for {fund_code}, returning empty list")
+    return []
+
+
 
 
 def _calculate_change_pct(row) -> float:
@@ -378,43 +395,17 @@ def _get_cached_industry_list() -> List[Dict]:
 
 
 def _generate_mock_industry_data(sector_code: str, days: int) -> List[Dict]:
-    """生成模拟行业历史数据"""
-    data = []
-    base_price = 1000.0
-    
-    for i in range(days, 0, -1):
-        date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
-        price_change = random.uniform(-0.05, 0.05)
-        base_price *= (1 + price_change)
-        
-        data.append({
-            "date": date,
-            "close": round(base_price, 2),
-            "change_pct": round(price_change * 100, 2),
-            "volume": random.uniform(50, 200),
-            "amount": random.uniform(1000, 5000),
-        })
-    
-    return data
+    """[已禁用] 不再生成随机游走模拟数据，避免在假数据上计算技术指标产生误导性建议。
 
-
-def _generate_mock_nav_data(fund_code: str, days: int) -> List[Dict]:
-    """生成模拟基金净值历史数据"""
-    data = []
-    base_nav = 1.0
-    
-    for i in range(days, 0, -1):
-        date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
-        nav_change = random.uniform(-0.03, 0.03)
-        base_nav *= (1 + nav_change)
-        
-        data.append({
-            "date": date,
-            "nav": round(base_nav, 4),
-            "change_pct": round(nav_change * 100, 2)
-        })
-    
-    return data
+    保留签名仅为向后兼容；数据源失败时请使用 fetch_sw_industry_hist()，
+    该函数已返回空列表并记录 warning，不会产生假数据。
+    """
+    logger.warning(
+        "_generate_mock_industry_data 已禁用，不再生成模拟数据 "
+        "(sector=%s, days=%d)；返回空列表。请改用 fetch_sw_industry_hist()。",
+        sector_code, days,
+    )
+    return []
 
 
 if __name__ == "__main__":
