@@ -1,5 +1,5 @@
 import { useAppStore } from '../../store';
-import SentimentBadge from '../common/SentimentBadge';
+import SignalBadge from '../common/SentimentBadge';
 import { clsx } from 'clsx';
 
 export default function MultiIndexCards() {
@@ -39,7 +39,7 @@ export default function MultiIndexCards() {
             {/* 第一重标识：情绪色块 */}
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs text-gray-400 font-medium">{idx.index_name}</span>
-              <SentimentBadge sentiment={idx.sentiment_label} size="sm" variant="inline" showLabel={false} />
+              <SignalBadge level={idx.sentiment_label} size="sm" variant="inline" showLabel={false} />
             </div>
 
             {/* 指数点位 */}

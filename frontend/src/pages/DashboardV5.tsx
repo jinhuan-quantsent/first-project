@@ -9,28 +9,18 @@ import DivergenceBanner from '../components/dashboard/DivergenceBanner';
 import SignalVerifyBoard from '../components/dashboard/SignalVerifyBoard';
 import { Star, AlertTriangle, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { clsx } from 'clsx';
-import type { SignalLevel } from '../types';
+import { SIGNAL_COLORS_HEX as SIGNAL_COLORS, SIGNAL_LABELS, type SignalLevel } from '../types';
 import { fetchV5Sentiment, fetchV5FactorHeatmap, type V5FactorDetail } from '../api/marketV5';
-
-const SIGNAL_COLORS: Record<string, string> = {
-  'S+': '#059669', 'S': '#10B981', 'A': '#6EE7B7', 'B': '#FBBF24',
-  'C': '#FCA5A5', 'D': '#EF4444', 'E': '#DC2626',
-};
-
-const SIGNAL_LABELS: Record<string, string> = {
-  'S+': '极度恐惧', 'S': '恐惧', 'A': '偏恐惧', 'B': '中性',
-  'C': '偏贪婪', 'D': '贪婪', 'E': '极度贪婪',
-};
 
 /** 信号等级 → 仓位建议映射（V5.0 5×7矩阵简化版） */
 const POSITION_ADVICE: Record<string, { action: string; position: string; risk: string }> = {
-  'S+': { action: '逢低布局', position: '30%-40%', risk: '高风险区域但存在反弹机会' },
-  'S':  { action: '小仓试探', position: '25%-35%', risk: '恐慌中可分批建仓' },
-  'A':  { action: '谨慎加仓', position: '30%-40%', risk: '偏恐慌，轻仓试探' },
-  'B':  { action: '持有观望', position: '50%', risk: '中性，等待方向明确' },
-  'C':  { action: '适度减仓', position: '40%-50%', risk: '偏热，可逐步锁利' },
-  'D':  { action: '控制仓位', position: '25%-35%', risk: '过热，注意回调' },
-  'E':  { action: '减仓避险', position: '15%-25%', risk: '极度贪婪，高风险' },
+  'S+': { action: '大幅加仓', position: '70%-80%', risk: '极度恐惧区域，市场可能处于底部' },
+  'S':  { action: '逢低加仓', position: '60%-70%', risk: '恐惧情绪明显，分批布局' },
+  'A':  { action: '适度加仓', position: '50%-60%', risk: '偏恐惧，关注超跌机会' },
+  'B':  { action: '持有观望', position: '45%-50%', risk: '中性，保持均衡配置' },
+  'C':  { action: '小幅减仓', position: '35%-45%', risk: '偏乐观，可锁定部分利润' },
+  'D':  { action: '逐步减仓', position: '25%-35%', risk: '市场乐观，落袋为安' },
+  'E':  { action: '减仓避险', position: '10%-20%', risk: '极度贪婪，市场可能见顶' },
 };
 
 interface V5IndexData {
@@ -184,7 +174,7 @@ export default function DashboardV5() {
             <div className="flex items-center gap-3">
               <div
                 className="w-12 h-12 rounded-full flex items-center justify-center text-white text-lg font-bold"
-                style={{ background: SIGNAL_COLORS[idx.signal_level] || '#94A3B8' }}
+                style={{ background: SIGNAL_COLORS[idx.signal_level as SignalLevel] || '#94A3B8' }}
               >
                 {Math.round(idx.composite_score)}
               </div>
@@ -217,19 +207,19 @@ export default function DashboardV5() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2 card p-5">
             <h3 className="text-sm font-bold text-gray-700 mb-3">{selected.index_name} - V5.0 情绪详情</h3>
-            <div className="grid grid-cols-3 gap-4 mb-4">
+            <div className="grid grid-cols-3 gap-2 md:gap-4 mb-4">
               <div className="text-center">
                 <p className="text-xs text-gray-400">综合分</p>
-                <p className="text-2xl font-bold" style={{ color: SIGNAL_COLORS[selected.signal_level] }}>
+                <p className="text-2xl font-bold" style={{ color: SIGNAL_COLORS[selected.signal_level as SignalLevel] }}>
                   {selected.composite_score.toFixed(1)}
                 </p>
               </div>
               <div className="text-center">
                 <p className="text-xs text-gray-400">信号等级</p>
-                <p className="text-lg font-bold" style={{ color: SIGNAL_COLORS[selected.signal_level] }}>
+                <p className="text-lg font-bold" style={{ color: SIGNAL_COLORS[selected.signal_level as SignalLevel] }}>
                   {selected.signal_level}
                 </p>
-                <p className="text-xs text-gray-500">{SIGNAL_LABELS[selected.signal_level]}</p>
+                <p className="text-xs text-gray-500">{SIGNAL_LABELS[selected.signal_level as SignalLevel]}</p>
               </div>
               <div className="text-center">
                 <p className="text-xs text-gray-400">置信度</p>
@@ -301,7 +291,7 @@ export default function DashboardV5() {
           14因子引擎概览
           {factorsLoading && <span className="ml-2 text-xs text-gray-400 font-normal">加载中...</span>}
         </h3>
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-1.5 sm:gap-2">
           {FACTOR_DEFS.map(renderFactorCard)}
         </div>
       </div>

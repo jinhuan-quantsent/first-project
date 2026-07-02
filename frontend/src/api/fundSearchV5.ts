@@ -3,7 +3,7 @@
  * 基金搜索 V5 专属 API 调用（已有 fund.ts 的补充）
  */
 import client from './client';
-import type { ApiResponse, FundSearchResult } from '../types';
+import type { ApiResponse, FundSearchResult, FundSearchItem } from '../types';
 
 const V5_PREFIX = '/api/v5';
 

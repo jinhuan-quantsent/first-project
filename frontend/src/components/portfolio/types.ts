@@ -54,7 +54,7 @@ export interface PositionDetailData {
   marketStatus?: string;
 
   /** 后端决策结果 */
-  action?: 'hold' | 'increase' | 'decrease' | null;
+  action?: 'hold' | 'increase' | 'reduce' | 'heavy_reduce' | null;
   reason?: string;
   targetPositionPct?: number;
   currentPositionPct?: number;

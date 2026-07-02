@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { fetchIndexDetail } from '../../api/market';
 import type { IndexDetail } from '../../types';
-import SentimentBadge from '../common/SentimentBadge';
+import SignalBadge from '../common/SentimentBadge';
+import { mapOldToNew } from '../../types';
 import SignalLights from '../common/SignalLights';
 import MicroTrendBar from '../common/MicroTrendBar';
 import LoadingSpinner from '../common/LoadingSpinner';
@@ -59,7 +60,7 @@ export default function IndexDetailPanel({ indexCode }: IndexDetailPanelProps) {
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
           <h2 className="text-base font-bold text-gray-800">{data.index_name}</h2>
-          <SentimentBadge sentiment={data.sentiment_label} size="md" variant="table" />
+          <SignalBadge level={data.sentiment_label} size="md" variant="table" />
         </div>
         <div className="flex items-center gap-2">
           {data.is_extreme && (
@@ -96,15 +97,15 @@ export default function IndexDetailPanel({ indexCode }: IndexDetailPanelProps) {
         <div className="flex items-center gap-2">
           <span className="text-xs text-gray-500">信号:</span>
           <SignalLights
-            shortTerm={data.sentiment_label}
-            midTerm={data.sentiment_label}
-            longTerm={data.sentiment_label}
+            shortTerm={mapOldToNew(data.sentiment_label)}
+            midTerm={mapOldToNew(data.sentiment_label)}
+            longTerm={mapOldToNew(data.sentiment_label)}
             hasDivergence={data.is_extreme}
             divergenceType={data.composite_score < 40 ? 'bullish' : 'bearish'}
           />
         </div>
         <div className="flex-1 max-w-[200px]">
-          <MicroTrendBar data={data.history?.slice(-5) || []} />
+          <MicroTrendBar data={(data.history || []).slice(-5).map(h => ({ date: h.date, score: h.composite_score, label: h.sentiment_label }))} />
         </div>
       </div>
 

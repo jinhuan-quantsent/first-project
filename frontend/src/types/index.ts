@@ -28,6 +28,13 @@ export const SIGNAL_LABELS: Record<SignalLevel, string> = {
   'E':  '极度贪婪',
 };
 
+
+// 信号颜色映射（Hex 值，用于 canvas/SVG 等不支持 CSS 变量的场景）
+export const SIGNAL_COLORS_HEX: Record<SignalLevel, string> = {
+  'S+': '#059669', 'S': '#10B981', 'A': '#6EE7B7', 'B': '#FBBF24',
+  'C': '#FCA5A5', 'D': '#EF4444', 'E': '#DC2626',
+};
+
 // --- 置信度星级 ---
 export type ConfidenceStars = 1 | 2 | 3 | 4;
 
@@ -112,6 +119,12 @@ export interface MultiIndexData {
   change_pct: number;
   composite_score: number;
   sentiment_label: SentimentLabel;
+  /** V5 新增: 信号等级(S+/S/A/B/C/D/E) */
+  signal_level?: string;
+  /** V5 新增: 置信度星级(1-4) */
+  confidence_stars?: number;
+  /** V5 新增: 体制标签 */
+  regime?: string;
   top3_factors: FactorScoreData[];
   trend_direction: TrendDirection;
   trend_strength: number;
@@ -142,6 +155,41 @@ export interface PositionAdviceData {
   action: ActionType;
   reason: string;
   risk_level: RiskLevel;
+  // V5.1 新增字段
+  target_position_pct: number;        // 目标仓位百分比(占总资产)
+  current_position_pct: number;       // 当前仓位百分比(占总资产)
+  suggested_target_pct: number;       // 目标仓位百分比(替代suggested_amount)
+  suggested_buy_amount: number;       // 建议加仓金额(元)
+  suggested_sell_amount: number;      // 建议减仓金额(元)
+  suggested_amount: number;           // DEPRECATED: 百分比复制, 请用suggested_target_pct
+  denominator_type: string;           // 分母类型: "total_assets" | "market_value"
+  total_assets: number;               // 总资产金额(元)
+  cash_warning: string | null;        // 现金不足警告
+  portfolio_constraints: string[];    // 组合约束说明列表
+  constraint_detail: {
+    single_fund_cap: number;
+    sector_cap: number;
+    sector_code: string | null;
+    total_cap: number;
+    current_total_pct: number;
+    sector_used_pct?: number;
+    sector_remaining?: number;
+    remaining_total?: number;
+  };
+  signal_level: string;
+  confidence_stars: number;
+  regime: string;
+  composite_score: number;
+  gates?: any;
+  /** 趋势文本(camelCase别名) */
+  trendText?: string;
+  /** 市场状态(camelCase别名) */
+  marketStatus?: string;
+  /** 趋势卫士数据(camelCase别名) */
+  trendGuard?: any;
+  /** 趋势卫士文案(camelCase别名) */
+  trend_guard_text?: string;
+  track_type?: string;
 }
 
 // --- 板块数据 ---
@@ -226,6 +274,9 @@ export interface FundSearchItem {
   daily_return: number;
   week_return: number;
   month_return: number;
+  // 板块映射（由后端 fund_mapping 表注入）
+  sector_code?: string;
+  category?: string;
   year_return: number;
   fund_size: number;
   risk_level: string;
@@ -280,6 +331,8 @@ export interface PortfolioSummary {
   fund_count: number;
   core_ratio: number;
   satellite_ratio: number;
+  cash_amount?: number;
+  total_assets?: number;
 }
 
 export interface PortfolioOverlap {
@@ -307,6 +360,9 @@ export interface WatchlistItem {
   daily_return: number;
   week_return: number;
   month_return: number;
+  // 板块映射（由后端 fund_mapping 表注入）
+  sector_code?: string;
+  category?: string;
 }
 
 // --- 回测 ---

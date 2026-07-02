@@ -69,6 +69,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         const data: AuthResponse = await authLogin(email, password);
         set({
           auth: {
+            ...get().auth,
             user: data.user,
             token: data.access_token,
             isAuthenticated: true,
@@ -102,6 +103,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const guestToken = 'guest-token';
       set({
         auth: {
+          ...get().auth,
           user: guestUser,
           token: guestToken,
           isAuthenticated: true,
@@ -116,6 +118,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     logout: () => {
       set({
         auth: {
+          ...get().auth,
           user: null,
           token: null,
           isAuthenticated: false,
@@ -135,6 +138,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const user = JSON.parse(userStr) as User;
           set({
             auth: {
+              ...get().auth,
               user,
               token,
               isAuthenticated: true,

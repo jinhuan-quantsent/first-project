@@ -1,10 +1,10 @@
-import type { SignalLevel, SignalLabel } from '../../types';
+import type { SignalLevel, SentimentLabel } from '../../types';
 import { mapOldToNew, SIGNAL_COLORS } from '../../types';
 import { clsx } from 'clsx';
 
 interface SignalBadgeProps {
   /** 支持新旧两套信号体系 */
-  level: SignalLevel | SignalLabel;
+  level: SignalLevel | SentimentLabel;
   size?: 'sm' | 'md' | 'lg';
   variant?: 'inline' | 'table' | 'standalone';
   showLabel?: boolean;
@@ -27,14 +27,14 @@ const LEVEL_CN: Record<SignalLevel, string> = {
   'E':  '极度贪婪',
 };
 
-function normalizeLevel(l: SignalLevel | SignalLabel): SignalLevel {
+function normalizeLevel(l: SignalLevel | SentimentLabel): SignalLevel {
   if (typeof l === 'string' && ['S+', 'S', 'A', 'B', 'C', 'D', 'E'].includes(l)) {
     return l as SignalLevel;
   }
   // 尝试从旧标签映射，映射失败则回退到 'B'（中性）
   if (typeof l === 'string') {
     try {
-      return mapOldToNew(l as SignalLabel);
+      return mapOldToNew(l as SentimentLabel);
     } catch {
       return 'B';
     }
