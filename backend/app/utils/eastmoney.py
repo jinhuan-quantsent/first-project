@@ -236,6 +236,118 @@ async def get_fund_realtime(code: str) -> Optional[dict]:
 
 
 # ============================================================
+# 2b. 盘中预演专用估值接口 (HTTPS双路冗余)
+# ============================================================
+async def get_fund_realtime_nav(code: str) -> Optional[float]:
+    """
+    获取基金盘中实时估值涨跌幅(gszzl) -- 盘中预演专用
+
+    双路冗余策略（借鉴FundVal-Live的Mobile API fallback思路）：
+    1. 主路: HTTPS fundgz.1234567.com.cn (JSONP格式)
+    2. 备路: 东方财富Mobile API FundMNFInfo (HTTPS JSON)
+
+    Returns:
+        gszzl: float -- 估算涨跌幅百分比(如 1.23 表示涨1.23%)
+        None: 估值不可用(非交易时间/基金未覆盖)
+
+    与 get_fund_realtime() 的区别：
+    - 仅返回gszzl(float)，不做完整数据组装
+    - 增加Mobile API备路，fundgz失败时自动降级
+    - 缓存TTL=300秒(与scheduler每5分钟刷新对齐)
+    - 异常阈值校验: |gszzl| > 10% 视为异常数据，返回None
+    """
+    from app.core.config import settings
+
+    # 检查缓存（盘中预演专用缓存key，与realtime缓存隔离）
+    cache_k = _cache_key("realtime_nav", code)
+    cached = await cache_get(cache_k)
+    if cached is not None:
+        gszzl_cached = cached.get("gszzl") if isinstance(cached, dict) else cached
+        if gszzl_cached is not None:
+            # 异常值校验
+            if abs(float(gszzl_cached)) > settings.INTRADAY_PREVIEW_GSZZL_ANOMALY_THRESHOLD:
+                logger.warning("盘中估值异常(gszzl=%.2f%%), fund=%s, 丢弃", gszzl_cached, code)
+                return None
+            return float(gszzl_cached)
+
+    gszzl = None
+
+    # -- 主路: HTTPS fundgz (JSONP) --
+    url = f"https://fundgz.1234567.com.cn/js/{code}.js"
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            text = resp.text
+
+        match = re.search(r'jsonpgz\((.+?)\);?', text, re.DOTALL)
+        if match:
+            data = json.loads(match.group(1))
+            raw_gszzl = data.get("gszzl", None)
+            if raw_gszzl is not None and raw_gszzl != "":
+                gszzl = float(raw_gszzl)
+                logger.debug("[fundgz] %s gszzl=%.2f%%", code, gszzl)
+    except Exception as e:
+        logger.warning("fundgz主路失败(%s): %s, 尝试Mobile API备路", code, e)
+
+    # -- 备路: 东方财富Mobile API FundMNFInfo (HTTPS JSON) --
+    if gszzl is None:
+        mobile_url = "https://fundmobapi.eastmoney.com/FundMNFInfo.aspx"
+        params = {
+            "FCODE": code,
+            "deviceid": "1",
+            "plat": "Android",
+            "appType": "ttjj",
+            "product": "EFund",
+            "version": "1",
+            "FVersion": "1",
+            "OSVersion": "1",
+            "appVersion": "1",
+            "UDID": "1",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+                resp = await client.get(mobile_url, params=params)
+                resp.raise_for_status()
+                text = resp.text
+
+            # Mobile API返回JSONP或JSON
+            # 尝试JSONP解析
+            mobile_match = re.search(r'jsonpgz\((.+?)\);?', text, re.DOTALL)
+            if mobile_match:
+                mobile_data = json.loads(mobile_match.group(1))
+            else:
+                # 直接JSON
+                mobile_data = json.loads(text)
+
+            # Mobile API字段: GSZZL(估算涨跌幅), GSZ(估算净值), DWJZ(单位净值)
+            expand = mobile_data.get("Expansion", {})
+            if not expand:
+                expand = mobile_data  # 有些版本直接在顶层
+
+            raw_gszzl = expand.get("GSZZL", None)
+            if raw_gszzl is not None and raw_gszzl != "":
+                gszzl = float(raw_gszzl)
+                logger.debug("[MobileAPI] %s gszzl=%.2f%%", code, gszzl)
+        except Exception as e:
+            logger.warning("Mobile API备路失败(%s): %s", code, e)
+
+    # -- 异常值校验 --
+    if gszzl is not None and abs(gszzl) > settings.INTRADAY_PREVIEW_GSZZL_ANOMALY_THRESHOLD:
+        logger.warning("盘中估值异常(gszzl=%.2f%%), fund=%s, 丢弃", gszzl, code)
+        gszzl = None
+
+    # -- 缓存结果（TTL=300秒，与scheduler刷新周期对齐）--
+    if gszzl is not None:
+        await cache_set(cache_k, {"gszzl": gszzl}, ttl=settings.INTRADAY_PREVIEW_CACHE_TTL)
+    else:
+        # 失败也缓存None标记60秒，避免短时间内反复请求
+        await cache_set(cache_k, {"gszzl": None}, ttl=60)
+
+    return gszzl
+
+
+# ============================================================
 # 3. 基金持仓信息 (东方财富 pingzhongdata)
 # ============================================================
 async def get_fund_holdings(code: str) -> Optional[list[dict]]:

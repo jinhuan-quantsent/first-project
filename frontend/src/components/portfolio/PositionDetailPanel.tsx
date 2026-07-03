@@ -29,6 +29,7 @@ import StarRating from './StarRating';
 import NavTrendChart from './NavTrendChart';
 import NavHistoryList from './NavHistoryList';
 import TrendGuardPanel from './TrendGuardPanel';
+import IntradayPreviewPanel from './intraday/IntradayPreviewPanel';
 import CollapsibleSection from './CollapsibleSection';
 import SafetyPadBar from './SafetyPadBar';
 import AdjustDialog from './AdjustDialog';
@@ -478,6 +479,9 @@ export default function PositionDetailPanel({ data, onCollapse, onExecute, onDel
           }}
           onCancel={() => setAdjustDialogOpen(false)}
         />
+
+        {/* ====== 盘中预演（交易时段内显示） ====== */}
+        <IntradayPreviewPanel fundCode={data.fundCode} />
 
         {/* ====== 趋势卫士解读 ====== */}
         {data.trendGuard ? (

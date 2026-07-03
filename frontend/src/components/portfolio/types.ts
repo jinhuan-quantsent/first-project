@@ -170,3 +170,100 @@ export function getOverallStatus(gates?: GateStructure): string {
   if (gates?.gate_e?.triggered) return 'warning';
   return 'normal';
 }
+
+
+// ============================================================
+// 盘中预演类型定义 (Intraday Preview)
+// ============================================================
+
+/** 盘中预演数据结构 */
+export interface IntradayPreviewData {
+  /** 标记为预演数据 */
+  is_preview: boolean;
+  /** 预演置信度等级 (1=早盘, 2=午盘, 3=尾盘) */
+  preview_confidence: number;
+  /** 置信度时段文案 */
+  confidence_note: string;
+  /** 准确性警告 */
+  accuracy_warning: string;
+  /** 计算时间 */
+  calc_time: string;
+  /** 数据版本 */
+  data_version: string;
+  /** 日期 */
+  date: string;
+  /** 基金代码 */
+  fund_code: string;
+
+  /** 盘中估算情绪分 */
+  preview_score: number;
+  /** 昨日收盘情绪分 */
+  yesterday_score: number;
+  /** 情绪分变化量 */
+  score_delta: number | null;
+  /** 盘中涨跌幅 */
+  gszzl: number | null;
+  /** 弹性系数 */
+  elasticity: number | null;
+
+  /** 预演操作建议 */
+  action: 'hold' | 'increase' | 'decrease' | string;
+  target_position_pct: number;
+  current_position_pct: number;
+  reason: string;
+  signal_level: string;
+  confidence_stars: number;
+
+  /** 预演风控 */
+  gates?: any;
+  track_type?: string | null;
+  sector_track?: string | null;
+
+  /** 阈值数据 (ThresholdBar 使用) */
+  thresholds?: IntradayThresholdData;
+
+  /** 昨今对比 */
+  yesterday_signal?: string;
+  yesterday_confidence?: number;
+  signal_change?: 'up' | 'down' | 'stable' | 'unknown';
+
+  /** 数据未就绪时的状态标记 */
+  status?: 'pending';
+  message?: string;
+}
+
+/** 阈值进度条数据 */
+export interface IntradayThresholdData {
+  gate_zones: IntradayGateZone[];
+  safe_zone_note: string;
+  current_score: number;
+  up_trigger_pct: number | null;
+  down_trigger_pct: number | null;
+}
+
+/** 闸门区间数据 */
+export interface IntradayGateZone {
+  id: string;
+  label: string;
+  triggered: boolean;
+  trigger_price?: number | null;
+  current_distance_pct?: number | null;
+  drawdown?: number | null;
+  exempted?: boolean;
+  position?: number | null;
+}
+
+/** 置信度时段配置 */
+export const CONFIDENCE_CONFIG: Record<number, { label: string; color: string; bg: string; border: string; note: string }> = {
+  1: { label: '早盘预演', color: 'text-orange-700', bg: 'bg-orange-50', border: 'border-orange-200', note: '早盘波动大，仅供参考' },
+  2: { label: '午盘预演', color: 'text-amber-700', bg: 'bg-amber-50', border: 'border-amber-200', note: '趋势基本明朗' },
+  3: { label: '尾盘预演', color: 'text-teal-700', bg: 'bg-teal-50', border: 'border-teal-200', note: '接近收盘，仍需等待确认' },
+};
+
+/** 信号变化方向配置 */
+export const SIGNAL_CHANGE_CONFIG: Record<string, { label: string; icon: string; color: string }> = {
+  'up':    { label: '信号升级', icon: '↗', color: 'text-emerald-600' },
+  'down':  { label: '信号降级', icon: '↘', color: 'text-red-600' },
+  'stable': { label: '信号稳定', icon: '→', color: 'text-gray-500' },
+  'unknown': { label: '未知变化', icon: '?', color: 'text-gray-400' },
+};
