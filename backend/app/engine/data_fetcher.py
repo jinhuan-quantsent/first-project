@@ -48,11 +48,10 @@ SW_INDUSTRY_MAPPING = {
 def fetch_index_hist(index_code: str, days: int = 60) -> List[Dict]:
     """
     获取指数历史数据（支持沪深300、上证指数等）
-    使用AKShare东方财富指数历史接口(stock_zh_index_daily_em)
+    使用AKShare指数历史数据接口
     
     Args:
-        index_code: 指数代码，支持多种格式：
-            "000300" / "000300.SH" / "sh000300" 均可
+        index_code: 指数代码，例如 "000300"（沪深300）、"000001"（上证指数）
         days: 获取最近N天的数据
     
     Returns:
@@ -61,42 +60,21 @@ def fetch_index_hist(index_code: str, days: int = 60) -> List[Dict]:
     try:
         import akshare as ak
         
-        # 统一转换 index_code 为 akshare 格式: sh000300 / sz399001
-        # 支持: "000300", "000300.SH", "sh000300"
-        code = index_code.replace(".SH", "").replace(".SZ", "")
-        if code.startswith("sh") or code.startswith("sz"):
-            ak_code = code
-        elif code.startswith("3"):
-            ak_code = f"sz{code}"
-        else:
-            ak_code = f"sh{code}"
-        
-        # 获取指数历史数据 - 使用东方财富接口
-        df = ak.stock_zh_index_daily_em(symbol=ak_code)
+        # 获取指数历史数据
+        df = ak.index_hist_cg(symbol=index_code, period="day")
         
         if df is None or df.empty:
             logger.warning(f"AKShare获取指数 {index_code} 历史数据失败")
             return []
         
-        # 确保按日期正序排列
-        if "date" in df.columns:
-            df = df.sort_values("date", ascending=True)
-        
-        # 转换为标准格式 - stock_zh_index_daily_em 列名为英文
+        # 转换为标准格式
         data = []
         for _, row in df.iterrows():
-            close_val = float(row["close"])
             data.append({
-                "date": str(row["date"])[:10] if not isinstance(row["date"], str) else row["date"][:10],
-                "close": close_val,
-                "change_pct": 0.0  # 留空，后续批量计算
+                "date": row["日期"].strftime("%Y-%m-%d"),
+                "close": float(row["收盘"]),
+                "change_pct": float(row["涨跌幅"]) if "涨跌幅" in row else 0.0
             })
-        
-        # 计算涨跌幅 change_pct = (curr - prev) / prev * 100
-        for i in range(1, len(data)):
-            prev_close = data[i-1]["close"]
-            if prev_close > 0:
-                data[i]["change_pct"] = (data[i]["close"] - prev_close) / prev_close * 100
         
         # 返回最近N天的数据
         return data[-days:]

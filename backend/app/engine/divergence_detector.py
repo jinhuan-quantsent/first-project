@@ -5,6 +5,10 @@
 - Bullish Divergence：价格创新低，但情绪分数上升 → 下跌动力衰竭，机会信号
 
 用于置信度防线3和信号二阶确认
+
+V5.0 增强:
+  - 新增 detect_bottom_divergence(): 基于双低点比较的底背离检测
+    用于 S+ 逆向信号验证（价格新低但情绪分数未新低）
 """
 from __future__ import annotations
 
@@ -181,3 +185,135 @@ class DivergenceDetector:
             "sentiment_trend": "flat",
             "description": f"数据不足（{available}天），需要至少{self.MIN_TREND_DAYS}天",
         }
+
+
+# ============================================================
+# 底背离检测函数（V5.0 新增）
+# 用于 S+ 逆向信号验证：价格新低但情绪分数未新低
+# ============================================================
+
+def _find_local_minima(
+    values: list[float],
+    window: int = 5,
+) -> list[int]:
+    """找出局部最小值的索引。
+
+    一个点 i 是局部最小值，当且仅当它是 [i-window, i+window] 范围内的最小值。
+    """
+    n = len(values)
+    minima = []
+    for i in range(window, n - window):
+        left = values[i - window:i]
+        right = values[i + 1:i + 1 + window]
+        if all(values[i] <= v for v in left) and all(values[i] <= v for v in right):
+            minima.append(i)
+    return minima
+
+
+def detect_bottom_divergence(
+    prices: list[float],
+    scores: list[float],
+    window: int = 20,
+    min_interval: int = 10,
+) -> dict | None:
+    """
+    检测底背离信号。
+
+    底背离定义：
+      - 价格创新低（后一个低点 < 前一个低点）
+      - 但情绪分数未创新低（后低点的分数 > 前低点的分数）
+      - 说明下跌动能减弱，可能见底反弹
+
+    Args:
+        prices: 收盘价序列（最近N日，oldest first）
+        scores: 情绪分数序列（与prices对齐）
+        window: 检测窗口，用于寻找局部低点和比较
+        min_interval: 两个低点间的最小间隔（交易日）
+
+    Returns:
+        底背离信号字典，或 None（无背离）:
+        {
+            'divergence': True,
+            'price_low_1': float,     # 前低点价格
+            'price_low_2': float,     # 当前低点价格（更低）
+            'score_at_low_1': float,  # 前低点时情绪分
+            'score_at_low_2': float,  # 当前低点时情绪分（更高）
+            'low_1_idx': int,         # 前低点索引
+            'low_2_idx': int,         # 当前低点索引
+            'strength': 'weak' | 'moderate' | 'strong'
+        }
+    """
+    n = min(len(prices), len(scores))
+    if n < window + min_interval:
+        return None
+
+    # 对齐截断
+    prices = list(prices[-n:])
+    scores = list(scores[-n:])
+
+    # 寻找价格的局部最小值
+    lookback = min(window, n // 3)
+    minima_indices = _find_local_minima(prices, window=max(3, lookback // 2))
+
+    if len(minima_indices) < 2:
+        # 如果没找到足够的局部最小值，用滑动窗口找最低点
+        # 将序列分成两半，各自找最低点
+        half = n // 2
+        # 前半段最低点
+        seg1 = prices[:half]
+        low_1_idx = seg1.index(min(seg1))
+        # 后半段最低点
+        seg2 = prices[half:]
+        low_2_idx = half + seg2.index(min(seg2))
+
+        if low_2_idx - low_1_idx < min_interval:
+            return None
+        minima_indices = [low_1_idx, low_2_idx]
+
+    # 从局部最小值中找底背离对
+    # 遍历所有低点对，找最近的一对满足底背离条件
+    best_pair = None
+    for i in range(len(minima_indices) - 1):
+        for j in range(i + 1, len(minima_indices)):
+            idx_1 = minima_indices[i]
+            idx_2 = minima_indices[j]
+
+            # 间隔检查
+            if idx_2 - idx_1 < min_interval:
+                continue
+
+            price_low_1 = prices[idx_1]
+            price_low_2 = prices[idx_2]
+            score_at_low_1 = scores[idx_1]
+            score_at_low_2 = scores[idx_2]
+
+            # 底背离条件：价格新低（low_2 < low_1），但情绪分更高（score_2 > score_1）
+            if price_low_2 < price_low_1 and score_at_low_2 > score_at_low_1:
+                score_diff = score_at_low_2 - score_at_low_1
+                # 选择情绪分差异最大的对
+                if best_pair is None or score_diff > best_pair["score_diff"]:
+                    best_pair = {
+                        "divergence": True,
+                        "price_low_1": float(price_low_1),
+                        "price_low_2": float(price_low_2),
+                        "score_at_low_1": float(score_at_low_1),
+                        "score_at_low_2": float(score_at_low_2),
+                        "low_1_idx": int(idx_1),
+                        "low_2_idx": int(idx_2),
+                        "score_diff": float(score_diff),
+                    }
+
+    if best_pair is None:
+        return None
+
+    # 强度判定
+    score_diff = best_pair.pop("score_diff")
+    if score_diff < 3:
+        strength = "weak"
+    elif score_diff <= 8:
+        strength = "moderate"
+    else:
+        strength = "strong"
+
+    best_pair["strength"] = strength
+    return best_pair

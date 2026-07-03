@@ -43,6 +43,17 @@ class FactorSigmoidResult:
     k_param: float            # Sigmoid斜率参数
     slope_at_midpoint: float  # 中点处斜率
 
+    def to_dict(self) -> dict:
+        """转换为 JSON 可序列化的字典（处理 numpy 类型）"""
+        return {
+            "factor_name": self.factor_name,
+            "percentile": float(self.percentile),
+            "sigmoid_score": float(self.sigmoid_score),
+            "c_param": float(self.c_param),
+            "k_param": float(self.k_param),
+            "slope_at_midpoint": float(self.slope_at_midpoint),
+        }
+
 
 @dataclass
 class DivergenceInfo:

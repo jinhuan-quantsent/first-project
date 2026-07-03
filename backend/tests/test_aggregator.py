@@ -356,8 +356,8 @@ class TestSentimentLabel:
         assert "neutral" in SENTIMENT_LABEL_CN
         assert "greed" in SENTIMENT_LABEL_CN
         assert "extreme_greed" in SENTIMENT_LABEL_CN
-        assert SENTIMENT_LABEL_CN["extreme_fear"] == "极度恐慌"
-        assert SENTIMENT_LABEL_CN["fear"] == "恐慌"
+        assert SENTIMENT_LABEL_CN["extreme_fear"] == "极度恐惧"
+        assert SENTIMENT_LABEL_CN["fear"] == "恐惧"
         assert SENTIMENT_LABEL_CN["neutral"] == "中性"
         assert SENTIMENT_LABEL_CN["greed"] == "乐观"
         assert SENTIMENT_LABEL_CN["extreme_greed"] == "极度乐观"
@@ -370,9 +370,9 @@ class TestOperationAdvice:
     """Test get_operation_advice function"""
 
     def test_advice_extreme_fear_bottom(self):
-        """score < 15: 极度恐慌 → 分批建仓"""
+        """score < 15: 极度恐惧 → 分批建仓"""
         advice = get_operation_advice(10)
-        assert "极度恐慌" in advice
+        assert "极度恐惧" in advice
         assert "分批建仓" in advice
 
     def test_advice_fear(self):
@@ -613,7 +613,7 @@ class TestGenerateConclusion:
 
     def test_conclusion_extreme_fear(self):
         conclusion = generate_conclusion(15, "extreme_fear", "stable")
-        assert "极度恐慌" in conclusion
+        assert "极度恐惧" in conclusion
         assert "15" in conclusion
 
     def test_conclusion_fear(self):

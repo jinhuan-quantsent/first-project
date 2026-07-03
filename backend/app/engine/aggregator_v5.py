@@ -102,7 +102,7 @@ class AggregatorV5:
     def calc_penalty(self, factor_std: float) -> float:
         """
         分歧惩罚系数：factor_std 越大 → penalty 越小 → 最终得分越靠近 50
-        penalty ∈ [0.5, 1.0]
+        penalty范围因引擎不同: 14因子引擎[penalty_min, penalty_max]默认[0.5,1.0]; 板块引擎[0.85,1.0]
         """
         # 线性映射：std 0 → 1.0,  std 15.0 → 0.5（Sigmoid得分范围0-100）
         penalty = self._penalty_max - (factor_std / self._std_threshold) * (

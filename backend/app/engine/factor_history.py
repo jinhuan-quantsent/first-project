@@ -106,10 +106,7 @@ class FactorHistoryStore:
                 # MySQL 用 INSERT IGNORE，SQLite 用 INSERT OR IGNORE
                 db_url_lower = settings.db_url.lower()
                 if 'mysql' in db_url_lower:
-                    from sqlalchemy.dialects.mysql import insert as mysql_insert
-                    stmt = mysql_insert(FactorHistory).values(**values).on_duplicate_key_update(
-                        raw_value=values["raw_value"],
-                    )
+                    stmt = Insert(FactorHistory).prefix_with("IGNORE").values(**values)
                 else:
                     stmt = Insert(FactorHistory).prefix_with("OR IGNORE").values(**values)
             async with session.begin_nested():
@@ -144,10 +141,7 @@ class FactorHistoryStore:
                     # MySQL 用 INSERT IGNORE，SQLite 用 INSERT OR IGNORE
                     db_url_lower = settings.db_url.lower()
                     if 'mysql' in db_url_lower:
-                        from sqlalchemy.dialects.mysql import insert as mysql_insert
-                        stmt = mysql_insert(FactorHistory).values(**values).on_duplicate_key_update(
-                            raw_value=values["raw_value"],
-                        )
+                        stmt = Insert(FactorHistory).prefix_with("IGNORE").values(**values)
                     else:
                         stmt = Insert(FactorHistory).prefix_with("OR IGNORE").values(**values)
                 async with session.begin_nested():

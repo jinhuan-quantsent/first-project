@@ -201,27 +201,5 @@ export const useWatchlistV5Store = create<WatchlistV5State>((set, get) => ({
     try { await removeWatchlistV5(id); } catch {}
   },
 
-  addFundOptimistic: (item: Partial<WatchlistItem> & { fund_code: string }) => {
-    // Optimistic add: immediately insert into items list, real data loaded on next loadAll
-    const currentItems = get().items;
-    const newItem: WatchlistItem = {
-      id: Date.now(), // temporary ID, will be replaced on next loadAll
-      fund_code: item.fund_code,
-      fund_name: item.fund_name || item.fund_code,
-      added_at: new Date().toISOString(),
-      notes: item.notes || '',
-      alert_threshold: item.alert_threshold || 0,
-      sort_order: item.sort_order ?? currentItems.length,
-      current_nav: item.current_nav || 0,
-      daily_return: item.daily_return || 0,
-      week_return: item.week_return || 0,
-      month_return: item.month_return || 0,
-      sector_code: item.sector_code,
-      category: item.category,
-    };
-    set({ items: [...currentItems, newItem] });
-  },
-
-
   reset: () => set({ ...INITIAL }),
 }));

@@ -108,7 +108,7 @@ class SentimentService:
         )
 
         # MACD + 价格历史
-        macd_data, sentiment_history, price_history = await self._compute_macd_and_history(
+        macd_data, sentiment_history, price_history, macd_history = await self._compute_macd_and_history(
             db_session=self.db_session,
             index_code=index_code,
             trade_date=trade_date,
@@ -156,14 +156,15 @@ class SentimentService:
             "confidence_detail": confidence_detail,
             "defenses_triggered": defenses,
             "macd": macd_data,
-            "factor_details": sigmoid_results,
+            "macd_history": macd_history,
+            "factor_details": [r.to_dict() for r in sigmoid_results],
             "updated_at": datetime.now().isoformat(),
         }
 
         # 缓存当天数据 5 分钟
         if trade_date == date.today().isoformat():
             try:
-                await cache_set(cache_key, result, ttl=300)
+                await cache_set(cache_key, result, ttl=86400)
             except Exception:
                 pass  # 缓存失败不影响主流程
 
@@ -186,12 +187,18 @@ class SentimentService:
             return cached
 
         # 并行调用各指数 pipeline
+        # P0-1 Fix: 每个并行任务使用独立 session，避免并发共享 session 报错
+        from app.core.database import get_session_factory
+
         async def _safe_pipeline(code: str) -> dict | None:
             try:
-                return await asyncio.wait_for(
-                    self.run_pipeline(code),
-                    timeout=timeout_per_index,
-                )
+                session_factory = get_session_factory()
+                async with session_factory() as _session:
+                    _svc = SentimentService(_session)
+                    return await asyncio.wait_for(
+                        _svc.run_pipeline(code),
+                        timeout=timeout_per_index,
+                    )
             except asyncio.TimeoutError:
                 return None
             except Exception:
@@ -266,7 +273,7 @@ class SentimentService:
             "message": "ok",
         }
 
-        await cache_set(cache_key, response, ttl=300)
+        await cache_set(cache_key, response, ttl=86400)
         return response
 
     async def get_signal_lights(
@@ -328,12 +335,18 @@ class SentimentService:
         index_data = await data_source.get_all_index_data()
 
         # 并行调用 V5 pipeline
+        # P0-1 Fix: 每个并行任务使用独立 session，避免并发共享 session 报错
+        from app.core.database import get_session_factory
+
         async def _safe_pipeline(code: str) -> dict | None:
             try:
-                return await asyncio.wait_for(
-                    self.run_pipeline(code),
-                    timeout=15.0,
-                )
+                session_factory = get_session_factory()
+                async with session_factory() as _session:
+                    _svc = SentimentService(_session)
+                    return await asyncio.wait_for(
+                        _svc.run_pipeline(code),
+                        timeout=15.0,
+                    )
             except asyncio.TimeoutError:
                 return None
             except Exception:
@@ -410,7 +423,7 @@ class SentimentService:
             "message": "ok",
         }
 
-        await cache_set(cache_key, response, ttl=300)
+        await cache_set(cache_key, response, ttl=86400)
         return response
 
     async def get_factor_radar(self, index_code: str = "SH000300") -> dict:
@@ -459,7 +472,7 @@ class SentimentService:
             "message": "ok",
         }
 
-        await cache_set(cache_key, response, ttl=300)
+        await cache_set(cache_key, response, ttl=86400)
         return response
 
     async def get_divergence_alert(self) -> dict:
@@ -513,7 +526,7 @@ class SentimentService:
             "message": "ok",
         }
 
-        await cache_set(cache_key, response, ttl=300)
+        await cache_set(cache_key, response, ttl=86400)
         return response
 
     # ===== Private helpers =====
@@ -536,13 +549,14 @@ class SentimentService:
                 continue
             factors.append((name, factor_cls()))
 
-        # 并发执行每个因子的 fetch → quantile → sigmoid
-        results = await asyncio.gather(
-            *[self._process_single_factor(name, factor, index_code, trade_date)
-              for name, factor in factors],
-            return_exceptions=False,  # 单个 helper 已 try/except，不会抛
-        )
-        return [r for r in results if r is not None]
+        # 顺序执行每个因子的 fetch -> quantile -> sigmoid
+        # P0-1 Fix: 避免同一 session 的并发访问导致 concurrent operations not permitted
+        results = []
+        for name, factor in factors:
+            r = await self._process_single_factor(name, factor, index_code, trade_date)
+            if r is not None:
+                results.append(r)
+        return results
 
     async def _process_single_factor(
         self,
@@ -562,6 +576,14 @@ class SentimentService:
                 raw_value = raw_value_obj.raw_value
             except Exception:
                 raw_value = factor._get_default_raw_value(index_code)
+
+            # 存储 raw_value 到 factor_history（所有14个因子）
+            try:
+                await self.history_store.insert(
+                    self.db_session, index_code, name, trade_date, float(raw_value),
+                )
+            except Exception:
+                pass  # 存储失败不影响流水线
 
             percentile = await self.quantile.calc_percentile(raw_value, index_code, name)
             x = percentile if percentile is not None else 0.50
@@ -647,29 +669,56 @@ class SentimentService:
         trade_date: str,
         composite_score: float,
         index_data: dict,
-    ) -> tuple[Optional[dict], list, list]:
+    ) -> tuple[Optional[dict], list, list, list[dict]]:
         """
-        计算 MACD + 加载价格/情绪历史
+        计算 MACD + 加载价格/情绪历史 + MACD 历史序列
         """
         macd_data = None
         sentiment_history = []
         price_history = []
+        macd_history = []
         try:
-            sentiment_history = await self.history_store.get_series(
-                db_session, index_code, "COMPOSITE", lookback_days=60,
+            # 获取情绪历史（含日期），用于 MACD 计算和历史序列对齐
+            sentiment_history_with_dates = await self.history_store.get_series_with_dates(
+                db_session, index_code, "COMPOSITE", lookback_days=120,
             )
+            sentiment_history = [v for _, v in sentiment_history_with_dates]
+            sentiment_dates = [d for d, _ in sentiment_history_with_dates]
+
             score_series_for_macd = sentiment_history + [composite_score]
             macd_data = self.macd_engine.compute(score_series_for_macd)
 
+            # 计算 MACD 历史序列（DIF/DEA/HIST）供前端可视化
+            macd_history_raw = self.macd_engine.compute_history(score_series_for_macd)
+
+            # 对齐日期：MACD 历史序列对应 score_series 的尾部
+            all_dates = sentiment_dates + [trade_date]
+            total_len = len(score_series_for_macd)
+            macd_hist_len = len(macd_history_raw)
+            if macd_hist_len > 0 and len(all_dates) == total_len:
+                offset = total_len - macd_hist_len
+                macd_history = [
+                    {"date": all_dates[offset + i], **macd_history_raw[i]}
+                    for i in range(macd_hist_len)
+                ]
+                # 去重：因子流水线已存储今日 COMPOSITE，导致 sentiment_history
+                # 末尾可能已包含 trade_date，追加后产生重复日期。
+                # 保留最后一条（与 macd 快照一致），移除倒数第二条重复项。
+                if (
+                    len(macd_history) >= 2
+                    and macd_history[-1]["date"] == macd_history[-2]["date"]
+                ):
+                    macd_history.pop(-2)
+
             price_history = await self.history_store.get_series(
-                db_session, index_code, "CLOSE", lookback_days=60,
+                db_session, index_code, "CLOSE", lookback_days=120,
             )
             today_close = index_data.get("close")
             if today_close:
                 price_history.append(float(today_close))
         except Exception:
             macd_data = None
-        return macd_data, sentiment_history, price_history
+        return macd_data, sentiment_history, price_history, macd_history
 
     async def _store_history(
         self,
@@ -682,9 +731,8 @@ class SentimentService:
         存储今日 composite_score 和收盘价到 factor_history
         """
         try:
-            await self.history_store.insert(
-                self.db_session, index_code, "COMPOSITE", trade_date, composite_score,
-            )
+            # COMPOSITE 已由 _process_single_factor 存储，这里不再重复
+            # CLOSE 也由因子引擎存储，这里保留降级存储
             today_close = index_data.get("close")
             if today_close:
                 await self.history_store.insert(

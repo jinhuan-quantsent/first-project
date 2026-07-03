@@ -7,7 +7,7 @@ from app.utils.data_source import fetch_turnover
 
 
 class TurnFactor(BaseFactor):
-    """TURN 换手率因子：高换手 → 恐慌"""
+    """TURN 换手率因子：高换手 → 恐惧"""
     name = "TURN"
     label = "换手率"
     direction = "fear"

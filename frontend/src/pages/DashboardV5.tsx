@@ -174,7 +174,7 @@ export default function DashboardV5() {
             <div className="flex items-center gap-3">
               <div
                 className="w-12 h-12 rounded-full flex items-center justify-center text-white text-lg font-bold"
-                style={{ background: SIGNAL_COLORS[idx.signal_level as SignalLevel] || '#94A3B8' }}
+                style={{ background: SIGNAL_COLORS[idx.signal_level] || '#94A3B8' }}
               >
                 {Math.round(idx.composite_score)}
               </div>
@@ -210,16 +210,16 @@ export default function DashboardV5() {
             <div className="grid grid-cols-3 gap-2 md:gap-4 mb-4">
               <div className="text-center">
                 <p className="text-xs text-gray-400">综合分</p>
-                <p className="text-2xl font-bold" style={{ color: SIGNAL_COLORS[selected.signal_level as SignalLevel] }}>
+                <p className="text-2xl font-bold" style={{ color: SIGNAL_COLORS[selected.signal_level] }}>
                   {selected.composite_score.toFixed(1)}
                 </p>
               </div>
               <div className="text-center">
                 <p className="text-xs text-gray-400">信号等级</p>
-                <p className="text-lg font-bold" style={{ color: SIGNAL_COLORS[selected.signal_level as SignalLevel] }}>
+                <p className="text-lg font-bold" style={{ color: SIGNAL_COLORS[selected.signal_level] }}>
                   {selected.signal_level}
                 </p>
-                <p className="text-xs text-gray-500">{SIGNAL_LABELS[selected.signal_level as SignalLevel]}</p>
+                <p className="text-xs text-gray-500">{SIGNAL_LABELS[selected.signal_level]}</p>
               </div>
               <div className="text-center">
                 <p className="text-xs text-gray-400">置信度</p>

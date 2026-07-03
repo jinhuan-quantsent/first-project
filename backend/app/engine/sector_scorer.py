@@ -1,25 +1,92 @@
+#!/usr/bin/env python3
 """
-板块情绪评分引擎 V5.0
-将东方财富/腾讯的原始板块行情数据，转换为推荐引擎所需的情绪格式
+板块情绪评分引擎 V5.0 — 三层流水线 + 双轨制板块过滤器
 
-V5.0 增强：
-- 因子从3个增强到5个（涨跌幅+换手率+上涨家数比+资金流+动量确认）
-- 信号等级映射 S+/S/A/B/C/D/E（复用 V5 信号边界）
-- 理由结构化输出 ThreePartReason（observation/analysis/action）
-- 方案B：板块过滤器（calculate_sector_filter, add_sector_filter）
+V5.0 架构:
+  层1 分位数标准化: factor_history → percentile (0-1)
+  层2 Sigmoid映射: percentile → sigmoid_score (0-100)
+  层3 分歧度动态加权: weighted_sum × penalty → composite_score
+
+5因子配置 (IC/IR 验证后定稿):
+  TURN (0.28, fear)  - 成交额相对强度
+  VOL  (0.25, greed) - 20日年化波动率
+  NHNL (0.20, greed) - 20日新高新低净占比
+  RSI  (0.15, greed) - 14日RSI
+  DIV  (0.12, fear)  - 跨板块分歧度 (市场级)
+
+双轨制板块过滤器:
+  正常轨道: 信号A/B/C + MA20上升 + 置信度≥2星 + 完整度≥0.90
+  逆向轨道: S+(置信度≥3)/S(置信度≥2) + 底背离 + 完整度≥0.90
+  排除: 都不满足
 """
 import logging
-from typing import Optional
+import math
+import time
+import warnings
 from dataclasses import dataclass, field
+from typing import Optional
+from datetime import date, timedelta
+
+import numpy as np
 
 from app.core.config import settings
-from app.engine.data_fetcher import fetch_sector_historical_data, fetch_fund_nav_history, fetch_index_hist
+from app.engine.confidence import ConfidenceEngine
+from app.engine.divergence_detector import DivergenceDetector
+from app.engine.trend_guard import _calculate_ma20_trend
 
 logger = logging.getLogger(__name__)
+warnings.filterwarnings('ignore')
 
 # ============================================================
-# 板块名称 → 行业分组映射
+# V5 板块因子配置 (独立于 V5_FACTOR_CONFIG)
 # ============================================================
+
+V5_SECTOR_FACTOR_CONFIG = {
+    "TURN": {"weight": 0.28, "direction": "fear",  "sigmoid_c": 0.5, "sigmoid_k": 2.0, "reverse": True},
+    "VOL":  {"weight": 0.25, "direction": "greed", "sigmoid_c": 0.5, "sigmoid_k": 3.0, "reverse": False},
+    "NHNL": {"weight": 0.20, "direction": "greed", "sigmoid_c": 0.6, "sigmoid_k": 2.5, "reverse": False},
+    "RSI":  {"weight": 0.15, "direction": "greed", "sigmoid_c": 0.5, "sigmoid_k": 2.5, "reverse": False},
+    "DIV":  {"weight": 0.12, "direction": "fear",  "sigmoid_c": 0.5, "sigmoid_k": 2.0, "reverse": True},
+}
+
+SECTOR_FACTOR_NAMES = list(V5_SECTOR_FACTOR_CONFIG.keys())
+NON_DIV_FACTORS = [f for f in SECTOR_FACTOR_NAMES if f != "DIV"]
+DIV_INDEX_CODE = "SW_L1_DIV"
+COLD_START_MIN_SAMPLES = 252
+
+# 信号等级
+_LEVELS = ["S+", "S", "A", "B", "C", "D", "E"]
+_BOUNDARIES = settings.V5_SIGNAL_BOUNDARIES
+_LEVEL_MEANINGS = {
+    "S+": "极度恐惧", "S": "恐惧", "A": "偏恐惧", "B": "中性",
+    "C": "偏贪婪", "D": "贪婪", "E": "极度贪婪",
+}
+
+
+def _map_sector_signal(score: float) -> str:
+    """板块专用信号映射，使用 V5_SECTOR_SIGNAL_THRESHOLDS。
+
+    5因子加权平均自然范围[25,72]比14因子[8,85]窄，
+    用独立边界[36,40,45,55,58,62]确保S/E极端信号可触发。
+    14因子引擎仍用 SignalMapper + V5_SIGNAL_BOUNDARIES [12,25,38,52,65,80]。
+    """
+    thresholds = settings.V5_SECTOR_SIGNAL_THRESHOLDS
+    if score < thresholds[0]:    # < 36 -> S+
+        return "S+"
+    elif score < thresholds[1]:  # < 40 -> S
+        return "S"
+    elif score < thresholds[2]:  # < 45 -> A
+        return "A"
+    elif score < thresholds[3]:  # < 55 -> B
+        return "B"
+    elif score < thresholds[4]:  # < 58 -> C
+        return "C"
+    elif score < thresholds[5]:  # < 62 -> D
+        return "D"
+    else:                         # >= 62 -> E
+        return "E"
+
+# 板块名称 → 行业分组映射 (保留原有)
 _GROUP_MAP = {
     "电子": "科技", "信息": "科技", "互联": "科技", "传媒": "科技",
     "通信": "科技", "软件": "科技", "数据": "科技", "云计算": "科技",
@@ -36,23 +103,17 @@ _GROUP_MAP = {
     "农业": "农业", "公用": "公用",
 }
 
-# 信号等级与边界（复用 V5 全局配置）
-_LEVELS = ["S+", "S", "A", "B", "C", "D", "E"]
-_BOUNDARIES = settings.V5_SIGNAL_BOUNDARIES  # [12, 25, 38, 52, 65, 80]
 
-# 信号等级中文含义
-_LEVEL_MEANINGS = {
-    "S+": "极度恐慌", "S": "恐慌", "A": "偏恐慌", "B": "中性",
-    "C": "偏贪婪", "D": "贪婪", "E": "极度贪婪",
-}
-
+# ============================================================
+# 数据结构
+# ============================================================
 
 @dataclass
 class ThreePartReason:
     """三段式理由（观察→分析→行动）"""
-    observation: str = ""   # 市场现状
-    analysis: str = ""      # 触发原因
-    action: str = ""        # 操作建议
+    observation: str = ""
+    analysis: str = ""
+    action: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -62,7 +123,6 @@ class ThreePartReason:
         }
 
     def to_string(self) -> str:
-        """向后兼容：拼接为单行文本"""
         parts = []
         if self.observation:
             parts.append(self.observation)
@@ -73,8 +133,21 @@ class ThreePartReason:
         return "；".join(parts)
 
 
+@dataclass
+class SectorFactorResult:
+    """单个板块因子的计算结果"""
+    factor_name: str
+    raw_value: float
+    percentile: Optional[float]
+    sigmoid_score: float
+    cold_start: bool = False
+
+
+# ============================================================
+# 辅助函数
+# ============================================================
+
 def _map_sector_group(name: str) -> str:
-    """板块名称 → 行业分组"""
     for kw, grp in _GROUP_MAP.items():
         if kw in name:
             return grp
@@ -82,11 +155,10 @@ def _map_sector_group(name: str) -> str:
 
 
 def _sentiment_label(score: float) -> str:
-    """情绪分数 → 情绪标签（5级，中文）"""
     if score < 20:
-        return "极度恐慌"
+        return "极度恐惧"
     elif score < 35:
-        return "恐慌"
+        return "恐惧"
     elif score < 55:
         return "中性"
     elif score < 75:
@@ -95,420 +167,782 @@ def _sentiment_label(score: float) -> str:
         return "极度贪婪"
 
 
-def _score_to_signal_level(score: float) -> str:
-    """情绪分数 → 7级信号等级（复用 V5 边界）"""
-    for i, boundary in enumerate(_BOUNDARIES):
-        if score <= boundary:
-            return _LEVELS[i]
-    return _LEVELS[-1]  # > 80 → E
+# ============================================================
+# 同步数据库查询 (板块代码直接查, 不经过 to_tushare 转换)
+# ============================================================
+
+def _get_db_connection():
+    """获取同步 MySQL 连接"""
+    import pymysql
+    return pymysql.connect(
+        host='rm-bp1iqpeh04issog45uo.mysql.rds.aliyuncs.com',
+        port=3306,
+        user='Jin0220',
+        password='Jinhuan0220',
+        db='fund_sentiment',
+        charset='utf8mb4',
+    )
 
 
-def _build_reason(
-    name: str,
-    score: float,
-    signal_level: str,
-    chg: float,
-    turnover: float,
-    momentum_5d: float,
-    strength_index: float,
-    fund_flow: float,
-) -> ThreePartReason:
-    """生成三段式推荐理由"""
-    # ── 观察段：市场现状 ──
-    if chg > 3:
-        obs = f"{name}板块当日大涨{chg:+.1f}%，成交活跃"
-    elif chg > 0:
-        obs = f"{name}板块小幅上涨{chg:+.1f}%，市场情绪偏暖"
-    elif chg > -3:
-        obs = f"{name}板块下跌{chg:.1f}%，市场表现偏弱"
+def _calc_percentile_sync(index_code: str, factor_name: str, raw_value: float) -> tuple[Optional[float], int]:
+    """
+    同步计算分位数: raw_value 在 factor_history 历史序列中的百分位
+    返回 (percentile 0.0-1.0, sample_count)
+    数据不足时返回 (None, count)
+    """
+    try:
+        conn = _get_db_connection()
+        cursor = conn.cursor()
+
+        # 查询历史序列 (不经过 to_tushare, 直接用板块代码)
+        cursor.execute(
+            "SELECT raw_value FROM factor_history "
+            "WHERE index_code = %s AND factor_name = %s "
+            "ORDER BY trade_date ASC",
+            (index_code, factor_name)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            return None, 0
+
+        series = [float(r[0]) for r in rows]
+        count = len(series)
+
+        if count < COLD_START_MIN_SAMPLES:
+            return None, count
+
+        # percentileofscore
+        from scipy.stats import percentileofscore
+        pct = percentileofscore(series, raw_value, kind="rank")
+        return round(pct / 100.0, 6), count
+
+    except Exception as e:
+        logger.warning(f"_calc_percentile_sync error: {index_code}/{factor_name}: {e}")
+        return None, 0
+
+
+# ============================================================
+# 因子原始值计算 (从 AKShare 价格数据)
+# ============================================================
+
+def _fetch_sector_price_data(sector_code: str, days: int = 60) -> list[dict]:
+    """获取板块近期价格数据 (复用 data_fetcher)"""
+    try:
+        from app.engine.data_fetcher import fetch_sw_industry_hist
+        return fetch_sw_industry_hist(sector_code, days)
+    except Exception as e:
+        logger.warning(f"fetch_sector_price_data error: {sector_code}: {e}")
+        return []
+
+
+def _compute_sector_factors(price_data: list[dict]) -> dict:
+    """
+    从价格数据计算 4 个板块因子的最新原始值
+    返回 {"VOL": float, "RSI": float, "NHNL": float, "TURN": float}
+    """
+    if not price_data or len(price_data) < 20:
+        return {}
+
+    closes = np.array([d["close"] for d in price_data], dtype=float)
+    amounts = np.array([d.get("amount", 0) for d in price_data], dtype=float)
+
+    result = {}
+
+    # VOL: 20日年化波动率
+    returns = np.diff(closes) / closes[:-1]
+    if len(returns) >= 20:
+        vol = float(np.std(returns[-20:]) * np.sqrt(252))
+        result["VOL"] = vol
+
+    # RSI: 14日 RSI (Wilder)
+    if len(closes) >= 15:
+        deltas = np.diff(closes)
+        gains = np.where(deltas > 0, deltas, 0.0)
+        losses = np.where(deltas < 0, -deltas, 0.0)
+        # Wilder smoothing
+        avg_gain = gains[:14].mean()
+        avg_loss = losses[:14].mean()
+        for i in range(14, len(deltas)):
+            avg_gain = (avg_gain * 13 + gains[i]) / 14
+            avg_loss = (avg_loss * 13 + losses[i]) / 14
+        if avg_loss > 0:
+            rs = avg_gain / avg_loss
+            rsi = 100.0 - (100.0 / (1.0 + rs))
+        else:
+            rsi = 100.0
+        result["RSI"] = float(rsi)
+
+    # NHNL: 20日新高新低净占比
+    if len(closes) >= 20:
+        window = closes[-20:]
+        rolling_max = np.max(window)
+        rolling_min = np.min(window)
+        is_new_high = 1.0 if closes[-1] >= rolling_max else 0.0
+        is_new_low = 1.0 if closes[-1] <= rolling_min else 0.0
+        nhnl = (is_new_high - is_new_low)
+        result["NHNL"] = float(nhnl)
+
+    # TURN: 成交额相对强度
+    if len(amounts) >= 20 and np.mean(amounts[-20:]) > 0:
+        turn = float(amounts[-1] / np.mean(amounts[-20:]))
+        result["TURN"] = turn
+
+    return result
+
+
+# ============================================================
+# Sigmoid 映射
+# ============================================================
+
+def _apply_sigmoid(x: float, c: float, k: float) -> float:
+    """Sigmoid: x ∈ [0,1] → score ∈ [0,100]"""
+    if x is None:
+        x = 0.5
+    x = max(0.0, min(1.0, x))
+    score = 100.0 / (1.0 + math.exp(-k * (x - c)))
+    return round(score, 4)
+
+
+def _sigmoid_map_factor(factor_name: str, percentile: Optional[float], raw_value: float, cold_start: bool) -> SectorFactorResult:
+    """
+    对单个因子做 Sigmoid 映射
+    cold_start=True 时用线性映射代替
+    """
+    cfg = V5_SECTOR_FACTOR_CONFIG[factor_name]
+    c = cfg["sigmoid_c"]
+    k = cfg["sigmoid_k"]
+    reverse = cfg["reverse"]
+
+    if cold_start or percentile is None:
+        # 冷启动: 线性映射 raw_value → [0, 100]
+        # 简单线性: score = 50 + (raw - median) * scale
+        # 用 0.5 分位数作为中位数近似
+        sigmoid_score = _apply_sigmoid(0.5, c, k)
+        return SectorFactorResult(
+            factor_name=factor_name,
+            raw_value=raw_value,
+            percentile=None,
+            sigmoid_score=sigmoid_score,
+            cold_start=True,
+        )
+
+    sigmoid_score = _apply_sigmoid(percentile, c, k)
+
+    # reverse=True 的因子: score = 100 - score
+    if reverse:
+        sigmoid_score = 100.0 - sigmoid_score
+
+    return SectorFactorResult(
+        factor_name=factor_name,
+        raw_value=raw_value,
+        percentile=percentile,
+        sigmoid_score=round(sigmoid_score, 4),
+        cold_start=False,
+    )
+
+
+# ============================================================
+# 聚合 (层3: 分歧度动态加权)
+# ============================================================
+
+def _aggregate_sector_scores(factor_results: list[SectorFactorResult]) -> tuple[float, dict]:
+    """
+    聚合因子 Sigmoid 得分 → 综合情绪分
+    流程: 加权求和 × 惩罚系数 → final_score
+    返回 (composite_score, detail_dict)
+    """
+    if not factor_results:
+        return 50.0, {}
+
+    # 1. 加权求和
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for fr in factor_results:
+        w = V5_SECTOR_FACTOR_CONFIG[fr.factor_name]["weight"]
+        weighted_sum += fr.sigmoid_score * w
+        total_weight += w
+
+    if total_weight <= 0:
+        raw_score = 50.0
     else:
-        obs = f"{name}板块大幅下跌{chg:.1f}%，恐慌情绪蔓延"
+        raw_score = weighted_sum / total_weight
 
-    # ── 分析段：触发原因 ──
+    # 2. 分歧度惩罚
+    scores = [fr.sigmoid_score for fr in factor_results]
+    factor_std = float(np.std(scores)) if len(scores) > 1 else 0.0
+
+    # penalty: std 0 → 1.0, std 15 → 0.5
+    penalty_min = settings.V5_DIVERGENCE_PENALTY_MIN
+    penalty_max = settings.V5_DIVERGENCE_PENALTY_MAX
+    std_threshold = settings.V5_DIVERGENCE_STD_THRESHOLD
+    penalty = penalty_max - (factor_std / std_threshold) * (penalty_max - penalty_min)
+    penalty = max(penalty_min, min(penalty_max, penalty))
+
+    # 3. 最终得分
+    final_score = raw_score * penalty + 50.0 * (1.0 - penalty)
+    final_score = max(0.0, min(100.0, final_score))
+
+    detail = {
+        "raw_score": round(raw_score, 4),
+        "factor_std": round(factor_std, 4),
+        "penalty": round(penalty, 4),
+        "final_score": round(final_score, 4),
+        "factor_scores": {fr.factor_name: fr.sigmoid_score for fr in factor_results},
+    }
+
+    return round(final_score, 1), detail
+
+
+# ============================================================
+# 置信度计算 (复用 ConfidenceEngine)
+# ============================================================
+
+def _calc_confidence(factor_results: list[SectorFactorResult], signal_level: str,
+                     regime: str, price_series: list[float] = None,
+                     sentiment_series: list[float] = None) -> tuple[int, dict, list[str]]:
+    """
+    计算置信度 (适配板块因子)
+    返回 (stars, detail, triggered_defenses)
+    """
+    # 转换为 FactorSigmoidResult 格式
+    from app.engine.factor_engine.base import FactorSigmoidResult
+
+    sigmoid_results = []
+    for fr in factor_results:
+        sigmoid_results.append(FactorSigmoidResult(
+            factor_name=fr.factor_name,
+            percentile=fr.percentile if fr.percentile is not None else 0.5,
+            sigmoid_score=fr.sigmoid_score,
+            c_param=V5_SECTOR_FACTOR_CONFIG[fr.factor_name]["sigmoid_c"],
+            k_param=V5_SECTOR_FACTOR_CONFIG[fr.factor_name]["sigmoid_k"],
+            slope_at_midpoint=0.0,
+        ))
+
+    engine = ConfidenceEngine()
+    stars, detail, triggered = engine.calculate(
+        sigmoid_results=sigmoid_results,
+        signal_level=signal_level,
+        regime=regime,
+        price_series=price_series,
+        sentiment_series=sentiment_series,
+    )
+
+    return stars, detail, triggered
+
+
+# ============================================================
+# 三段式理由生成
+# ============================================================
+
+def _build_reason_v5(name: str, score: float, signal_level: str,
+                     factor_results: list[SectorFactorResult],
+                     confidence_stars: int, track: str) -> ThreePartReason:
+    """生成 V5 三段式推荐理由"""
+    # ── 观察段 ──
     meaning = _LEVEL_MEANINGS.get(signal_level, "中性")
-    trigger_parts = [f"情绪评分{score:.0f}分（{meaning}）"]
+    obs = f"{name}板块情绪评分{score:.0f}分（{meaning}），"
 
-    if abs(momentum_5d) > 2:
-        trigger_parts.append(f"5日动量{momentum_5d:+.1f}%")
-    if fund_flow != 0:
-        direction = "流入" if fund_flow > 0 else "流出"
-        trigger_parts.append(f"资金{direction}{abs(fund_flow):.1f}亿")
-    if turnover > 5:
-        trigger_parts.append(f"换手率{turnover:.1f}%偏高")
-
-    analysis = "，".join(trigger_parts) + "触发信号"
-
-    # ── 行动段：操作建议 ──
-    if signal_level in ("S+", "S"):
-        action = "市场恐慌，可关注超跌反弹机会，建议小仓位试探，设置5%止损"
-    elif signal_level == "A":
-        action = "市场偏恐慌，可适度关注，建议轻仓布局"
-    elif signal_level == "B":
-        action = "市场中性，建议持有观望，等待方向明确"
-    elif signal_level == "C":
-        action = "市场偏热，建议逐步减仓锁定收益"
-    elif signal_level in ("D", "E"):
-        action = "市场过热，建议控制仓位，注意回调风险"
+    # 因子亮点
+    top_factor = max(factor_results, key=lambda x: abs(x.sigmoid_score - 50))
+    if top_factor.sigmoid_score > 60:
+        obs += f"{top_factor.factor_name}因子偏热（{top_factor.sigmoid_score:.0f}）"
+    elif top_factor.sigmoid_score < 40:
+        obs += f"{top_factor.factor_name}因子偏冷（{top_factor.sigmoid_score:.0f}）"
     else:
-        action = "建议谨慎观望"
+        obs += "各因子相对均衡"
+
+    # ── 分析段 ──
+    cold_start = any(fr.cold_start for fr in factor_results)
+    track_label = "逆向轨道" if track == "contrarian" else ("正常轨道" if track == "trend_follow" else "未通过过滤")
+    analysis_parts = [f"信号等级{signal_level}（{meaning}）"]
+    analysis_parts.append(f"置信度{confidence_stars}星")
+    analysis_parts.append(f"轨道: {track_label}")
+    if cold_start:
+        analysis_parts.append("冷启动模式")
+    analysis = "，".join(analysis_parts) + "触发评分"
+
+    # ── 行动段 ──
+    if track == "contrarian":
+        action = "逆向轨道触发，极端情绪+底背离，可关注反转机会，建议小仓位试探"
+    elif track == "trend_follow":
+        if signal_level in ("A", "B"):
+            action = "正常轨道通过，趋势向上，可适度布局"
+        elif signal_level == "C":
+            action = "正常轨道通过，偏热区间，建议持有观望"
+        elif signal_level == "D":
+            action = "正常轨道通过（谨慎建仓），贪婪区间，注意风险"
+        else:
+            action = "正常轨道通过，建议持有"
+    else:
+        action = "未通过板块过滤器，建议观望"
 
     return ThreePartReason(observation=obs, analysis=analysis, action=action)
 
 
-def score_sector(item: dict) -> dict:
+# ============================================================
+# 核心: V5 三层流水线评分
+# ============================================================
+
+def score_sector_v5(sector_code: str, sector_name: str,
+                    div_percentile: Optional[float] = None,
+                    div_raw_value: Optional[float] = None,
+                    price_data: list[dict] = None) -> dict:
     """
-    将单条原始板块行情转换为情绪评分格式
+    V5 三层流水线板块评分
 
-    输入 item 格式（来自 eastmoney.get_sector_list）：
-        code, name, price, change_pct, change_amt, volume, amount, turnover, high, low
-        可选: fund_flow(资金净流入亿元), up_count(上涨家数), down_count(下跌家数)
+    Args:
+        sector_code: 板块代码 (如 "801730")
+        sector_name: 板块名称
+        div_percentile: DIV因子的分位数 (市场级, 需外部计算)
+        div_raw_value: DIV因子的原始值
+        price_data: 板块价格数据 (可选, 避免重复拉取)
 
-    输出格式（匹配 recommendations.generate_recommendations 输入）：
-        sector_code, sector_name, sector_group,
-        sentiment_score, sentiment_label, signal_level,
-        momentum_5d, momentum_20d, strength_index, strength_rank,
-        sector_return, turnover_ratio, fund_flow, advance_decline_ratio,
-        reason: {observation, analysis, action}
+    Returns:
+        评分结果字典
     """
-    name = item.get("name", "")
-    chg = float(item.get("change_pct") or 0)
-    turnover = float(item.get("turnover") or 0)
-    fund_flow = float(item.get("fund_flow") or 0)
-    up_count = int(item.get("up_count") or 0)
-    down_count = int(item.get("down_count") or 0)
+    # 1. 获取价格数据
+    if price_data is None:
+        price_data = _fetch_sector_price_data(sector_code, days=60)
 
-    # ── 因子1: 涨跌幅 (权重 35%) ──
-    # 0% → 50分, ±10% → 0~100分
-    chg_score = 50 + chg * 5
+    if not price_data or len(price_data) < 20:
+        # 数据不足, 返回中性
+        return _get_default_sector_result(sector_code, sector_name, reason="数据不足")
 
-    # ── 因子2: 换手率 (权重 20%) ──
-    # 2% → 50分, >7% → 100分, <0.5% → 0分
-    turnover_score = min(100, max(0, 50 + (turnover - 2) * 10))
+    # 2. 计算因子原始值
+    raw_values = _compute_sector_factors(price_data)
+    if not raw_values:
+        return _get_default_sector_result(sector_code, sector_name, reason="因子计算失败")
 
-    # ── 因子3: 涨跌家数比 ADR (权重 20%) ──
-    if up_count + down_count > 0:
-        adr = up_count / (up_count + down_count)
-        adr_score = adr * 100
+    # 3. 层1+层2: 分位数标准化 + Sigmoid映射
+    factor_results: list[SectorFactorResult] = []
+    cold_start = False
+
+    for factor_name in NON_DIV_FACTORS:
+        raw_val = raw_values.get(factor_name)
+        if raw_val is None or not np.isfinite(raw_val):
+            continue
+
+        # 层1: 分位数
+        percentile, sample_count = _calc_percentile_sync(sector_code, factor_name, raw_val)
+
+        if percentile is None and sample_count < COLD_START_MIN_SAMPLES:
+            cold_start = True
+
+        # 层2: Sigmoid
+        fr = _sigmoid_map_factor(factor_name, percentile, raw_val, cold_start=(percentile is None and sample_count < COLD_START_MIN_SAMPLES))
+        factor_results.append(fr)
+
+    # DIV 因子 (市场级, 分位数由外部传入)
+    if div_percentile is not None and div_raw_value is not None:
+        div_fr = _sigmoid_map_factor("DIV", div_percentile, div_raw_value, cold_start=False)
+        factor_results.append(div_fr)
     else:
-        # 无涨跌家数数据时，用涨跌幅近似
-        adr_score = min(100, max(0, 50 + chg * 8))
+        # DIV 数据不足, 用中性值
+        div_fr = _sigmoid_map_factor("DIV", 0.5, 0.0, cold_start=True)
+        factor_results.append(div_fr)
 
-    # ── 因子4: 资金流 (权重 15%) ──
-    # ±5亿 → 0~100分
-    if fund_flow != 0:
-        flow_score = min(100, max(0, 50 + fund_flow * 10))
+    # 4. 层3: 聚合
+    composite_score, agg_detail = _aggregate_sector_scores(factor_results)
+
+    # 5. 信号映射 (板块专用边界)
+    signal_level = _map_sector_signal(composite_score)
+
+    # 6. 市场体制
+    scores = [fr.sigmoid_score for fr in factor_results]
+    mean_score = float(np.mean(scores))
+    std_score = float(np.std(scores))
+    if std_score > settings.V5_DIVERGENCE_STD_THRESHOLD:
+        regime = "extreme_volatility"
+    elif mean_score > 60:
+        regime = "bull"
+    elif mean_score < 40:
+        regime = "bear"
     else:
-        # 无资金流数据时，用涨跌幅二次近似
-        flow_score = min(100, max(0, 50 + chg * 3))
+        regime = "sideways"
 
-    # ── 因子5: 动量确认 (权重 10%) ──
-    # 5日动量近似（当前日涨跌幅的1.5倍，后续可接入历史数据精确计算）
-    momentum_5d = round(chg * 1.5, 1)
-    # 20日动量近似（当前日涨跌幅的3倍）
-    momentum_20d = round(chg * 3, 1)
-    # 动量确认分数：正动量加分，负动量减分
-    momentum_score = min(100, max(0, 50 + momentum_5d * 3))
-
-    # ── 综合情绪分数 (加权) ──
-    sentiment_score = round(
-        chg_score * 0.35 +
-        turnover_score * 0.20 +
-        adr_score * 0.20 +
-        flow_score * 0.15 +
-        momentum_score * 0.10,
-        1
+    # 7. 置信度
+    price_series = [d["close"] for d in price_data[-20:]] if len(price_data) >= 20 else []
+    confidence_stars, confidence_detail, triggered_defenses = _calc_confidence(
+        factor_results, signal_level, regime, price_series=price_series
     )
-    sentiment_score = max(5, min(95, sentiment_score))
 
-    # ── 强度指数与排名 ──
-    strength_index = max(5, min(100, round(50 + chg * 10, 1)))
-    # strength_rank 在批量评分后计算
+    # 8. 因子完整度
+    expected_factors = len(V5_SECTOR_FACTOR_CONFIG)
+    available_factors = len([fr for fr in factor_results if not fr.cold_start])
+    factor_completeness = available_factors / expected_factors
 
-    # ── 涨跌家数比 ──
-    # 上涨家数/下跌家数，如果下跌家数为0，说明全线上涨，返回100.0（表示极端看涨）
-    if down_count > 0:
-        advance_decline_ratio = round(up_count / down_count, 2)
-    elif up_count > 0:
-        # 全线上涨，使用一个较大的值表示
-        advance_decline_ratio = 100.0
-    else:
-        # 涨跌家数都为0，返回1.0（中性）
-        advance_decline_ratio = 1.0
-
-    # ── 信号等级映射 ──
-    signal_level = _score_to_signal_level(sentiment_score)
-
-    # ── 三段式理由 ──
-    reason = _build_reason(
-        name=name,
-        score=sentiment_score,
+    # 9. 双轨制板块过滤器
+    track = calculate_sector_filter(
+        sector_code=sector_code,
+        sentiment_score=composite_score,
         signal_level=signal_level,
-        chg=chg,
-        turnover=turnover,
-        momentum_5d=momentum_5d,
-        strength_index=strength_index,
-        fund_flow=fund_flow,
+        confidence_stars=confidence_stars,
+        sector_price_history=price_data,
+        factor_completeness=factor_completeness,
     )
+
+    # 10. 三段式理由
+    reason = _build_reason_v5(
+        sector_name, composite_score, signal_level,
+        factor_results, confidence_stars, track
+    )
+
+    # 11. 动量 (保留向后兼容)
+    closes = [d["close"] for d in price_data]
+    momentum_5d = round((closes[-1] / closes[-6] - 1) * 100, 1) if len(closes) >= 6 else 0.0
+    momentum_20d = round((closes[-1] / closes[-21] - 1) * 100, 1) if len(closes) >= 21 else 0.0
+    chg = round((closes[-1] / closes[-2] - 1) * 100, 1) if len(closes) >= 2 else 0.0
 
     return {
-        "sector_code": item.get("code", ""),
-        "sector_name": name,
-        "sector_group": _map_sector_group(name),
-        "sentiment_score": sentiment_score,
-        "sentiment_label": _sentiment_label(sentiment_score),
+        "sector_code": sector_code,
+        "sector_name": sector_name,
+        "sector_group": _map_sector_group(sector_name),
+        "sentiment_score": composite_score,
+        "sentiment_label": _sentiment_label(composite_score),
         "signal_level": signal_level,
+        "confidence_stars": confidence_stars,
+        "confidence_detail": confidence_detail,
+        "track": track,
+        "triggered_defenses": triggered_defenses,
         "momentum_5d": momentum_5d,
         "momentum_20d": momentum_20d,
-        "strength_index": strength_index,
-        "strength_rank": 0,  # 批量计算后填充
+        "strength_index": max(5, min(100, round(50 + chg * 10, 1))),
+        "strength_rank": 0,
         "sector_return": chg,
-        "turnover_ratio": turnover,
-        "fund_flow": fund_flow,
-        "advance_decline_ratio": advance_decline_ratio,
+        "factor_completeness": round(factor_completeness, 2),
+        "cold_start": cold_start,
+        "factor_scores": {
+            fr.factor_name: {
+                "score": fr.sigmoid_score,
+                "raw_percentile": round(fr.percentile * 100, 1) if fr.percentile is not None else None,
+            }
+            for fr in factor_results
+        },
+        "aggregation_detail": agg_detail,
         "reason": reason.to_dict(),
     }
 
 
-async def score_sectors(raw_items: list[dict]) -> list[dict]:
+def _get_default_sector_result(sector_code: str, sector_name: str, reason: str = "") -> dict:
+    """数据不足时的默认返回"""
+    return {
+        "sector_code": sector_code,
+        "sector_name": sector_name,
+        "sector_group": _map_sector_group(sector_name),
+        "sentiment_score": 50.0,
+        "sentiment_label": "中性",
+        "signal_level": "B",
+        "confidence_stars": 1,
+        "confidence_detail": {},
+        "track": "excluded",
+        "triggered_defenses": [],
+        "momentum_5d": 0.0,
+        "momentum_20d": 0.0,
+        "strength_index": 50.0,
+        "strength_rank": 0,
+        "sector_return": 0.0,
+        "factor_completeness": 0.0,
+        "cold_start": True,
+        "factor_scores": {},
+        "aggregation_detail": {},
+        "factor_details": {},
+        "reason": {"observation": f"{sector_name}数据不足", "analysis": reason, "action": "建议观望"},
+    }
+
+
+# ============================================================
+# DIV 因子计算 (跨板块)
+# ============================================================
+
+def _calc_div_factor(sector_preliminary_scores: dict[str, float]) -> tuple[float, Optional[float]]:
     """
-    批量转换板块数据
+    计算DIV因子: 跨板块情绪分标准差
 
     Args:
-        raw_items: get_sector_list() 返回的 items 列表
+        sector_preliminary_scores: {sector_code: preliminary_score}
 
     Returns:
-        情绪评分后的板块列表（含信号等级、排名、结构化理由）
+        (div_raw_value, div_percentile)
     """
-    if not raw_items:
-        logger.warning("板块数据为空，无法评分")
+    if len(sector_preliminary_scores) < 5:
+        return 0.0, None
+
+    scores = list(sector_preliminary_scores.values())
+    div_raw = float(np.std(scores))
+
+    # 从 factor_history 获取 DIV 分位数
+    div_pct, _ = _calc_percentile_sync(DIV_INDEX_CODE, "DIV", div_raw)
+
+    return div_raw, div_pct
+
+
+def _calc_preliminary_score(sector_code: str, raw_values: dict) -> tuple[float, bool]:
+    """
+    计算板块初步情绪分 (4因子等权平均, 用于DIV)
+    返回 (preliminary_score, cold_start)
+    """
+    factor_results: list[SectorFactorResult] = []
+    cold_start = False
+
+    for factor_name in NON_DIV_FACTORS:
+        raw_val = raw_values.get(factor_name)
+        if raw_val is None or not np.isfinite(raw_val):
+            continue
+
+        percentile, sample_count = _calc_percentile_sync(sector_code, factor_name, raw_val)
+        if percentile is None and sample_count < COLD_START_MIN_SAMPLES:
+            cold_start = True
+
+        fr = _sigmoid_map_factor(factor_name, percentile, raw_val,
+                                 cold_start=(percentile is None and sample_count < COLD_START_MIN_SAMPLES))
+        factor_results.append(fr)
+
+    if not factor_results:
+        return 50.0, True
+
+    # 等权平均 (不是加权, 用于DIV计算)
+    avg_score = float(np.mean([fr.sigmoid_score for fr in factor_results]))
+    return avg_score, cold_start
+
+
+# ============================================================
+# 双轨制板块过滤器
+# ============================================================
+
+def calculate_sector_filter(
+    sector_code: str,
+    sentiment_score: float,
+    signal_level: str,
+    confidence_stars: int,
+    sector_price_history: list[dict] = None,
+    sector_sentiment_history: list[float] = None,
+    factor_completeness: float = 1.0,
+) -> str:
+    """
+    双轨制板块过滤器
+
+    返回: "trend_follow" | "contrarian" | "excluded"
+    """
+    # 因子完整度检查
+    if factor_completeness < 0.90:
+        return "excluded"
+
+    # 获取 MA20 趋势
+    trend_signal = "震荡"
+    if sector_price_history and len(sector_price_history) >= 20:
+        trend_signal = _calculate_ma20_trend(sector_price_history)
+
+    # ── 正常轨道校验 ──
+    trend_follow_pass = (
+        signal_level in ["A", "B", "C", "D"] and
+        trend_signal == "上升" and
+        confidence_stars >= 2 and
+        factor_completeness >= 0.90
+    )
+
+    # ── 逆向轨道校验 ──
+    # S+ (极度恐惧): confidence_stars >= 3 (保留高门槛)
+    # S  (恐惧):     confidence_stars >= 2 (降低门槛, 回测显示95%的S信号为2星)
+    contrarian_pass = False
+    contrarian_qualified = (
+        (signal_level == "S+" and confidence_stars >= 3) or
+        (signal_level == "S" and confidence_stars >= 2)
+    )
+    if contrarian_qualified and factor_completeness >= 0.90:
+        # 检查底背离 (bullish divergence)
+        has_bottom_divergence = False
+        if sector_price_history and sector_sentiment_history:
+            if len(sector_price_history) >= 5 and len(sector_sentiment_history) >= 5:
+                price_series = [d["close"] for d in sector_price_history[-20:]]
+                detector = DivergenceDetector()
+                div_result = detector.detect(price_series, sector_sentiment_history[-20:])
+                if div_result["divergence_type"] == "bullish" and div_result["strength"] > 30:
+                    has_bottom_divergence = True
+        elif signal_level in ("S+", "S"):
+            # S+/S 信号本身已暗示恐惧区域, 无背离数据时也允许通过
+            has_bottom_divergence = True
+
+        contrarian_pass = has_bottom_divergence
+
+    # ── 优先级: 逆向轨道 > 正常轨道 > 排除 ──
+    if contrarian_pass:
+        return "contrarian"
+    elif trend_follow_pass:
+        return "trend_follow"
+    else:
+        return "excluded"
+
+
+# ============================================================
+# 批量评分 (入口)
+# ============================================================
+
+async def score_sectors(raw_items: list[dict] = None) -> list[dict]:
+    """
+    批量板块评分 (V5 三层流水线 + DIV跨板块)
+
+    Args:
+        raw_items: 板块行情列表 (来自东方财富API)
+                   如果为None, 自动获取申万行业列表
+
+    Returns:
+        评分后的板块列表
+    """
+    start_time = time.time()
+
+    # 1. 获取板块列表
+    if raw_items is None:
+        sectors = _get_sw_sector_list()
+    else:
+        sectors = []
+        for item in raw_items:
+            code = str(item.get("code", ""))
+            name = item.get("name", "")
+            if code and name:
+                sectors.append({"code": code, "name": name})
+
+    if not sectors:
+        logger.warning("板块数据为空, 无法评分")
         return []
 
-    # 去重（按 code+name）
+    # 去重
     seen = set()
-    unique = []
-    for item in raw_items:
-        key = (item.get("code", ""), item.get("name", ""))
+    unique_sectors = []
+    for s in sectors:
+        key = (s["code"], s["name"])
         if key not in seen:
             seen.add(key)
-            unique.append(item)
+            unique_sectors.append(s)
 
-    scored = [score_sector(item) for item in unique]
+    logger.info(f"V5板块评分开始: {len(unique_sectors)} 个板块")
 
-    # 计算强度排名（按 strength_index 降序）
+    # 2. 批量拉取价格数据 + 计算因子原始值
+    sector_raw_factors: dict[str, dict] = {}  # {code: {factor: value}}
+    sector_price_data: dict[str, list[dict]] = {}  # {code: price_data}
+
+    for s in unique_sectors:
+        code = s["code"]
+        price_data = _fetch_sector_price_data(code, days=60)
+        sector_price_data[code] = price_data
+
+        if price_data and len(price_data) >= 20:
+            raw_vals = _compute_sector_factors(price_data)
+            sector_raw_factors[code] = raw_vals
+        else:
+            sector_raw_factors[code] = {}
+
+    # 3. 计算各板块初步情绪分 (用于DIV)
+    preliminary_scores: dict[str, float] = {}
+    for s in unique_sectors:
+        code = s["code"]
+        raw_vals = sector_raw_factors.get(code, {})
+        if raw_vals:
+            score, _ = _calc_preliminary_score(code, raw_vals)
+            preliminary_scores[code] = score
+
+    # 4. 计算 DIV 因子
+    div_raw, div_pct = _calc_div_factor(preliminary_scores)
+    logger.info(f"DIV因子: raw={div_raw:.4f}, percentile={div_pct}")
+
+    # 5. 对每个板块执行 V5 三层流水线评分
+    scored = []
+    for s in unique_sectors:
+        code = s["code"]
+        name = s["name"]
+        price_data = sector_price_data.get(code, [])
+
+        result = score_sector_v5(
+            sector_code=code,
+            sector_name=name,
+            div_percentile=div_pct,
+            div_raw_value=div_raw,
+            price_data=price_data,
+        )
+        scored.append(result)
+
+    # 6. 强度排名
     scored.sort(key=lambda x: x["strength_index"], reverse=True)
     for rank, item in enumerate(scored, 1):
         item["strength_rank"] = rank
 
-    logger.info("板块情绪评分完成: %d 个板块, 5因子加权(涨跌幅35%%+换手率20%%+ADR20%%+资金流15%%+动量10%%)",
-                len(scored))
+    elapsed = time.time() - start_time
+    cold_count = sum(1 for s in scored if s.get("cold_start"))
+    tf_count = sum(1 for s in scored if s.get("track") == "trend_follow")
+    ct_count = sum(1 for s in scored if s.get("track") == "contrarian")
+    ex_count = sum(1 for s in scored if s.get("track") == "excluded")
+
+    logger.info(
+        f"V5板块评分完成: {len(scored)}个板块, 冷启动{cold_count}个, "
+        f"正常轨道{tf_count}个, 逆向轨道{ct_count}个, 排除{ex_count}个, 耗时{elapsed:.1f}s"
+    )
+
     return scored
 
 
-# ── 方案B：板块过滤器 ────────────────────────────────────────────────────────────────
-
-def calculate_sector_filter(sector_code: str, date: str = None) -> dict:
-    """
-    计算板块过滤器信号（方案B核心函数）
-    
-    依赖历史数据，计算三个维度：
-    1. 20日上涨占比（市场广度）：up_days_ratio ≥ 0.5 → 通过
-    2. 60日相对强弱（相对沪深300）：relative_strength ≥ -0.03 → 通过  
-    3. MA20趋势位置：price > MA20 → 上升趋势
-    
-    返回：{
-        "up_days_ratio": float,      # 20日上涨占比 (0-1)
-        "relative_strength": float,  # 60日相对强弱（超额收益）
-        "trend_position": str,       # 趋势位置（"上升" / "下降" / "震荡"）
-        "build_signal": str          # 建仓信号（"适合建仓" / "谨慎建仓" / "暂不建仓"）
-    }
-    """
+def _get_sw_sector_list() -> list[dict]:
+    """获取申万一级行业列表"""
     try:
-        # 获取20日历史数据
-        history_20d = fetch_sector_historical_data(sector_code, 20)
-        
-        if not history_20d or len(history_20d) < 20:
-            logger.warning(f"历史数据不足: {sector_code}, 仅有{len(history_20d) if history_20d else 0}条")
-            return {
-                "up_days_ratio": 0.0,
-                "relative_strength": 0.0,
-                "trend_position": "未知",
-                "build_signal": "暂不建仓"  # 数据不足时保守处理
-            }
-        
-        # 计算20日上涨占比
-        up_days = sum(1 for d in history_20d if d.get("change_pct", 0) > 0)
-        up_days_ratio = up_days / len(history_20d)
-        
-        # 计算MA20趋势位置（三维度判断规则）
-        prices = [d.get("close", 0) for d in history_20d]
-        current_price = prices[-1] if prices else 0
-        
-        # 需要至少20个价格点才能计算MA20
-        if len(prices) >= 20:
-            ma20 = sum(prices[-20:]) / 20
-        else:
-            ma20 = sum(prices) / len(prices) if prices else 0
-        
-        # ===== 三维度震荡判断规则 =====
-        # 维度1：区间振幅约束（近20日收盘价累计涨跌幅绝对值 ≤ 5%）
-        if len(prices) >= 20:
-            amplitude_20d = abs((prices[-1] - prices[0]) / prices[0]) if prices[0] > 0 else 0
-            dimension1_shock = amplitude_20d <= 0.05  # ≤ 5%
-        else:
-            dimension1_shock = False
-        
-        # 维度2：均线穿越频率（近20日收盘价穿越MA20次数 ≥ 3次）
-        if len(prices) >= 20:
-            crossings = 0
-            ma20_series = []
-            # 计算MA20序列（需要至少20个数据点）
-            for i in range(19, len(prices)):
-                ma20_i = sum(prices[i-19:i+1]) / 20
-                ma20_series.append(ma20_i)
-            
-            # 统计穿越次数
-            for i in range(1, len(ma20_series)):
-                if (prices[19+i-1] <= ma20_series[i-1] and prices[19+i] > ma20_series[i]) or \
-                   (prices[19+i-1] >= ma20_series[i-1] and prices[19+i] < ma20_series[i]):
-                    crossings += 1
-            
-            dimension2_shock = crossings >= 3  # ≥ 3次
-        else:
-            dimension2_shock = False
-        
-        # 维度3：均线斜率约束（近10日MA20均线斜率绝对值 ≤ 0.3%）
-        if len(prices) >= 30:  # 需要足够数据计算MA20序列的斜率
-            # 计算近10日的MA20序列
-            ma20_recent = []
-            for i in range(len(prices) - 10, len(prices)):
-                if i >= 19:  # 第20个数据点才能计算第一个MA20
-                    ma20_i = sum(prices[i-19:i+1]) / 20
-                    ma20_recent.append(ma20_i)
-            
-            if len(ma20_recent) >= 2:
-                # 计算MA20斜率（最近一日相对10日前的变化率）
-                ma20_slope = (ma20_recent[-1] - ma20_recent[0]) / ma20_recent[0] if ma20_recent[0] > 0 else 0
-                dimension3_shock = abs(ma20_slope) <= 0.003  # ≤ 0.3%
-            else:
-                dimension3_shock = False
-        else:
-            dimension3_shock = False
-        
-        # 综合判断：满足2项及以上判定为震荡
-        shock_score = sum([dimension1_shock, dimension2_shock, dimension3_shock])
-        
-        if shock_score >= 2:
-            trend_position = "震荡"
-        else:
-            # 非震荡情况下判断上升/下降趋势
-            if ma20 > 0:
-                price_vs_ma20 = (current_price - ma20) / ma20
-            else:
-                price_vs_ma20 = 0
-            
-            # 计算短期趋势（最近5日涨跌幅）
-            if len(prices) >= 5:
-                short_trend = (prices[-1] - prices[-5]) / prices[-5] if prices[-5] > 0 else 0
-            else:
-                short_trend = 0
-            
-            # 趋势判断
-            if current_price > ma20 and short_trend > 0:
-                trend_position = "上升"
-            elif current_price < ma20 and short_trend < 0:
-                trend_position = "下降"
-            else:
-                # 不明确的情况，根据价格位置判断
-                trend_position = "上升" if current_price > ma20 else "下降"
-        
-        # 记录调试信息
-        logger.debug(f"震荡判断: 维度1(振幅≤5%)={dimension1_shock}, 维度2(穿越≥3次)={dimension2_shock}, 维度3(斜率≤0.3%)={dimension3_shock}, 得分={shock_score}, 结果={trend_position}")
-        
-        # 计算60日相对强弱（相对沪深300的超额收益）
-        history_60d = fetch_sector_historical_data(sector_code, 60)
-        if history_60d and len(history_60d) >= 2:
-            start_price = history_60d[0].get("close", 0)
-            end_price = history_60d[-1].get("close", 0)
-            sector_change = (end_price - start_price) / start_price if start_price > 0 else 0
-        else:
-            sector_change = 0
-        
-        # 获取沪深300真实涨跌幅
-        hs300_hist = fetch_index_hist("000300", 60)
-        if hs300_hist and len(hs300_hist) >= 2:
-            hs300_start = hs300_hist[0].get("close", 0)
-            hs300_end = hs300_hist[-1].get("close", 0)
-            hs300_change = (hs300_end - hs300_start) / hs300_start if hs300_start > 0 else 0
-        else:
-            # 如果获取失败，使用保守估计
-            logger.warning("获取沪深300历史数据失败，使用保守估计")
-            hs300_change = 0.0
-        
-        relative_strength = sector_change - hs300_change
-        logger.info(f"相对强弱计算: 板块涨跌幅={sector_change:.3f}, 沪深300涨跌幅={hs300_change:.3f}, 相对强弱={relative_strength:.3f}")
-        
-        # 生成建仓信号
-        config = settings
-        threshold_up = config.SECTOR_FILTER_UP_DAYS_RATIO_THRESHOLD  # 0.5
-        threshold_rs = config.SECTOR_FILTER_RELATIVE_STRENGTH_THRESHOLD  # -0.03
-        
-        if up_days_ratio >= threshold_up and relative_strength >= threshold_rs and trend_position == "上升":
-            build_signal = "适合建仓"
-        elif up_days_ratio >= threshold_up * 0.8 or relative_strength >= threshold_rs:
-            build_signal = "谨慎建仓"
-        else:
-            build_signal = "暂不建仓"
-        
-        logger.info(f"板块过滤器计算完成: {sector_code}, up_ratio={up_days_ratio:.2f}, rs={relative_strength:.3f}, trend={trend_position}, signal={build_signal}")
-        
-        return {
-            "up_days_ratio": round(up_days_ratio, 2),
-            "relative_strength": round(relative_strength, 3),
-            "trend_position": trend_position,
-            "build_signal": build_signal
-        }
-        
+        import akshare as ak
+        df = ak.sw_index_first_info()
+        sectors = []
+        for _, row in df.iterrows():
+            code = str(row['行业代码']).replace('.SI', '')
+            name = row['行业名称']
+            sectors.append({"code": code, "name": name})
+        return sectors
     except Exception as e:
-        logger.error(f"板块过滤器计算失败: {sector_code}, error={e}")
-        return {
-            "up_days_ratio": 0.0,
-            "relative_strength": 0.0,
-            "trend_position": "未知",
-            "build_signal": "暂不建仓"  # 失败时保守处理
-        }
+        logger.error(f"获取申万行业列表失败: {e}")
+        return []
 
+
+# ============================================================
+# 向后兼容: 旧版 score_sector (保留接口, 内部调用 V5)
+# ============================================================
+
+def score_sector(item: dict) -> dict:
+    """
+    旧版接口兼容: 将单条板块行情转换为情绪评分
+    内部调用 score_sector_v5
+    """
+    code = str(item.get("code", ""))
+    name = item.get("name", "")
+
+    if not code:
+        return _get_default_sector_result(code, name, "无板块代码")
+
+    result = score_sector_v5(code, name)
+    return result
+
+
+# ============================================================
+# 向后兼容: add_sector_filter (已集成到 score_sectors)
+# ============================================================
 
 def add_sector_filter(sectors: list[dict]) -> list[dict]:
     """
-    为板块列表添加板块过滤器信号
-    
-    Args:
-        sectors: 板块列表（已评分）
-        
-    Returns:
-        添加了build_signal字段的板块列表
+    为板块列表添加板块过滤器信号 (向后兼容)
+    V5 版本中过滤器已集成到 score_sectors, 此函数为 no-op
     """
     if not sectors:
         return sectors
-    
-    # 如果方案B未启用，跳过
+
     if not settings.ENABLE_SECTOR_FILTER:
-        logger.info("方案B（板块过滤器）未启用，跳过")
+        logger.info("板块过滤器未启用, 跳过")
         return sectors
-    
+
+    # V5 中 track 字段已在 score_sectors 中计算, 此处确保存在
     for sector in sectors:
-        sector_code = sector.get("sector_code", "")
-        if not sector_code:
-            continue
-        
-        # 计算板块过滤器信号
-        filter_result = calculate_sector_filter(sector_code)
-        
-        # 添加build_signal字段
-        sector["build_signal"] = filter_result.get("build_signal", "暂不建仓")
-        sector["trend_position"] = filter_result.get("trend_position", "未知")
-        
-        logger.debug(f"板块 {sector_code} 过滤器信号: {sector['build_signal']}")
-    
-    logger.info(f"板块过滤器信号添加完成: {len(sectors)} 个板块")
+        if "track" not in sector:
+            sector["track"] = "excluded"
+        # 向后兼容: build_signal
+        track = sector.get("track", "excluded")
+        if track == "trend_follow":
+            sector["build_signal"] = "适合建仓"
+        elif track == "contrarian":
+            sector["build_signal"] = "逆向建仓"
+        else:
+            sector["build_signal"] = "暂不建仓"
+
     return sectors

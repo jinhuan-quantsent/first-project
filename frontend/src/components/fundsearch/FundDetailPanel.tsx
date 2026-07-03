@@ -46,7 +46,7 @@ const TREND_LABEL: Record<SignalLevel, { text: string; color: string }> = {
 
 /** 趋势理由默认文案 */
 const TREND_REASONS: Record<string, string> = {
-  'shortTerm': '板块触底+恐慌极致值',
+  'shortTerm': '板块触底+恐惧极致值',
   'midTerm': '行业周期支撑',
   'longTerm': '长期成长趋势',
 };

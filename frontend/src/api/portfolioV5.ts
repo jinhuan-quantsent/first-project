@@ -3,7 +3,6 @@
  */
 import client from './client';
 import type { ApiResponse, PortfolioItem, PortfolioSummary, PositionAdviceData } from '../types';
-import type { IntradayPreviewData } from '../components/portfolio/types';
 
 /** 获取持仓列表 */
 export async function fetchPortfolioV5(): Promise<{ items: PortfolioItem[]; summary: PortfolioSummary }> {
@@ -127,17 +126,4 @@ export async function fetchCashV5(): Promise<{ cash_amount: number; updated_at: 
 export async function updateCashV5(cashAmount: number): Promise<{ cash_amount: number; updated_at: string }> {
   const res = await client.post<ApiResponse<any>>('/api/v5/portfolio/cash', { cash_amount: cashAmount });
   return res.data.data;
-}
-
-
-/** 获取盘中预演数据 */
-export async function fetchIntradayPreview(
-  fundCode: string,
-): Promise<IntradayPreviewData | null> {
-  const res = await client.get<ApiResponse<any>>(`/api/v5/intraday-preview/${fundCode}`);
-  if (res.data.code === 0 && res.data.data?.is_preview) {
-    return res.data.data;
-  }
-  // 数据未就绪或功能关闭
-  return res.data.data || null;
 }

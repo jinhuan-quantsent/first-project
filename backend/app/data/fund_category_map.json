@@ -1,0 +1,60 @@
+{
+  "categories": {
+    "broad": {
+      "clear_threshold": {
+        "overheat": 25.0,
+        "drawdown": -12.0,
+        "panic": 15.0
+      }
+    },
+    "sector": {
+      "clear_threshold": {
+        "overheat": 20.0,
+        "drawdown": -10.0,
+        "panic": 20.0
+      }
+    },
+    "theme": {
+      "clear_threshold": {
+        "overheat": 30.0,
+        "drawdown": -15.0,
+        "panic": 25.0
+      }
+    }
+  },
+  "fund_mapping": [
+    {
+      "code": "008280",
+      "category": "sector",
+      "name": "国泰中证煤炭ETF联接C",
+      "sw_sector_code": "801950",
+      "sw_sector_name": "煤炭"
+    },
+    {
+      "code": "013286",
+      "category": "broad",
+      "name": "富国上证指数ETF联接C"
+    },
+    {
+      "code": "017193",
+      "category": "theme",
+      "name": "天弘中证工业有色金属主题ETF发起联接C",
+      "sw_sector_code": "801050",
+      "sw_sector_name": "有色金属"
+    },
+    {
+      "code": "019667",
+      "category": "sector",
+      "name": "易方达中证创新药产业ETF联接发起式C",
+      "sw_sector_code": "801150",
+      "sw_sector_name": "医药生物"
+    },
+    {
+      "code": "025500",
+      "category": "theme",
+      "name": "东方阿尔法科技智选混合发起C",
+      "sw_sector_code": "801080",
+      "sw_sector_name": "电子"
+    }
+  ]
+}

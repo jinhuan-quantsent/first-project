@@ -1,6 +1,8 @@
 """
 Redis 缓存客户端
 支持 Upstash Redis（生产环境）和内存缓存（开发模式兜底）
+
+Namespace 设计: v5: = 情绪引擎/板块/自选等核心接口; fsa: = 持仓/组合等用户级接口（独立命名便于按业务域批量清理/监控）
 """
 import json
 import time

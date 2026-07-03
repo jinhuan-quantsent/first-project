@@ -4,7 +4,7 @@
  * 对齐设计稿 Image4 + Image5
  */
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import type { PortfolioItem, PortfolioSummary, SignalLevel, PositionAdviceData } from '../types';
+import type { PortfolioItem, PortfolioSummary, SignalLevel } from '../types';
 import { SIGNAL_LABELS } from '../types';
 import PositionDetailPanel, { type PositionDetailData } from '../components/portfolio/PositionDetailPanel';
 import SectorFundCard from '../components/sector/SectorFundCard';
@@ -128,7 +128,10 @@ function buildRealDetailData(
   adviceData?: { items: any[]; stats: any } | undefined,
   tradeRecords?: any[] | undefined,
   overallTargetPct?: number | null,
-  positionAdvice?: PositionAdviceData | undefined,
+  positionAdvice?: {
+    trendText?: string; marketStatus?: string; trendGuard?: any;
+    action?: string; reason?: string; target_position_pct?: number; trend_guard_text?: string;
+  } | undefined,
   totalValue?: number,
   cashAmount?: number,
   totalAssets?: number,
@@ -140,7 +143,7 @@ function buildRealDetailData(
   const backendAction = positionAdvice?.action;
   let operationTag: PositionDetailData['operationTag'] = '持有';
   if (backendAction === 'increase') operationTag = '加仓';
-  else if (backendAction === 'reduce') operationTag = '减仓';
+  else if (backendAction === 'decrease') operationTag = '减仓';
   else if (backendAction === 'hold') operationTag = '持有';
   // action 为 null/undefined -> 默认持有（数据异常兜底）
 
@@ -257,7 +260,7 @@ function buildRealDetailData(
     marketStatus: positionAdvice?.marketStatus,
     trendGuard: positionAdvice?.trendGuard,
     // 后端决策结果（纯展示字段）
-    action: (backendAction === 'hold' || backendAction === 'increase' || backendAction === 'reduce' || backendAction === 'heavy_reduce') ? backendAction : (backendAction ? 'hold' : null),
+    action: backendAction ?? null,
     reason: opReason,
     targetPositionPct: backendTargetPct,
     totalValue: totalAssets ?? totalValue,
@@ -702,7 +705,7 @@ export default function PortfolioV5() {
 
   // 增强数据
   const [navHistories, setNavHistories] = useState<Record<string, { date: string; nav: number; daily_return?: number }[]>>({});
-  const [positionAdviceMap, setPositionAdviceMap] = useState<Record<string, PositionAdviceData>>({});
+  const [positionAdviceMap, setPositionAdviceMap] = useState<Record<string, { trendText?: string; marketStatus?: string; trendGuard?: any; action?: string; reason?: string; target_position_pct?: number; trend_guard_text?: string }>>({});
   const [positionAdviceFromDetailMap, setPositionAdviceFromDetailMap] = useState<Record<string, any>>({});
   const [trendGuardFromDetailMap, setTrendGuardFromDetailMap] = useState<Record<string, any>>({});
   const [marketStatusFromDetailMap, setMarketStatusFromDetailMap] = useState<Record<string, string>>({});
@@ -1022,7 +1025,7 @@ export default function PortfolioV5() {
         }
 
         // 从详情API提取增强数据
-        const realNavHistories: Record<string, { date: string; nav: number; daily_return?: number }[]> = {};
+        const realNavHistories: Record<string, number[]> = {};
         const realTopStocks: Record<string, { name: string; pct: number; change: number }[]> = {};
         const realEvaluations: Record<string, any> = {};
         const realSentimentDetails: Record<string, any> = {};
@@ -1176,7 +1179,7 @@ export default function PortfolioV5() {
           });
           setTradeMap(realTradeMap);
 
-          const realPosAdviceMap: Record<string, PositionAdviceData> = {};
+          const realPosAdviceMap: Record<string, { trendText?: string; marketStatus?: string; trendGuard?: any }> = {};
           posAdviceEntries.forEach((entry) => {
             if (entry) realPosAdviceMap[entry[0]] = entry[1];
           });
@@ -1212,7 +1215,7 @@ export default function PortfolioV5() {
       const advice = await fetchPositionAdviceV5(item.fund_code, item.weight_pct);
       await executePositionV5({
         fund_code: item.fund_code,
-        target_position_pct: advice.target_position_pct ?? Math.min(0.95, item.weight_pct + 0.10),
+        target_position_pct: advice.target_pct ?? Math.min(0.95, item.weight_pct + 0.10),
         signal_level: signal?.signalLevel ?? 'B',
         confidence_stars: signal?.confidenceStars ?? 3,
       });

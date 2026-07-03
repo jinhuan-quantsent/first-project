@@ -62,24 +62,23 @@ class PositionService:
             )
             row = result.first()
             if row and row[0]:
-                full_code = str(row[0])  # 保留完整格式如 "000001.SH" 或 "801770"
+                raw_code = str(row[0]).split('.')[0]  # 取纯数字部分
                 category = row[1] or "sector"
                 # 板块代码 (801xxx) → 用板块数据
-                if full_code.startswith('801'):
+                if raw_code.startswith('801'):
                     return {
                         "source": "sector",
-                        "sector_code": full_code.split('.')[0] if '.' in full_code else full_code,
+                        "sector_code": raw_code,
                         "index_code": None,
                         "category": category,
                     }
-                # 检查是否为宽基指数（用完整 Tushare 格式做 registry 匹配）
-                ts_code = to_tushare(full_code)
-                display_code = to_display(full_code)  # 000001.SH → SH000001
+                # 检查是否为宽基指数
+                ts_code = to_tushare(raw_code)
                 if ts_code in set(INDEX_REGISTRY.keys()):
                     return {
                         "source": "broad",
                         "sector_code": None,
-                        "index_code": display_code,  # SH000001 格式，pipeline 可识别
+                        "index_code": to_display(raw_code),
                         "category": "broad",
                     }
                 # 其他非宽基指数 → fallback 到沪深300（用宽基 pipeline）

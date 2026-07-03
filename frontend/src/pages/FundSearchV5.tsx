@@ -1,22 +1,21 @@
 /**
  * FundSearchV5 - V5.0 基金查询页（默认首页）
  * 集成：SignalRibbon · MarketInfoBar · SearchBox · ResultList(卡片式)
- *          SectorCards · OpportunityRadar · FundDetailPanel(右侧面板)
- * 布局：左右分栏 — 左侧搜索结果 + 右侧详情面板(条件渲染)
+ *          FundDetailPanel(右侧面板)
+ *
+ * V5.1 精简：移除 SectorCards/SectorWarnings/OpportunityRadarPanel 重复组件
+ * 板块情绪和机会雷达已在 /sectors 页面提供完整版本
  */
 import { useState, useCallback, useMemo, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Search, X } from 'lucide-react';
+import { Search, X, Calendar, Loader2 } from 'lucide-react';
 import { clsx } from 'clsx';
 
 import SignalRibbon  from '../components/fundsearch/SignalRibbon';
 import MarketInfoBar from '../components/fundsearch/MarketInfoBar';
 import SearchBox     from '../components/fundsearch/SearchBox';
 import FundResultList from '../components/fundsearch/FundResultList';
-import SectorCards    from '../components/fundsearch/SectorCards';
-import SectorWarnings from '../components/fundsearch/SectorWarnings';
-import OpportunityRadarPanel from '../components/fundsearch/OpportunityRadarPanel';
 import FundDetailPanel from '../components/fundsearch/FundDetailPanel';
+import SnapshotDownloadButton from '../components/fundsearch/SnapshotDownloadButton';
 
 import { searchFunds, fetchFundDetail } from '../api/fund';
 import { fetchV5Sentiment, fetchV5MultiIndex } from '../api/marketV5';
@@ -24,7 +23,6 @@ import type { V5MultiIndexItem, V5FactorDetail } from '../api/marketV5';
 import { addWatchlistV5 } from '../api/watchlistV5';
 import { useWatchlistV5Store } from '../stores/watchlistV5';
 import { addPortfolioV5 } from '../api/portfolioV5';
-import client from '../api/client';
 import { toast } from '../components/common/Toast';
 import type {
   FundSearchItem,
@@ -51,13 +49,11 @@ interface FundSentiment {
   hasDivergence: boolean;
   divergenceType: 'bullish' | 'bearish' | undefined;
   advice: { action: string; level: string; reason: string; targetPositionPct: number };
-  /** 从因子明细推导的推荐理由，如"波动率82分+北向资金78分触发极度恐慌" */
   reason?: string;
 }
 
 /**
  * 从 V5 因子明细构建推荐理由文案
- * 取 sigmoid_score 最高的 2 个因子，拼接为 "因子A XX分+因子B XX分触发<信号描述>"
  */
 function buildReasonFromFactors(
   factorDetails: { factor_name: string; sigmoid_score: number }[] | undefined,
@@ -79,8 +75,6 @@ function buildReasonFromFactors(
    主组件
    ============================================================ */
 export default function FundSearchV5() {
-  const navigate = useNavigate();
-
   // —— 搜索参数 ——
   const [keyword,  setKeyword]  = useState('');
   const [fundType, setFundType] = useState('');
@@ -102,18 +96,18 @@ export default function FundSearchV5() {
   // —— 右侧面板打开/关闭 ———
   const [panelOpen, setPanelOpen] = useState(false);
 
+  // —— 添加持仓对话框 ——
+  const [showAddDialog, setShowAddDialog] = useState(false);
+  const [addFundTarget, setAddFundTarget] = useState<FundSearchItem | null>(null);
+  const [addAmount, setAddAmount] = useState('');
+  const [addDate, setAddDate] = useState(new Date().toISOString().slice(0, 10));
+  const [adding, setAdding] = useState(false);
+
   // —— 大盘数据（MarketInfoBar用） ——
   const [marketIndexes, setMarketIndexes] = useState<V5MultiIndexItem[]>([]);
   const [marketReason, setMarketReason] = useState<string | null>(null);
   const [marketScore, setMarketScore] = useState<number | null>(null);
   const [marketSignal, setMarketSignal] = useState<SignalLevel | null>(null);
-
-  // —— 机会雷达数据 ——
-  const [radarItems, setRadarItems] = useState<any[]>([]);
-  const [radarLoading, setRadarLoading] = useState(false);
-
-  // —— 风险警示数据 ——
-  const [warningItems, setWarningItems] = useState<any[]>([]);
 
   /** 加载大盘数据 */
   useEffect(() => {
@@ -126,7 +120,6 @@ export default function FundSearchV5() {
         if (data.composite) {
           setMarketScore(data.composite.composite_score);
           setMarketSignal(toSignalLevel(data.composite.signal_level));
-          // 从沪深300获取因子明细构建推荐理由
           try {
             const sh300 = data.indexes.find(i => i.index_code === 'SH000300');
             if (sh300) {
@@ -135,41 +128,9 @@ export default function FundSearchV5() {
                 setMarketReason(buildReasonFromFactors(detail.factor_details, toSignalLevel(detail.signal_level)));
               }
             }
-          } catch { /* 推荐理由非关键，失败不影响 */ }
+          } catch { /* 推荐理由非关键 */ }
         }
       } catch { /* 静默降级 */ }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  /** 加载机会雷达数据 */
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setRadarLoading(true);
-      try {
-        const res = await client.get('/api/v5/market/recommendations');
-        const json = res.data;
-        if (cancelled || json.code !== 0) return;
-        const data = json.data;
-        // 合并所有分类的推荐
-        const all: any[] = [
-          ...(data.strong_sectors || []).map((s: any) => ({ ...s, opportunity_type: 'strong' })),
-          ...(data.rebound_opportunities || []).map((s: any) => ({ ...s, opportunity_type: 'rebound' })),
-          ...(data.steady_choices || []).map((s: any) => ({ ...s, opportunity_type: 'steady' })),
-        ];
-        if (!cancelled) setRadarItems(all);
-        // 同时提取风险警示数据
-        if (!cancelled && data.warnings) {
-          setWarningItems(data.warnings);
-        }
-      } catch (err) {
-        console.error('[FundSearch] 加载推荐数据失败:', err);
-        // 降级为空数组，不再用假数据
-        if (!cancelled) setRadarItems([]);
-      } finally {
-        if (!cancelled) setRadarLoading(false);
-      }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -216,7 +177,6 @@ export default function FundSearchV5() {
     setDetailError(null);
     setPanelOpen(true);
 
-    // 并行获取详情 + V5 情绪
     try {
       const [detail] = await Promise.all([
         fetchFundDetail(fund.fund_code).catch(() => null),
@@ -238,9 +198,7 @@ export default function FundSearchV5() {
               reason,
             },
           }));
-        }).catch(() => {
-          // 情绪数据获取失败时不影响详情显示
-        }),
+        }).catch(() => {}),
       ]);
 
       if (detail) {
@@ -264,36 +222,62 @@ export default function FundSearchV5() {
   /** 添加到自选 */
   const handleAddWatchlist = useCallback(async (fund: FundSearchItem) => {
     try {
-      await addWatchlistV5({ fund_code: fund.fund_code });
+      const result = await addWatchlistV5({ fund_code: fund.fund_code });
       toast.success(`已将 ${fund.fund_short_name || fund.fund_name} 添加到自选`);
-      // 预刷新自选 store，确保切换到自选页时数据已更新
-      useWatchlistV5Store.getState().refreshAfterAdd();
+      // 乐观更新：立即往store追加（确保切到自选页能看到）
+      useWatchlistV5Store.getState().addFundOptimistic({
+        fund_code: fund.fund_code,
+        fund_name: fund.fund_short_name || fund.fund_name,
+        id: result?.id,
+      });
+      useWatchlistV5Store.getState().loadAll().catch(() => {});
     } catch (err: any) {
       const msg = err?.response?.data?.message || err?.message || '添加自选失败';
       toast.error(msg);
     }
   }, []);
 
-  /** 添加到持仓 */
-  const handleAddPortfolio = useCallback(async (fund: FundSearchItem) => {
+  /** 添加到持仓 — 打开对话框 */
+  const handleAddPortfolio = useCallback((fund: FundSearchItem) => {
+    setAddFundTarget(fund);
+    setAddAmount('');
+    setAddDate(new Date().toISOString().slice(0, 10));
+    setShowAddDialog(true);
+  }, []);
+
+  /** 确认添加持仓 */
+  const handleConfirmAddPortfolio = useCallback(async () => {
+    if (!addFundTarget || adding) return;
+    const num = parseFloat(addAmount);
+    if (isNaN(num) || num <= 0) {
+      toast.error('请输入有效的投资金额');
+      return;
+    }
+    setAdding(true);
     try {
       await addPortfolioV5({
-        fund_code: fund.fund_code,
-        fund_name: fund.fund_short_name || fund.fund_name,
-        fund_type: fund.fund_type,
-        current_nav: fund.nav,
+        fund_code: addFundTarget.fund_code,
+        fund_name: addFundTarget.fund_short_name || addFundTarget.fund_name,
+        fund_type: addFundTarget.fund_type,
+        current_nav: addFundTarget.nav,
+        market_value: num,
+        buy_date: addDate,
       });
-      toast.success(`已将 ${fund.fund_short_name || fund.fund_name} 添加到持仓`);
+      toast.success(`已将 ${addFundTarget.fund_short_name || addFundTarget.fund_name} 添加到持仓（投资 ¥${num.toLocaleString()}，买入日期 ${addDate}）`);
+      setShowAddDialog(false);
+      setAddFundTarget(null);
     } catch (err: any) {
       const msg = err?.response?.data?.message || err?.message || '添加持仓失败';
       toast.error(msg);
+    } finally {
+      setAdding(false);
     }
-  }, []);
+  }, [addFundTarget, addAmount, addDate, adding]);
 
   const activeSignal = selectedFund ? (sentimentCache[selectedFund.fund_code]?.signalLevel ?? null) : null;
 
   return (
-    <div className="relative max-w-5xl mx-auto space-y-4 pb-8">
+    <div className="relative max-w-5xl mx-auto space-y-3 md:space-y-4 pb-20 md:pb-8">
       {/* ======== 1. 7级信号色带（页面最顶部）======= */}
       <SignalRibbon activeLevel={activeSignal} height={8} />
 
@@ -358,28 +342,29 @@ export default function FundSearchV5() {
         />
       )}
 
-      {/* ======== 6. 未搜索时的推荐内容 ======= */}
+      {/* ======== 6. 未搜索时：引导到板块页 ======= */}
       {!keyword && (
-        <div className="space-y-4">
-          <SectorCards />
-          <SectorWarnings items={warningItems} loading={radarLoading} />
-          <OpportunityRadarPanel
-            items={radarItems}
-            loading={radarLoading}
-          />
+        <div className="card p-6 text-center">
+          <div className="w-14 h-14 rounded-full bg-brand-50 flex items-center justify-center mx-auto mb-3">
+            <Search className="w-6 h-6 text-brand-400" />
+          </div>
+          <p className="text-sm text-gray-500 mb-1">输入基金名称或代码开始搜索</p>
+          <p className="text-[10px] text-gray-400">
+            板块情绪和机会雷达请访问 <a href="/sectors" className="text-brand-500 hover:text-brand-600">板块分析页</a>
+          </p>
         </div>
       )}
 
-      {/* ======== 7. 右侧详情面板（遮罩 + 滑入）======= */}
+      {/* ======== 7. 决策快照下载按钮 ======= */}
+      <SnapshotDownloadButton />
+
+      {/* ======== 8. 右侧详情面板（遮罩 + 滑入）======= */}
       {panelOpen && selectedFund && (
         <>
-          {/* 半透明遮罩 */}
           <div
             className="fixed inset-0 bg-black/20 z-40 transition-opacity duration-300"
             onClick={handleClosePanel}
           />
-
-          {/* 面板：420px 宽，移动端全屏 */}
           <div
             className="fixed top-0 right-0 h-full w-full md:w-[420px] z-50 bg-white shadow-2xl
                        overflow-hidden animate-slideInRight"
@@ -401,7 +386,81 @@ export default function FundSearchV5() {
         </>
       )}
 
-      {/* 内联动画 */}
+      {/* ======== 添加持仓对话框 ======== */}
+      {showAddDialog && addFundTarget && (
+        <div
+          className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center"
+          onClick={() => { if (!adding) setShowAddDialog(false); }}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-[360px] max-w-[90vw] p-6 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-gray-800">添加到持仓</h3>
+              <button
+                onClick={() => { if (!adding) setShowAddDialog(false); }}
+                className="text-gray-300 hover:text-gray-500 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="bg-gray-50 rounded-lg p-3 space-y-1">
+              <p className="text-sm font-medium text-gray-700">
+                {addFundTarget.fund_short_name || addFundTarget.fund_name}
+              </p>
+              <p className="text-xs text-gray-400 font-mono">
+                {addFundTarget.fund_code} · 当前净值 {addFundTarget.nav?.toFixed(4) || '未知'}
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-gray-600">投资金额</label>
+              <div className="flex items-center gap-1">
+                <span className="text-sm text-gray-400">¥</span>
+                <input
+                  type="text"
+                  value={addAmount}
+                  onChange={(e) => setAddAmount(e.target.value.replace(/[^\d.]/g, ''))}
+                  placeholder="输入投资金额"
+                  autoFocus
+                  className="flex-1 text-sm font-mono border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-cyan-400"
+                />
+              </div>
+              <p className="text-[10px] text-gray-400">将自动从可用现金中扣除</p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-gray-600">买入日期</label>
+              <input
+                type="date"
+                value={addDate}
+                onChange={(e) => setAddDate(e.target.value)}
+                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-cyan-400"
+              />
+            </div>
+
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                onClick={() => setShowAddDialog(false)}
+                disabled={adding}
+                className="flex-1 py-2 rounded-lg text-sm font-medium text-gray-500 bg-gray-100 hover:bg-gray-200 transition-colors disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleConfirmAddPortfolio}
+                disabled={adding || !addAmount || parseFloat(addAmount) <= 0}
+                className="flex-1 py-2 rounded-lg text-sm font-medium text-white bg-cyan-500 hover:bg-cyan-600 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
+              >
+                {adding ? '添加中...' : '确认添加'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <style>{`
         @keyframes slideInRight {
           from { transform: translateX(100%); }

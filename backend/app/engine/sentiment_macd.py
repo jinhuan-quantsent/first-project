@@ -20,8 +20,8 @@ class SentimentMACD:
     """情绪MACD计算器"""
 
     # 经典MACD参数
-    FAST_PERIOD: int = 12
-    SLOW_PERIOD: int = 26
+    FAST_PERIOD: int = 5
+    SLOW_PERIOD: int = 20
     SIGNAL_PERIOD: int = 9
 
     def compute(
@@ -115,6 +115,54 @@ class SentimentMACD:
             "same_direction_days": same_direction_days,
             "momentum": momentum,
         }
+
+    def compute_history(
+        self,
+        score_series: list[float],
+    ) -> list[dict]:
+        """
+        计算完整的 MACD 历史序列（DIF/DEA/HIST），供前端可视化。
+
+        返回与输入序列尾部对齐的列表，每个元素:
+            {"dif": float, "dea": float, "hist": float}
+
+        序列长度 = len(score_series) - SLOW_PERIOD - SIGNAL_PERIOD + 2
+        数据不足时返回空列表。
+        """
+        if len(score_series) < self.SLOW_PERIOD + self.SIGNAL_PERIOD:
+            return []
+
+        scores = np.array(score_series, dtype=float)
+
+        # 1. 计算 EMA
+        ema_fast = self._ema(scores, self.FAST_PERIOD)
+        ema_slow = self._ema(scores, self.SLOW_PERIOD)
+
+        # 2. DIF（MACD线）= 快线EMA - 慢线EMA，尾部对齐
+        min_len = min(len(ema_fast), len(ema_slow))
+        macd_line = ema_fast[-min_len:] - ema_slow[-min_len:]
+
+        if len(macd_line) < self.SIGNAL_PERIOD:
+            return []
+
+        # 3. DEA（信号线）= DIF 的9日EMA
+        signal_line = self._ema(macd_line, self.SIGNAL_PERIOD)
+
+        # 4. HIST（柱状图）= DIF - DEA，尾部对齐
+        min_len2 = min(len(macd_line), len(signal_line))
+        dif_series = macd_line[-min_len2:]
+        dea_series = signal_line[-min_len2:]
+        hist_series = dif_series - dea_series
+
+        # 5. 构建结果列表
+        result = []
+        for i in range(min_len2):
+            result.append({
+                "dif": round(float(dif_series[i]), 4),
+                "dea": round(float(dea_series[i]), 4),
+                "hist": round(float(hist_series[i]), 4),
+            })
+        return result
 
     def _ema(self, data: np.ndarray, period: int) -> np.ndarray:
         """计算指数移动平均"""

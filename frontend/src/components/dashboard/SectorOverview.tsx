@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { fetchSectorHeatmap } from '../../api/market';
 import type { SectorHeatmapItem, GroupSummary, SignalLevel } from '../../types';
-import SignalBadge from '../common/SentimentBadge';
+import SentimentBadge from '../common/SentimentBadge';
 import LoadingSpinner from '../common/LoadingSpinner';
 import { clsx } from 'clsx';
 
@@ -127,7 +127,7 @@ export default function SectorOverview() {
               )}>
                 {s.sector_return >= 0 ? '+' : ''}{s.sector_return.toFixed(1)}%
               </span>
-              <SignalBadge level={s.sentiment_label} size="sm" variant="inline" showLabel={false} />
+              <SentimentBadge sentiment={s.sentiment_label} size="sm" variant="inline" showLabel={false} />
             </div>
           );
         })}

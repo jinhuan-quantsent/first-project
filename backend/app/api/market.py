@@ -300,13 +300,29 @@ async def get_sector_detail(name: str) -> dict:
     }
 
 
+_RECOMMENDATIONS_CACHE_TTL = 86400  # 24h
+
+
 @router.get("/market/recommendations")
 async def get_recommendations() -> dict:
     """
     机会雷达推荐
 
     返回强势板块、超跌机会、稳健配置
+    带 Redis 缓存（24h TTL）
     """
+    import time as _t
+    _start = _t.time()
+
+    # 查缓存
+    from app.core.redis_client import cache_get, cache_set
+    cache_key = "v5:recommendations:all"
+    cached = await cache_get(cache_key)
+    if cached:
+        cached["data"]["cached"] = True
+        cached["data"]["elapsed_seconds"] = 0.001
+        return cached
+
     sectors = await _get_real_sectors()
     result: RecommendationResult = generate_recommendations(sectors, top_n=5)
     warnings = generate_warnings(sectors, max_warnings=5)
@@ -329,7 +345,7 @@ async def get_recommendations() -> dict:
             "recommended_funds": item.recommended_funds,
         }
 
-    return {
+    _response = {
         "code": 0,
         "data": {
             "strong_sectors": [_item_to_dict(i) for i in result.strong_sectors],
@@ -337,6 +353,8 @@ async def get_recommendations() -> dict:
             "steady_choices": [_item_to_dict(i) for i in result.steady_choices],
             "top_picks": [_item_to_dict(i) for i in result.top_picks],
             "summary": result.summary,
+            "elapsed_seconds": round(_t.time() - _start, 2),
+            "cached": False,
             "warnings": [
                 {
                     "sector_name": w.sector_name,
@@ -352,6 +370,14 @@ async def get_recommendations() -> dict:
         },
         "message": "ok",
     }
+
+    # 写入缓存
+    try:
+        await cache_set(cache_key, _response, ttl=_RECOMMENDATIONS_CACHE_TTL)
+    except Exception:
+        pass
+
+    return _response
 
 
 

@@ -3,8 +3,8 @@
 根据综合情绪评分给出仓位建议
 
 核心理念：
-- 极度恐慌 → 高仓位（别人恐惧我贪婪）
-- 恐慌 → 中高仓位
+- 极度恐惧 → 高仓位（别人恐惧我贪婪）
+- 恐惧 → 中高仓位
 - 中性 → 中性仓位
 - 乐观 → 中低仓位（逐步减仓）
 - 极度乐观 → 低仓位（别人贪婪我恐惧）
@@ -47,12 +47,12 @@ def calculate_position(
         target_position = 80.0
         action = "increase"
         risk_level = "extreme"
-        reason = "极度恐慌，市场可能处于底部区域，建议大幅加仓"
+        reason = "极度恐惧，市场可能处于底部区域，建议大幅加仓"
     elif composite_score < 25:
         target_position = 70.0
         action = "increase"
         risk_level = "high"
-        reason = "市场恐慌，逢低分批加仓，左侧布局"
+        reason = "市场恐惧，逢低分批加仓，左侧布局"
     elif composite_score < 35:
         target_position = 60.0
         action = "increase"

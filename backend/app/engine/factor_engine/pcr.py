@@ -7,7 +7,7 @@ from app.utils.data_source import fetch_put_call_ratio
 
 
 class PcrFactor(BaseFactor):
-    """PCR 认沽认购比因子：高PCR → 恐慌"""
+    """PCR 认沽认购比因子：高PCR → 恐惧"""
     name = "PCR"
     label = "认沽认购比"
     direction = "fear"

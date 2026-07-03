@@ -253,40 +253,6 @@ class Settings(BaseSettings):
     TREND_GUARD_OSCILLATION_CROSS_THRESHOLD: int = 3  # 震荡判断穿越次数阈值
     TREND_GUARD_OSCILLATION_AMPLITUDE_THRESHOLD: float = 0.05  # 震荡判断振幅阈值 (5%)
 
-    # ============================================================
-    # 盘中预演配置 (Intraday Preview)
-    # ============================================================
-    # 全局开关（与Redis开关 intraday_preview:global_switch 双保险）
-    ENABLE_INTRADAY_PREVIEW: bool = True
-    # Redis缓存key前缀
-    INTRADAY_PREVIEW_CACHE_PREFIX: str = "intraday_preview:v1"
-    # 盘中预计算结果缓存TTL（秒）— 与scheduler每5分钟刷新对齐
-    INTRADAY_PREVIEW_CACHE_TTL: int = 300
-    # 缓存异步续期偏移（第240秒=300-60触发续期，避免前端读到过期数据）
-    INTRADAY_PREVIEW_RENEWAL_OFFSET: int = 60
-    # ── 弹性系数参数 ──
-    # 基准2.0（从3.0修正，实测沪深300涨1%→变动2-2.5分）
-    INTRADAY_PREVIEW_ELASTIC_BASE: float = 2.0
-    INTRADAY_PREVIEW_ELASTIC_LOW: float = 1.5      # 高波动(|gszzl|>3%)范围下限
-    INTRADAY_PREVIEW_ELASTIC_MID_MIN: float = 2.0   # 中波动范围下限
-    INTRADAY_PREVIEW_ELASTIC_MID_MAX: float = 2.5   # 中波动范围上限
-    INTRADAY_PREVIEW_ELASTIC_HIGH: float = 3.0      # 低波动(|gszzl|<1%)范围上限
-    INTRADAY_PREVIEW_ELASTIC_EXTREME_CLAMP: float = 1.0  # |gszzl|>5%强制系数（极端行情降敏）
-    INTRADAY_PREVIEW_SCORE_DELTA_CLAMP: float = 20.0     # score_delta clamp范围（防信号跳变）
-    INTRADAY_PREVIEW_GSZZL_ANOMALY_THRESHOLD: float = 10.0  # ±10%涨跌幅异常阈值（丢弃异常估值）
-    # ── Scheduler时间配置 ──
-    INTRADAY_PREVIEW_META_PACK_TIME: str = "15:40"  # 元数据打包时间（收盘后）
-    INTRADAY_PREVIEW_SCHEDULE_TIMES: list = Field(default_factory=lambda: [
-        "9:35", "10:00", "10:30", "11:00",
-        "13:05", "13:30", "14:00", "14:30", "14:45",
-    ])  # 盘中预计算时间点（避开开收盘波动+午休）
-    # ── 对账校准 ──
-    INTRADAY_PREVIEW_RECONCILE_TIME: str = "15:50"  # 对账校准时间
-    INTRADAY_PREVIEW_ELASTIC_WEEKLY_UPDATE_DAY: str = "fri"  # 弹性系数周更日
-    INTRADAY_PREVIEW_ELASTIC_WEEKLY_UPDATE_TIME: str = "15:45"  # 弹性系数周更时间
-
-
-
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

@@ -16,7 +16,6 @@ import {
 import { Star } from 'lucide-react';
 import { clsx } from 'clsx';
 import { SIGNAL_COLORS_HEX as SIGNAL_COLORS, SIGNAL_LABELS } from '../types';
-import type { SignalLevel } from '../types';
 
 const INDEX_CODES = ['SH000001', 'SH000300', 'SZ399001', 'SZ399006'];
 
@@ -111,7 +110,7 @@ function SignalTimeline({ signals }: { signals: V5SignalLight[] }) {
             style={{
               width: 36,
               height: 28,
-              background: (SIGNAL_COLORS as Record<string, string>)[sig.signal_level] || '#94A3B8',
+              background: SIGNAL_COLORS[sig.signal_level] || '#94A3B8',
               borderRadius: 4,
               fontSize: 10,
             }}
@@ -149,7 +148,7 @@ function IndexSignalCard({ data }: { data: IndexCardData }) {
           style={{
             width: 28,
             height: 28,
-            background: (SIGNAL_COLORS as Record<string, string>)[data.signal_level] || '#94A3B8',
+            background: SIGNAL_COLORS[data.signal_level] || '#94A3B8',
             fontSize: 11,
           }}
         >
@@ -164,7 +163,7 @@ function IndexSignalCard({ data }: { data: IndexCardData }) {
           style={{
             width: 48,
             height: 48,
-            background: (SIGNAL_COLORS as Record<string, string>)[data.signal_level] || '#94A3B8',
+            background: SIGNAL_COLORS[data.signal_level] || '#94A3B8',
           }}
         >
           {Math.round(data.composite_score)}
@@ -177,7 +176,7 @@ function IndexSignalCard({ data }: { data: IndexCardData }) {
             <span className="text-xs text-gray-400">综合分</span>
           </div>
           <p className="text-xs text-gray-500">
-            {(SIGNAL_LABELS as Record<string, string>)[data.signal_level] || '未知'}
+            {SIGNAL_LABELS[data.signal_level] || '未知'}
           </p>
           <div className="flex gap-0.5 mt-0.5">
             {[1, 2, 3, 4].map((s) => (

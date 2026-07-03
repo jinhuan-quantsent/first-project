@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
 import MarketSnapshotBar from './MarketSnapshotBar';
 import Sidebar from './Sidebar';
+import BottomNav from './BottomNav';
 import Disclaimer from '../common/Disclaimer';
 import Avatar from '../common/Avatar';
 import { useAppStore } from '../../store';
@@ -38,9 +39,9 @@ export default function AppLayout() {
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
 
-        <main className="flex-1 overflow-y-auto bg-gray-50 p-4 md:p-6">
+        <main className="flex-1 overflow-y-auto bg-gray-50 p-3 md:p-6 pb-20 md:pb-6">
           {/* 顶部用户栏 */}
-          <div className="flex justify-end items-center gap-3 mb-4">
+          <div className="flex justify-end items-center gap-2 md:gap-3 mb-3 md:mb-4">
             <div className="flex items-center gap-2">
               <Avatar email={auth.user?.email || ''} size={28} />
               <span className="text-sm text-gray-600">
@@ -68,6 +69,7 @@ export default function AppLayout() {
         </main>
       </div>
 
+      <BottomNav />
       {!disclaimerAccepted && <Disclaimer />}
     </div>
   );

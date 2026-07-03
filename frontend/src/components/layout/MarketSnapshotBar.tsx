@@ -1,12 +1,13 @@
 import { useAppStore } from '../../store';
 import SignalBadge from '../common/SentimentBadge';
 import type { SignalLevel, ConfidenceStars } from '../../types';
+import { clsx } from 'clsx';
 import { SIGNAL_COLORS, SIGNAL_LABELS, mapOldToNew } from '../../types';
 
 /** 置信度星星渲染 */
-function ConfidenceStarsDisplay({ stars, color }: { stars: ConfidenceStars; color: string }) {
+function ConfidenceStarsDisplay({ stars, color, className }: { stars: ConfidenceStars; color: string; className?: string }) {
   return (
-    <span className="inline-flex items-center gap-px" title={`置信度 ${stars} 星`}>
+    <span className={clsx("inline-flex items-center gap-px", className)} title={`置信度 ${stars} 星`}>
       {Array.from({ length: 4 }, (_, i) => (
         <svg
           key={i}
@@ -97,7 +98,7 @@ export default function MarketSnapshotBar() {
               {idx.change_pct >= 0 ? '+' : ''}{idx.change_pct.toFixed(2)}%
             </span>
             <SignalBadge level={idxLevel} size="sm" variant="inline" />
-            <ConfidenceStarsDisplay stars={idxStars} color={idxColor} />
+            <ConfidenceStarsDisplay stars={idxStars} color={idxColor} className="hidden md:inline-flex" />
           </div>
         );
       })}

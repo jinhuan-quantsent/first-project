@@ -7,6 +7,9 @@ import FundSearch from './pages/FundSearchV5';
 import Watchlist from './pages/WatchlistV5';
 import Portfolio from './pages/PortfolioV5';
 import Backtest from './pages/Backtest';
+import SectorDashboard from './pages/SectorDashboard';
+import SectorDetail from './pages/SectorDetail';
+import SignalBoard from './pages/SignalBoard';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import { useAppStore } from './store';
@@ -31,6 +34,9 @@ function App() {
           <Route path="/watchlist" element={<Watchlist />} />
           <Route path="/portfolio" element={<Portfolio />} />
           <Route path="/backtest" element={<Backtest />} />
+          <Route path="/sectors" element={<SectorDashboard />} />
+          <Route path="/sectors/:code" element={<SectorDetail />} />
+          <Route path="/signals" element={<SignalBoard />} />
           {/* 兼容旧路径 /review → /backtest */}
           <Route path="/review" element={<Navigate to="/backtest" replace />} />
           {/* 兼容旧路径 */}

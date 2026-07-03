@@ -1,9 +1,9 @@
 """
 操作建议日志模型
 """
-from datetime import datetime
+from datetime import datetime, date
 
-from sqlalchemy import String, DateTime, Integer, Text, Float, func
+from sqlalchemy import String, DateTime, Date, Integer, Text, Float, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -15,6 +15,8 @@ class AdviceLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(String(50), index=True, comment="用户ID")
+    fund_code: Mapped[str] = mapped_column(String(10), comment="基金代码")
+    advice_date: Mapped[date] = mapped_column(Date, comment="建议日期")
     index_code: Mapped[str] = mapped_column(String(20), default="", comment="指数代码")
     trade_date: Mapped[datetime] = mapped_column(DateTime, default=func.now(), comment="建议日期")
 
@@ -36,7 +38,7 @@ class AdviceLog(Base):
     accuracy_score: Mapped[float] = mapped_column(Float, default=0.0, comment="准确度评分")
 
     # --- V5.0 新增字段 ---
-    signal_level: Mapped[str | None] = mapped_column(String(2), default=None, comment="V5.0信号等级: S+/S/A/B/C/D/E")
+    signal_level: Mapped[str | None] = mapped_column(String(10), default=None, comment="V5.0信号等级: S+/S/A/B/C/D/E")
     confidence_stars: Mapped[int | None] = mapped_column(Integer, default=None, comment="V5.0置信度星级: 1-4")
     is_executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="V5.0执行时间(替代is_executed)")
 

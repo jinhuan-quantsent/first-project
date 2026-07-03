@@ -386,7 +386,7 @@ export default function FactorRadarChart({ indexCode = 'SH000300' }: Props) {
         // 解析 sentiment
         let sData: SentimentData | null = null;
         if (sentimentRes) {
-          const raw = sentimentRes as unknown as Record<string, unknown>;
+          const raw = sentimentRes as Record<string, unknown>;
           sData = {
             composite_score: raw.composite_score as number,
             signal_level: raw.signal_level as string,
@@ -399,7 +399,7 @@ export default function FactorRadarChart({ indexCode = 'SH000300' }: Props) {
         // 解析 sigmoid_score（API 现在返回标准 JSON 对象）
         const sigmoidMap = new Map<string, number>();
         if (sentimentRes) {
-          const details = (sentimentRes as unknown as Record<string, unknown>).factor_details;
+          const details = (sentimentRes as Record<string, unknown>).factor_details;
           if (Array.isArray(details)) {
             for (const item of details) {
               if (typeof item === 'object' && item !== null && 'factor_name' in item) {

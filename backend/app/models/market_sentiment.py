@@ -41,7 +41,7 @@ class MarketSentiment(Base, TimestampMixin):
     composite_score: Mapped[float] = mapped_column(Float, default=50.0, comment="加权综合评分(0-100)")
     sentiment_label: Mapped[str] = mapped_column(String(10), default="neutral", comment="情绪标签: extreme_fear/fear/neutral/greed/extreme_greed")
     divergence_index: Mapped[float] = mapped_column(Float, default=0.0, comment="指数分化度(0-100)")
-    trend_direction: Mapped[str] = mapped_column(String(10), default="stable", comment="趋势方向: up/down/stable")
+    trend_direction: Mapped[str] = mapped_column(String(50), default="stable", comment="趋势方向: up/down/stable")
     trend_strength: Mapped[float] = mapped_column(Float, default=0.0, comment="趋势强度(0-100)")
 
     # Top3 因子
@@ -54,7 +54,7 @@ class MarketSentiment(Base, TimestampMixin):
     abnormal_signals: Mapped[str] = mapped_column(String(500), default="", comment="异常信号(JSON)")
 
     # --- V5.0 新增字段 ---
-    signal_level: Mapped[str | None] = mapped_column(String(2), default=None, comment="V5.0信号等级: S+/S/A/B/C/D/E")
+    signal_level: Mapped[str | None] = mapped_column(String(10), default=None, comment="V5.0信号等级: S+/S/A/B/C/D/E")
     confidence_stars: Mapped[int | None] = mapped_column(Integer, default=None, comment="V5.0置信度星级: 1-4")
     confidence_detail: Mapped[str | None] = mapped_column(Text, default=None, comment="V5.0置信度明细(JSON)")
     factor_std: Mapped[float | None] = mapped_column(Float, default=None, comment="V5.0因子得分标准差")

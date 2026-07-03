@@ -10,7 +10,7 @@ interface MarketInfoBarProps {
   indexes: IndexSnapshot[];
   globalLabel?: SentimentLabel | null;
   globalScore?: number | null;
-  /** 因子推荐理由，如"波动率82分+北向资金78分触发恐慌信号" */
+  /** 因子推荐理由，如"波动率82分+北向资金78分触发恐惧信号" */
   reason?: string | null;
   loading?: boolean;
 }

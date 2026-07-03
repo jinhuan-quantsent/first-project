@@ -119,12 +119,6 @@ export interface MultiIndexData {
   change_pct: number;
   composite_score: number;
   sentiment_label: SentimentLabel;
-  /** V5 新增: 信号等级(S+/S/A/B/C/D/E) */
-  signal_level?: string;
-  /** V5 新增: 置信度星级(1-4) */
-  confidence_stars?: number;
-  /** V5 新增: 体制标签 */
-  regime?: string;
   top3_factors: FactorScoreData[];
   trend_direction: TrendDirection;
   trend_strength: number;
@@ -181,14 +175,6 @@ export interface PositionAdviceData {
   regime: string;
   composite_score: number;
   gates?: any;
-  /** 趋势文本(camelCase别名) */
-  trendText?: string;
-  /** 市场状态(camelCase别名) */
-  marketStatus?: string;
-  /** 趋势卫士数据(camelCase别名) */
-  trendGuard?: any;
-  /** 趋势卫士文案(camelCase别名) */
-  trend_guard_text?: string;
   track_type?: string;
 }
 

@@ -74,7 +74,7 @@ export default function Backtest() {
   const activeParams = activeStrategy?.params ?? DEFAULT_MODEL_PARAMS;
 
   return (
-    <div className="max-w-5xl mx-auto space-y-4">
+    <div className="max-w-5xl mx-auto space-y-3 md:space-y-4 px-1">
       <div>
         <h1 className="text-xl font-bold text-gray-800">策略回测 V5.0</h1>
         <p className="text-xs text-gray-400 mt-0.5">方案管理 · 5类参数 · 策略回测 · 信号分析</p>

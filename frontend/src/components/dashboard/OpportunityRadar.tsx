@@ -7,7 +7,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { fetchRecommendations } from '../../api/market';
 import type { OpportunityItem, SignalLevel } from '../../types';
 import LoadingSpinner from '../common/LoadingSpinner';
-import SignalBadge from '../common/SentimentBadge';
+import SentimentBadge from '../common/SentimentBadge';
 import { clsx } from 'clsx';
 import { Zap, RefreshCw, Shield, LayoutGrid } from 'lucide-react';
 
@@ -154,7 +154,7 @@ export default function OpportunityRadar() {
                   <span className={clsx('text-[10px] font-medium', TYPE_LABELS[classified]?.color)}>
                     {TYPE_LABELS[classified]?.label}
                   </span>
-                  <SignalBadge level={item.sentiment_label} size="sm" variant="inline" />
+                  <SentimentBadge sentiment={item.sentiment_label} size="sm" variant="inline" />
                 </div>
               </div>
 

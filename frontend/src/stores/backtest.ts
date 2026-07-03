@@ -122,13 +122,13 @@ export const useBacktestStore = create<BacktestState>((set, get) => ({
     const { activeId } = get();
     if (!activeId) return;
     set((prev) => ({
-      strategies: prev.strategies.map((s: BacktestStrategy) => s.id !== activeId ? s : { ...s, params: newParams }),
+      strategies: prev.strategies.map(s => s.id !== activeId ? s : { ...s, params: newParams }),
     }));
   },
 
   addStrategy: () => {
     const { strategies } = get();
-    const newId = Math.max(0, ...strategies.map((s: BacktestStrategy) => s.id)) + 1;
+    const newId = Math.max(0, ...strategies.map(s => s.id)) + 1;
     set((prev) => ({
       strategies: [...prev.strategies, { id: newId, name: `新方案${newId}`, is_active: false, params: { ...DEFAULT_MODEL_PARAMS } }],
       activeId: newId,
@@ -137,7 +137,7 @@ export const useBacktestStore = create<BacktestState>((set, get) => ({
 
   removeStrategy: (id) => {
     const { activeId, strategies } = get();
-    const remaining = strategies.filter((s: BacktestStrategy) => s.id !== id);
+    const remaining = strategies.filter(s => s.id !== id);
     set({
       strategies: remaining,
       activeId: activeId === id ? (remaining.length > 0 ? remaining[0].id : null) : activeId,
@@ -148,7 +148,7 @@ export const useBacktestStore = create<BacktestState>((set, get) => ({
     const { activeId } = get();
     if (!activeId) return;
     set((prev) => ({
-      strategies: prev.strategies.map((s: BacktestStrategy) => s.id === activeId ? { ...s, name: newName } : s),
+      strategies: prev.strategies.map(s => s.id === activeId ? { ...s, name: newName } : s),
     }));
   },
 
@@ -159,15 +159,15 @@ export const useBacktestStore = create<BacktestState>((set, get) => ({
       if (saved.length > 0) {
         const mapped = saved.map(apiStrategyToLocal);
         set((prev) => {
-          const prevIds = new Set(prev.strategies.map((s: BacktestStrategy) => s.id));
-          const newOnes = mapped.filter((s: BacktestStrategy) => !prevIds.has(s.id));
-          const updated = prev.strategies.map((p: BacktestStrategy) => {
-            const found = mapped.find((s: BacktestStrategy) => s.id === p.id);
+          const prevIds = new Set(prev.strategies.map(s => s.id));
+          const newOnes = mapped.filter((s) => !prevIds.has(s.id));
+          const updated = prev.strategies.map((p) => {
+            const found = mapped.find((s) => s.id === p.id);
             return found ? { ...p, params: found.params, is_active: found.is_active } : p;
           });
           return { strategies: [...updated, ...newOnes] };
         });
-        const active = mapped.find((s: BacktestStrategy) => s.is_active);
+        const active = mapped.find(s => s.is_active);
         if (active) {
           set({ activeId: active.id, systemActiveSchemeName: active.name });
         }
@@ -180,10 +180,10 @@ export const useBacktestStore = create<BacktestState>((set, get) => ({
 
   handleSave: async () => {
     const { activeId, strategies } = get();
-    const activeStrategy = strategies.find((s: BacktestStrategy) => s.id === activeId);
+    const activeStrategy = strategies.find(s => s.id === activeId);
     if (!activeStrategy) return;
 
-    const duplicate = strategies.find((s: BacktestStrategy) => s.name === activeStrategy.name && s.id !== activeId);
+    const duplicate = strategies.find(s => s.name === activeStrategy.name && s.id !== activeId);
     if (duplicate) {
       const confirmed = window.confirm(`方案「${activeStrategy.name}」已存在，确定要覆盖吗？`);
       if (!confirmed) return;
@@ -194,7 +194,7 @@ export const useBacktestStore = create<BacktestState>((set, get) => ({
       // 用后端返回的真实 id 替换本地假 id
       if (saved?.id) {
         set(state => ({
-          strategies: state.strategies.map((s: BacktestStrategy) =>
+          strategies: state.strategies.map(s =>
             s.id === activeStrategy.id ? { ...s, id: saved.id } : s
           ),
         }));
@@ -218,11 +218,11 @@ export const useBacktestStore = create<BacktestState>((set, get) => ({
   handleApply: async () => {
     const { activeId, strategies } = get();
     if (!activeId) return;
-    const activeStrategy = strategies.find((s: BacktestStrategy) => s.id === activeId);
+    const activeStrategy = strategies.find(s => s.id === activeId);
     try {
       await activateBacktestStrategyV5(activeId);
       set((prev) => ({
-        strategies: prev.strategies.map((s: BacktestStrategy) => ({ ...s, is_active: s.id === activeId })),
+        strategies: prev.strategies.map(s => ({ ...s, is_active: s.id === activeId })),
         systemActiveSchemeName: activeStrategy?.name || null,
       }));
     } catch (err: any) {
@@ -234,7 +234,7 @@ export const useBacktestStore = create<BacktestState>((set, get) => ({
   handleRunBacktest: async () => {
     const { activeId, strategies, selectedFund, backtestParams } = get();
     const strategyId = backtestParams.strategyId || activeId;
-    const strategy = strategies.find((s: BacktestStrategy) => s.id === strategyId) ?? strategies.find((s: BacktestStrategy) => s.id === activeId);
+    const strategy = strategies.find(s => s.id === strategyId) ?? strategies.find(s => s.id === activeId);
     if (!strategy) return;
 
     set({ running: true, error: null });

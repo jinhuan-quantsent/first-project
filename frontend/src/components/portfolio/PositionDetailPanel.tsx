@@ -29,7 +29,6 @@ import StarRating from './StarRating';
 import NavTrendChart from './NavTrendChart';
 import NavHistoryList from './NavHistoryList';
 import TrendGuardPanel from './TrendGuardPanel';
-import IntradayPreviewPanel from './intraday/IntradayPreviewPanel';
 import CollapsibleSection from './CollapsibleSection';
 import SafetyPadBar from './SafetyPadBar';
 import AdjustDialog from './AdjustDialog';
@@ -243,7 +242,7 @@ export default function PositionDetailPanel({ data, onCollapse, onExecute, onDel
             <ExpandableReason
               reason={adaptReason(data.signalReason, data.signalLevel)}
               signalLevel={data.signalLevel}
-              actionAdvice={data.action === 'increase' ? 'buy' : data.action === 'reduce' ? 'sell' : 'hold'}
+              actionAdvice={data.action === 'increase' ? 'buy' : data.action === 'decrease' ? 'sell' : 'hold'}
               variant="compact"
               summaryMaxLength={20}
             />
@@ -271,11 +270,11 @@ export default function PositionDetailPanel({ data, onCollapse, onExecute, onDel
             <span className={clsx(
               'text-xs px-2 py-0.5 rounded font-medium',
               data.action === 'increase' ? 'bg-red-50 text-red-600' :
-              data.action === 'reduce' ? 'bg-green-50 text-green-600' :
+              data.action === 'decrease' ? 'bg-green-50 text-green-600' :
               isDSignalHold ? 'bg-gray-100 text-gray-500' :
               'bg-gray-100 text-gray-600'
             )}>
-              {data.action === 'increase' ? '加仓' : data.action === 'reduce' ? '减仓' : isDSignalHold ? '观望（动量延续）' : '持有'}
+              {data.action === 'increase' ? '加仓' : data.action === 'decrease' ? '减仓' : isDSignalHold ? '观望（动量延续）' : '持有'}
             </span>
             {trackBadge && (
               <span className={clsx('text-[10px] px-1.5 py-0.5 rounded font-medium', trackBadge.bg, trackBadge.color)}>
@@ -304,8 +303,8 @@ export default function PositionDetailPanel({ data, onCollapse, onExecute, onDel
                 <span className="text-[10px] text-gray-400 ml-auto">
                   目标仓位: {data.targetPositionPct}%{(data.totalAssets ?? data.totalValue) ? `(${formatMoney(targetAmount)})` : ""}
                   {data.denominatorType === 'total_assets' && <span className="ml-1 px-1 py-0.5 bg-blue-50 text-blue-500 rounded text-[9px]">基准:总资产</span>}
-                  {(data.suggestedBuyAmount ?? 0) > 0 && <span className="ml-1 text-[9px] text-red-400">建议买入{formatMoney(data.suggestedBuyAmount ?? 0)}</span>}
-                  {(data.suggestedSellAmount ?? 0) > 0 && <span className="ml-1 text-[9px] text-green-500">建议卖出{formatMoney(data.suggestedSellAmount ?? 0)}</span>}
+                  {data.suggestedBuyAmount > 0 && <span className="ml-1 text-[9px] text-red-400">建议买入{formatMoney(data.suggestedBuyAmount)}</span>}
+                  {data.suggestedSellAmount > 0 && <span className="ml-1 text-[9px] text-green-500">建议卖出{formatMoney(data.suggestedSellAmount)}</span>}
                 </span>
               )}
             </div>
@@ -393,7 +392,7 @@ export default function PositionDetailPanel({ data, onCollapse, onExecute, onDel
                   </button>
                 </div>
               </div>
-            ) : data.action === 'reduce' ? (
+            ) : data.action === 'decrease' ? (
               <div className="space-y-2">
                 {sellAmount > 0 && (
                   <div className="flex items-center gap-2 bg-white/60 rounded-md p-1.5">
@@ -479,9 +478,6 @@ export default function PositionDetailPanel({ data, onCollapse, onExecute, onDel
           }}
           onCancel={() => setAdjustDialogOpen(false)}
         />
-
-        {/* ====== 盘中预演（交易时段内显示） ====== */}
-        <IntradayPreviewPanel fundCode={data.fundCode} />
 
         {/* ====== 趋势卫士解读 ====== */}
         {data.trendGuard ? (

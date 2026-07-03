@@ -16,6 +16,25 @@ export interface V5FactorDetail {
   weight: number;
 }
 
+/** MACD 快照 */
+export interface V5MacdSnapshot {
+  macd_line: number;
+  signal_line: number;
+  histogram: number;
+  trend: string;
+  cross: string | null;
+  same_direction_days: number;
+  momentum: number;
+}
+
+/** MACD 历史序列条目 */
+export interface V5MacdHistoryItem {
+  date: string;
+  dif: number;
+  dea: number;
+  hist: number;
+}
+
 /** V5 情绪结果 */
 export interface V5SentimentResult {
   index_code: string;
@@ -30,6 +49,8 @@ export interface V5SentimentResult {
   confidence_detail: Record<string, number>;
   defenses_triggered: string[];
   factor_details: V5FactorDetail[];
+  macd?: V5MacdSnapshot | null;
+  macd_history?: V5MacdHistoryItem[];
   updated_at: string;
 }
 
@@ -64,6 +85,7 @@ export interface V5PositionAdvice {
   regime_adj_factor: number;
   cost_rejected: boolean;
   frequency_blocked: boolean;
+  frequency_block_direction?: string | null;  // V5.1: 冷却期方向限制("decrease"或null)
   reason: string;
 }
 

@@ -16,7 +16,7 @@ class ConfidenceEngine:
 
     # 四道防线开关
     DEFENSE_EXTREME_VOL = settings.V5_DEFENSE_EXTREME_VOLATILITY
-    DEFENSE_JUMP_GT_15 = settings.V5_DEFENSE_JUMP_GT_15
+    DEFENSE_LOW_FACTOR_CONSISTENCY = settings.V5_DEFENSE_JUMP_GT_15  # 配置项保留旧名，逻辑已更正
     DEFENSE_PRICE_DIVERGENCE = settings.V5_DEFENSE_PRICE_DIVERGENCE
     DEFENSE_FACTOR_STD = settings.V5_DEFENSE_FACTOR_STD
 
@@ -72,13 +72,56 @@ class ConfidenceEngine:
 
         return stars, detail, triggered
 
-    def _calc_factor_consistency(self, results: list[FactorSigmoidResult]) -> float:
-        """因子一致性：factor_std 越小 → 一致性越高"""
+    def _truncate_extreme_factors(
+        self, results: list[FactorSigmoidResult]
+    ) -> list[float]:
+        """
+        防线5: 截断极端因子 — 单因子偏离均值 >3σ 时截断到 ±3σ
+        防止某个极端因子污染综合评分。
+        返回截断后的 sigmoid_score 列表。
+        """
         import numpy as np
         scores = [r.sigmoid_score for r in results]
+        mean = float(np.mean(scores))
         std = float(np.std(scores))
-        # std 0 → 100分；std 20 → 0分（线性映射）
-        consistency = 100.0 - (std / 20.0) * 100.0
+        if std < 1.0:  # 标准差极小时不需要截断
+            return scores
+        truncated = []
+        for s in scores:
+            deviation = s - mean
+            if abs(deviation) > 3.0 * std:
+                # 截断到 mean ± 3σ
+                truncated.append(mean + 3.0 * std if deviation > 0 else mean - 3.0 * std)
+            else:
+                truncated.append(s)
+        return truncated
+
+    def _calc_factor_consistency(self, results: list[FactorSigmoidResult]) -> float:
+        """
+        因子一致性：factor_std 越小 → 一致性越高
+        防线5+: std<5 时降权50%（信号太弱，所有人说一样的话没信息量）
+        防线5+: 先截断极端因子再计算（防污染）
+        """
+        import numpy as np
+        # 先截断极端因子（>3σ 截断到 ±3σ）
+        scores = self._truncate_extreme_factors(results)
+        std = float(np.std(scores))
+        # V5.1 fix: 分段映射，std>20保底20分，避免单一维度归零导致星级全局崩塌
+        # std 0~10  → 80~100分 (高度一致)
+        # std 10~20 → 50~80分  (中等一致)  
+        # std 20~30 → 20~50分  (低一致性但不为零)
+        # std >30   → 0~20分   (极度分歧)
+        if std <= 10:
+            consistency = 80 + (10 - std) * 2  # 80~100
+        elif std <= 20:
+            consistency = 50 + (20 - std) * 3  # 50~80
+        elif std <= 30:
+            consistency = 20 + (30 - std) * 3  # 20~50
+        else:
+            consistency = max(0, 20 - (std - 30) * 2)  # 0~20
+        # ⚠️ 防线5+: 标准差 <5 时降权到50%（信号太弱）
+        if std < 5.0:
+            consistency = consistency * 0.5
         return max(0.0, min(100.0, consistency))
 
     def _calc_signal_strength(self, level: str) -> float:
@@ -114,7 +157,7 @@ class ConfidenceEngine:
         return min(100.0, (same_days / 20.0) * 100.0)
 
     def _calc_data_quality(self, results: list[FactorSigmoidResult]) -> float:
-        """数据质量：可用因子数 / 11 * 100"""
+        """数据质量：可用因子数 / 总因子数 * 100"""
         valid = sum(1 for r in results if r.percentile is not None)
         return round((valid / len(results)) * 100.0, 2) if results else 0.0
 
@@ -148,10 +191,10 @@ class ConfidenceEngine:
             if std > settings.V5_DIVERGENCE_STD_THRESHOLD:
                 triggered.append("extreme_volatility")
 
-        # 防线2：信号跳变 > 15分
-        if self.DEFENSE_JUMP_GT_15:
+        # 防线2：因子一致性过低（factor_consistency < 40%，信号不稳定）
+        if self.DEFENSE_LOW_FACTOR_CONSISTENCY:
             if detail.get("factor_consistency", 100) < 40:
-                triggered.append("jump_gt_15")
+                triggered.append("low_factor_consistency")
 
         # 防线3：价格-情绪背离
         if self.DEFENSE_PRICE_DIVERGENCE:

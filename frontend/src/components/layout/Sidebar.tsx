@@ -5,14 +5,18 @@ import {
   Star,
   Briefcase,
   BarChart3,
+  Layers,
+  Radio,
 } from 'lucide-react';
 
 const NAV_ITEMS = [
   { to: '/dashboard', icon: LayoutDashboard, label: '大盘情绪' },
+  { to: '/signals', icon: Radio, label: '信号看板' },
   { to: '/', icon: Search, label: '基金查询' },
   { to: '/watchlist', icon: Star, label: '自选' },
   { to: '/portfolio', icon: Briefcase, label: '持仓' },
   { to: '/backtest', icon: BarChart3, label: '策略回测' },
+  { to: '/sectors', icon: Layers, label: '板块情绪' },
 ];
 
 export default function Sidebar() {

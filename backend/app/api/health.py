@@ -1,7 +1,6 @@
 """
 健康检查接口
-V4.0：添加 Redis / 数据库 连接状态检查，含超时保护和延迟指标
-支持 PostgreSQL / MySQL / SQLite 三种数据库
+V4.0：添加 Redis / PG 连接状态检查，含超时保护和延迟指标
 """
 import asyncio
 import time
@@ -17,11 +16,12 @@ router = APIRouter(prefix="/api/v5")
 
 @router.get("/health")
 async def health_check() -> dict:
-    """系统健康检查，含 Redis / 数据库 连接状态（带超时保护）"""
+    """系统健康检查，含 Redis / PG 连接状态（带超时保护）"""
 
     async def _check_health() -> dict:
         redis_status = "disabled"
         redis_latency_ms: float | None = None
+        redis_hit_rate: float | None = None
         db_status = "sqlite"
         db_latency_ms: float | None = None
 
@@ -35,6 +35,15 @@ async def health_check() -> dict:
                     await asyncio.wait_for(_redis_client.ping(), timeout=3.0)
                     redis_latency_ms = round((time.monotonic() - t0) * 1000, 1)
                     redis_status = "redis"
+                    # D6: 获取 Redis INFO stats 计算实时命中率
+                    try:
+                        info = await asyncio.wait_for(_redis_client.info("stats"), timeout=3.0)
+                        hits = int(info.get("keyspace_hits", 0))
+                        misses = int(info.get("keyspace_misses", 0))
+                        total = hits + misses
+                        redis_hit_rate = round(hits / total * 100, 2) if total > 0 else 0.0
+                    except Exception:
+                        redis_hit_rate = None
                 else:
                     # USE_REDIS=True 但 _redis_client 为 None → 连接失败降级到内存缓存
                     redis_status = "redis_error"
@@ -93,6 +102,8 @@ async def health_check() -> dict:
             result["db_latency_ms"] = db_latency_ms
         if redis_latency_ms is not None:
             result["redis_latency_ms"] = redis_latency_ms
+        if redis_hit_rate is not None:
+            result["redis_hit_rate_pct"] = redis_hit_rate
         return result
 
     try:
@@ -115,6 +126,6 @@ async def health_check() -> dict:
 
 
 async def _run_db_ping(engine: object, db_url: str) -> None:
-    """执行数据库 SELECT 1 探测（自动识别类型）"""
+    """执行 DB SELECT 1 探测（兼容 PostgreSQL/MySQL/SQLite）"""
     async with engine.connect() as conn:  # type: ignore[union-attr]
         await conn.execute(text("SELECT 1"))

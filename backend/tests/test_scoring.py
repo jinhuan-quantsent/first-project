@@ -229,7 +229,7 @@ class TestScoreAdvDecline:
     """Test score_adv_decline function — inverted U-shape"""
 
     def test_adv_decline_below_0_3_extreme_fear(self):
-        """adv_ratio < 0.3: 极度恐慌"""
+        """adv_ratio < 0.3: 极度恐惧"""
         result = score_adv_decline(0.2)
         assert result.score == 10.0
         assert result.label == "extreme_fear"
@@ -237,7 +237,7 @@ class TestScoreAdvDecline:
         assert result.extreme_type == "oversold"
 
     def test_adv_decline_0_3_to_0_6_fear(self):
-        """adv_ratio 0.3-0.6: 恐慌"""
+        """adv_ratio 0.3-0.6: 恐惧"""
         result = score_adv_decline(0.45)
         assert result.score == 30.0
         assert result.label == "fear"

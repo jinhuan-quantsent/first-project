@@ -145,6 +145,168 @@ async def _get_real_price_data(
         return []
 
 
+
+async def _get_price_data_from_akshare(
+    index_code: str,
+    start_date: str,
+    end_date: str,
+) -> list[dict]:
+    """
+    AKShare fallback for index daily price data.
+    Free API, no token required.
+    """
+    import logging
+    _ak_logger = logging.getLogger(__name__)
+
+    _AKSHARE_INDEX_MAP = {
+        "SH000001": "000001",
+        "SH000300": "000300",
+        "SZ399001": "399001",
+        "SZ399006": "399006",
+    }
+
+    symbol = _AKSHARE_INDEX_MAP.get(index_code, "")
+    if not symbol:
+        import re
+        m = re.search(r"(\d{6})", index_code)
+        symbol = m.group(1) if m else ""
+        if not symbol:
+            _ak_logger.warning("AKShare: cannot map index code %s", index_code)
+            return []
+
+    try:
+        import akshare as ak
+        start_dt = start_date.replace("-", "")
+        end_dt = end_date.replace("-", "")
+
+        df = ak.index_zh_a_hist(
+            symbol=symbol,
+            period="daily",
+            start_date=start_dt,
+            end_date=end_dt,
+        )
+
+        if df is None or df.empty:
+            _ak_logger.warning("AKShare: no data for %s in %s~%s", symbol, start_date, end_date)
+            return []
+
+        result = []
+        for _, row in df.iterrows():
+            trade_date = str(row.iloc[0]).replace("-", "")
+            close = float(row["收盘"])
+            pct_chg = float(row.get("涨跌幅", 0) or 0)
+            volume = float(row.get("成交量", 0) or 0)
+
+            result.append({
+                "date": trade_date,
+                "close": close,
+                "pct_chg": pct_chg,
+                "volume": volume,
+                "signal_level": "B",
+            })
+
+        _ak_logger.info("AKShare: fetched %s daily %d days (%s~%s)", symbol, len(result), start_date, end_date)
+        return result
+
+    except Exception as e:
+        _ak_logger.warning("AKShare index daily fetch failed (%s): %s", symbol, e)
+        return []
+
+
+
+def _compute_signals_from_price_data(
+    price_data: list[dict],
+    signal_boundaries: list[float] | None = None,
+    lookback: int = 20,
+) -> dict[str, str]:
+    """Compute 7-level signals directly from price data (no Tushare needed)
+
+    Uses RSI(14), rolling returns, volatility, and momentum to compute
+    a composite fear/greed score, then maps to S+/S/A/B/C/D/E signals.
+    """
+    if not price_data or len(price_data) < 30:
+        return {}
+
+    # Default boundaries (same as V5)
+    boundaries = signal_boundaries or [12.0, 25.0, 38.0, 52.0, 65.0, 82.0]
+
+    # Extract closes
+    closes = [float(p.get("close", 0)) for p in price_data if p.get("close")]
+
+    # Calculate RSI(14)
+    def calc_rsi(closes_list, period=14):
+        rsi = []
+        for i in range(len(closes_list)):
+            if i < period:
+                rsi.append(50.0)
+                continue
+            changes = [closes_list[j] - closes_list[j-1] for j in range(i-period, i)]
+            gains = [c for c in changes if c > 0]
+            losses = [-c for c in changes if c < 0]
+            avg_gain = sum(gains) / period if gains else 0
+            avg_loss = sum(losses) / period if losses else 0.0001
+            rs = avg_gain / avg_loss
+            rsi.append(100 - 100 / (1 + rs))
+        return rsi
+
+    rsi_list = calc_rsi(closes)
+
+    signals = {}
+    for i in range(lookback, len(price_data)):
+        date_str = str(price_data[i].get("date", ""))
+        if len(date_str) == 8 and "-" not in date_str:
+            # Already in YYYYMMDD format
+            pass
+        elif "-" in date_str:
+            date_str = date_str.replace("-", "")
+
+        close = closes[i]
+
+        # RSI deviation (fear when RSI low, greed when RSI high)
+        rsi_dev = (rsi_list[i] - 50) * 2.0
+        rsi_score = max(0, min(100, 50 - rsi_dev))
+
+        # Rolling return (lookback period)
+        ret_lb = (close / closes[i - lookback] - 1) * 100 if closes[i - lookback] > 0 else 0
+        ret_score = max(0, min(100, 50 - ret_lb * 7))
+
+        # Volatility (annualized)
+        recent_returns = [(closes[j] / closes[j-1] - 1) for j in range(i-lookback+1, i+1)]
+        vol = (sum(r**2 for r in recent_returns) / len(recent_returns) ** 0.5) * (252 ** 0.5) * 100
+        vol_score = max(0, min(100, 50 + (vol - 15) * 2.5))
+
+        # Short-term momentum (5-day)
+        ret_5 = (close / closes[i - 5] - 1) * 100 if i >= 5 and closes[i - 5] > 0 else 0
+        mom_score = max(0, min(100, 50 - ret_5 * 10))
+
+        # Drawdown from 60-day peak
+        peak_60 = max(closes[max(0, i-59):i+1])
+        dd_pct = (close / peak_60 - 1) * 100
+        dd_score = max(0, min(100, 50 - dd_pct * 3))
+
+        # Trend: price vs MA
+        ma_lb = sum(closes[i-lookback+1:i+1]) / lookback
+        dev_pct = (close / ma_lb - 1) * 100
+        trend_bonus = max(-20, min(20, -dev_pct * 3))
+
+        # Composite (V5 weights: RSI 0.20, Return 0.20, Vol 0.10, Momentum 0.15, DD 0.25, Trend 0.10)
+        composite = rsi_score * 0.20 + ret_score * 0.20 + vol_score * 0.10 + mom_score * 0.15 + dd_score * 0.25 + trend_bonus * 0.10
+
+        # Map to signal
+        b = boundaries
+        if composite >= b[5]: signal = "S+"
+        elif composite >= b[4]: signal = "S"
+        elif composite >= b[3]: signal = "A"
+        elif composite >= b[2]: signal = "B"
+        elif composite >= b[1]: signal = "C"
+        elif composite >= b[0]: signal = "D"
+        else: signal = "E"
+
+        signals[date_str] = signal
+
+    return signals
+
+
 async def _get_real_signal_data(
     index_code: str,
     start_date: str,
@@ -318,40 +480,17 @@ def _generate_mock_price_data(
     start_date: str,
     end_date: str,
 ) -> list[dict]:
-    """生成 Mock 价格数据"""
-    import random
+    """生成 Mock 价格数据（已禁用：返回空列表，不再生成假数据）
 
-    random.seed(hash(index_code))
-    start = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
-
-    data = []
-    price = 3000.0
-    current = start
-    signal_levels = ["S+", "S", "A", "B", "C", "D", "E"]
-    signal = "B"
-
-    while current <= end:
-        if current.weekday() < 5:
-            change = (random.random() - 0.48) * 2.0
-            price *= (1 + change / 100)
-            price = max(price * 0.95, price)
-
-            if random.random() < 0.1:
-                idx = signal_levels.index(signal)
-                delta = random.choice([-1, 0, 1])
-                new_idx = max(0, min(6, idx + delta))
-                signal = signal_levels[new_idx]
-
-            data.append({
-                "date": current.strftime("%Y-%m-%d"),
-                "close": round(price, 2),
-                "signal_level": signal,
-            })
-
-        current += timedelta(days=1)
-
-    return data
+    保留函数签名供向后兼容。真实价格数据缺失时应由调用方做降级处理。
+    """
+    import logging
+    _mock_logger = logging.getLogger(__name__)
+    _mock_logger.warning(
+        "_generate_mock_price_data 已禁用: 指数 %s 在 %s~%s 无真实价格数据，返回空列表",
+        index_code, start_date, end_date,
+    )
+    return []
 
 
 # ============================================================
@@ -1135,11 +1274,14 @@ async def run_backtest(
     if req.index_code not in _INDEX_CODE_MAP:
         _logger.warning("回测使用未知指数代码: %s，将尝试直接转换", req.index_code)
 
-    # 1. 获取价格数据：如果 fund_code 存在，使用基金净值；否则使用指数日线
+    # 1. 获取价格数据：Tushare优先 -> AKShare降级 -> DB降级
     if req.fund_code:
         price_data = await _get_fund_price_data(req.fund_code, req.start_date, req.end_date)
     else:
         price_data = await _get_real_price_data(req.index_code, req.start_date, req.end_date)
+        # AKShare降级：Tushare无数据时（token未配置或API失败）
+        if not price_data:
+            price_data = await _get_price_data_from_akshare(req.index_code, req.start_date, req.end_date)
 
     # 2. 获取信号数据：当因子引擎参数存在时，实时计算信号（完整方案）
     signal_index_code = "SH000300" if req.fund_code else req.index_code
@@ -1165,8 +1307,45 @@ async def run_backtest(
         _logger.info("回测信号: 因子引擎实时计算(quantile_window=%d, sigmoid_k=%d因子, method=%s)",
                      req.quantile_window, len(req.sigmoid_k or {}), req.composite_method)
     else:
-        signal_map = await _get_real_signal_data(signal_index_code, req.start_date, req.end_date, session)
-        _logger.info("回测信号: 数据库预存信号(%d天)", len(signal_map))
+        # 先尝试数据库，检查覆盖率
+        signal_map_db = await _get_real_signal_data(signal_index_code, req.start_date, req.end_date, session)
+        price_dates = set(item["date"].replace("-", "") for item in price_data) if price_data else set()
+        db_coverage = len(set(signal_map_db.keys()) & price_dates) / max(len(price_dates), 1) if signal_map_db and price_dates else 0
+
+        if db_coverage >= 0.3:
+            # 数据库覆盖率>=30%，直接使用
+            signal_map = signal_map_db
+            _logger.info("回测信号: 数据库预存信号(%d天, 覆盖率%.0f%%)", len(signal_map), db_coverage * 100)
+        else:
+            # 数据库覆盖率不足，自动降级到实时计算
+            _logger.info("回测信号: 数据库覆盖率%.0f%%不足(仅%d天)，降级到实时计算", db_coverage * 100, len(signal_map_db))
+            signal_map_raw = await _compute_signals_from_index(
+                signal_index_code, req.start_date, req.end_date,
+                factor_weights=None,
+                factor_enabled=None,
+                signal_boundaries=req.signal_boundaries or None,
+                quantile_window=req.quantile_window,
+                sigmoid_k=None,
+                composite_method=req.composite_method,
+                neutral_score=req.neutral_score,
+            )
+            signal_map = {k: v["signal_level"] for k, v in signal_map_raw.items() if isinstance(v, dict)}
+
+            # 如果实时计算也失败，使用价格数据直接计算信号（无需Tushare）
+            if not signal_map and price_data:
+                signal_map = _compute_signals_from_price_data(price_data, req.signal_boundaries)
+                _logger.info("回测信号: 实时计算失败，从价格数据计算(%d天)", len(signal_map))
+
+            # 如果价格计算也失败，仍然尝试数据库（即使覆盖率低，也比全是B好）
+            if not signal_map and signal_map_db:
+                signal_map = signal_map_db
+                _logger.warning("所有信号源失败，使用数据库信号(覆盖率%.0f%%)", db_coverage * 100)
+
+            # 如果实时/价格计算成功但数据库也有部分数据，合并补充（数据库优先）
+            if signal_map and signal_map_db and db_coverage > 0:
+                for k, v in signal_map_db.items():
+                    if k not in signal_map:
+                        signal_map[k] = v
 
     # 3. 合并信号到价格数据
     if price_data and signal_map:
@@ -1176,6 +1355,33 @@ async def run_backtest(
                 item["signal_level"] = signal_map[date_key]
     elif not price_data:
         price_data = _generate_mock_price_data(req.index_code, req.start_date, req.end_date)
+        if not price_data:
+            _logger.warning("回测指数 %s 在 %s~%s 无真实价格数据，返回数据不足提示",
+                            req.index_code, req.start_date, req.end_date)
+            return {
+                "code": 0,
+                "data": {
+                    "total_return": 0,
+                    "annual_return": 0,
+                    "max_drawdown": 0,
+                    "sharpe_ratio": 0,
+                    "win_rate": 0,
+                    "total_trades": 0,
+                    "signal_accuracy": 0,
+                    "benchmark_return": 0,
+                    "equity_curve": [],
+                    "benchmark_curve": [],
+                    "trades": [],
+                    "daily_log": [],
+                    "risk_stats": {},
+                    "summary_text": "数据不足，无法回测",
+                    "_data_source": "insufficient",
+                    "index_code": req.index_code,
+                    "start_date": req.start_date,
+                    "end_date": req.end_date,
+                },
+                "message": "数据不足：该指数/基金在选定日期范围内无真实价格数据，无法执行回测",
+            }
 
     # 4. 构建行动映射（空请求 → 使用默认映射）
     from app.engine.backtest import DEFAULT_ACTION_MAPPING
@@ -1264,9 +1470,17 @@ async def run_backtest(
     # daily_log 最多返回最近60条
     daily_log = result.daily_log[-60:] if result.daily_log else []
 
-    data_source_tag = "real" if price_data and signal_map else "mock"
-    if req.fund_code and price_data:
+    # 数据源标签：区分真实价格+实时计算信号 vs 完全无数据
+    if not price_data:
+        data_source_tag = "insufficient"
+    elif req.fund_code:
         data_source_tag = "fund_real"
+    elif db_coverage >= 0.3:
+        data_source_tag = "real"
+    elif signal_map:
+        data_source_tag = "computed"
+    else:
+        data_source_tag = "mock"
 
     # 操作汇总
     buy_count = sum(1 for t in result.trades if t.trade_type == "buy")

@@ -104,7 +104,7 @@ export default function Top3Factors({ indexCode }: Top3FactorsProps) {
                   isLow ? 'text-green-600' : 'text-red-500'
                 )}>
                   偏离中性 {Math.abs(deviation).toFixed(0)}分
-                  {isLow ? ' ↓ 偏恐慌' : ' ↑ 偏乐观'}
+                  {isLow ? ' ↓ 偏恐惧' : ' ↑ 偏乐观'}
                 </span>
                 {factor.extreme_type && (
                   <span className="text-orange-500 font-medium">

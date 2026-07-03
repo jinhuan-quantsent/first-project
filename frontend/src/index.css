@@ -174,3 +174,56 @@ body {
     @apply bg-white text-gray-700 px-4 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors;
   }
 }
+
+
+/* ============================================================
+   移动端适配
+   ============================================================ */
+
+/* 防止横向滚动 */
+html, body {
+  overflow-x: hidden;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* 移动端触摸优化 */
+@media (max-width: 768px) {
+  /* 卡片圆角和间距优化 */
+  .card {
+    border-radius: 12px;
+  }
+
+  /* 防止iOS点击高亮 */
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* 触摸目标最小尺寸 */
+  button, a {
+    -webkit-touch-callout: none;
+  }
+
+  /* 表格水平滚动 */
+  table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* 图表容器不超出 */
+  canvas, svg {
+    max-width: 100%;
+  }
+
+  /* 减少默认字号 */
+  html {
+    font-size: 14px;
+  }
+}
+
+/* 安全区适配（iPhone X+ 底部） */
+@supports (padding: env(safe-area-inset-bottom)) {
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
