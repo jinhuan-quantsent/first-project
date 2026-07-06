@@ -3,9 +3,10 @@
  * 
  * 顶层编排组件，负责：
  * 1. 定时轮询预演数据（每5分钟）
- * 2. 交易时段检查
+ * 2. 交易时段检查（9:30-15:00含午休）
  * 3. 组装子组件（ConfidenceBadge + PreviewAction + ThresholdBar + SentimentPreview）
  * 4. 视觉隔离规范：浅蓝背景+虚线边框+橙色角标
+ * 5. 午休期间(11:30-13:00)显示上午预演结果并标注
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import { IntradayPreviewData } from '../types';
@@ -19,8 +20,18 @@ interface Props {
   fundCode: string;
 }
 
-/** 检查是否交易时段 */
-function isTradingTime(): boolean {
+/** 检查是否在盘中显示窗口（9:30-15:00，含午休） */
+function isIntradayWindow(): boolean {
+  const now = new Date();
+  const h = now.getHours();
+  const m = now.getMinutes();
+  const timeNum = h * 100 + m;
+  // 9:30-15:00 全天盘中窗口（含午休，午休期间显示上午结果）
+  return timeNum >= 930 && timeNum <= 1500;
+}
+
+/** 检查是否为活跃交易时段（有新数据产生的时段） */
+function isActiveTrading(): boolean {
   const now = new Date();
   const h = now.getHours();
   const m = now.getMinutes();
@@ -29,19 +40,37 @@ function isTradingTime(): boolean {
   return (timeNum >= 930 && timeNum <= 1130) || (timeNum >= 1300 && timeNum <= 1500);
 }
 
+/** 检查是否午休时段 */
+function isLunchBreak(): boolean {
+  const now = new Date();
+  const h = now.getHours();
+  const m = now.getMinutes();
+  const timeNum = h * 100 + m;
+  return timeNum > 1130 && timeNum < 1300;
+}
+
 export default function IntradayPreviewPanel({ fundCode }: Props) {
   const [previewData, setPreviewData] = useState<IntradayPreviewData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isTrading, setIsTrading] = useState(isTradingTime());
+  const [inWindow, setInWindow] = useState(isIntradayWindow());
+  const [lunchBreak, setLunchBreak] = useState(isLunchBreak());
 
   // 定时轮询
   const refresh = useCallback(async () => {
-    if (!isTradingTime()) {
-      setIsTrading(false);
+    // 不在盘中窗口则退出
+    if (!isIntradayWindow()) {
+      setInWindow(false);
       return;
     }
-    setIsTrading(true);
+    setInWindow(true);
+    setLunchBreak(isLunchBreak());
+
+    // 午休期间不主动刷新（保留上午结果）
+    if (isLunchBreak() && previewData) {
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
@@ -61,23 +90,26 @@ export default function IntradayPreviewPanel({ fundCode }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [fundCode]);
+  }, [fundCode, previewData]);
 
   // 每5分钟轮询 + 展开时立即刷新
   useEffect(() => {
     refresh();
     const timer = setInterval(refresh, 300000); // 5分钟
-    // 同时每分钟检查交易时段
-    const tradingCheck = setInterval(() => setIsTrading(isTradingTime()), 60000);
+    // 同时每分钟检查时段状态
+    const checkInterval = setInterval(() => {
+      setInWindow(isIntradayWindow());
+      setLunchBreak(isLunchBreak());
+    }, 60000);
     return () => {
       clearInterval(timer);
-      clearInterval(tradingCheck);
+      clearInterval(checkInterval);
     };
   }, [refresh]);
 
-  // 非交易时段
-  if (!isTrading) {
-    return null;  // 交易时段外不显示
+  // 盘中窗口外不显示（15:00后隐藏）
+  if (!inWindow) {
+    return null;
   }
 
   // 加载中
@@ -105,6 +137,14 @@ export default function IntradayPreviewPanel({ fundCode }: Props) {
   // 正常显示
   return (
     <div className="space-y-2">
+      {/* 午休提示 */}
+      {lunchBreak && (
+        <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-orange-50 border border-orange-200">
+          <span className="text-[10px] text-orange-600 font-medium">午休中</span>
+          <span className="text-[10px] text-orange-500">显示上午预演结果，13:00后更新午盘数据</span>
+        </div>
+      )}
+
       {/* 操作预通知 */}
       <IntradayPreviewAction data={previewData} />
 
@@ -126,9 +166,9 @@ export default function IntradayPreviewPanel({ fundCode }: Props) {
         <button
           onClick={refresh}
           className="px-2 py-1 rounded text-blue-500 hover:text-blue-700 hover:bg-blue-100 disabled:opacity-50"
-          disabled={loading}
+          disabled={loading || lunchBreak}
         >
-          {loading ? '刷新中...' : '↻ 刷新'}
+          {loading ? '刷新中...' : lunchBreak ? '午休暂停' : '↻ 刷新'}
         </button>
       </div>
     </div>

@@ -757,6 +757,17 @@ def _gate_price_to_position(trigger_price: float | None, ma20_price: float | Non
     return round((trigger_price - ma20_price) / ma20_price * 100, 2)
 
 
+def _format_gate_distance(distance_pct: float | None) -> str | None:
+    """格式化闸门距离为可读文案"""
+    if distance_pct is None:
+        return None
+    if distance_pct > 0:
+        return f"距触发还需涨{distance_pct:.1f}%"
+    elif distance_pct < 0:
+        return f"已突破，超出{abs(distance_pct):.1f}%"
+    else:
+        return "恰在触发线上"
+
 def _build_threshold_data(preview_result: dict, meta: dict, gszzl: float | None) -> dict:
     """构建前端ThresholdBar需要的阈值数据"""
     gates = preview_result.get("gates") or {}
@@ -779,6 +790,7 @@ def _build_threshold_data(preview_result: dict, meta: dict, gszzl: float | None)
         "triggered": gate_1.get("triggered", False),
         "trigger_price": gate_1.get("trigger_price"),
         "current_distance_pct": gate_1.get("current_distance_pct"),
+        "status_text": _format_gate_distance(gate_1.get("current_distance_pct")),
         "drawdown": gate_1.get("drawdown"),
         "position": _gate_price_to_position(gate_1.get("trigger_price"), meta.get("ma20_price")),
     })
@@ -791,6 +803,7 @@ def _build_threshold_data(preview_result: dict, meta: dict, gszzl: float | None)
         "triggered": gate_2.get("triggered", False),
         "trigger_price": gate_2.get("trigger_price"),
         "current_distance_pct": gate_2.get("current_distance_pct"),
+        "status_text": _format_gate_distance(gate_2.get("current_distance_pct")),
         "exempted": gate_2.get("exempted", False),
         "position": _gate_price_to_position(gate_2.get("trigger_price"), meta.get("ma20_price")),
     })
@@ -938,12 +951,22 @@ async def _run_intraday_preview_calculate() -> None:
             try:
                 # 5a. 获取基金实时估值
                 gszzl = await get_fund_realtime_nav(fund_code)
+                gszzl_source = "fundgz" if gszzl is not None else "unavailable"
 
-                # 5b. 从Redis读取元数据
-                meta_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:meta:{fund_code}"
-                meta = await cache_get(meta_key)
+                # 5b. 从Redis读取元数据（多天递减 fallback：今日15:40才打包，盘中使用最近可用meta）
+                meta = None
+                meta_date_used = None
+                for offset in range(5):  # today → yesterday → -2d → -3d → -4d
+                    check_date = (date.today() - timedelta(days=offset)).isoformat()
+                    meta_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{check_date}:meta:{fund_code}"
+                    meta = await cache_get(meta_key)
+                    if meta:
+                        meta_date_used = check_date
+                        if offset > 0:
+                            logger.info("[Scheduler] [preview] %s 使用%d天前元数据(%s)", fund_code, offset, check_date)
+                        break
                 if not meta:
-                    logger.warning("[Scheduler] [preview] %s 元数据缺失，跳过", fund_code)
+                    logger.warning("[Scheduler] [preview] %s 元数据缺失(近5天均无)，跳过", fund_code)
                     continue
 
                 # 5c. 获取昨日收盘数据
@@ -1039,6 +1062,7 @@ async def _run_intraday_preview_calculate() -> None:
                         "yesterday_score": yesterday_score,
                         "score_delta": round(score_delta, 2) if score_delta is not None else None,
                         "gszzl": gszzl,
+                        "gszzl_source": gszzl_source,
                         "elasticity": round(elasticity, 2) if elasticity is not None else None,
                         
                         # 预演操作建议

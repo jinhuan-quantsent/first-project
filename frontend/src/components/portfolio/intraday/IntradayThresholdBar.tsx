@@ -128,8 +128,10 @@ export default function IntradayThresholdBar({ thresholds, previewScore, yesterd
               </span>
               {zone.triggered && <span className="text-red-600 font-medium">⚠ 已触发</span>}
               {zone.exempted && <span className="text-amber-600">(逆向豁免)</span>}
-              {zone.current_distance_pct !== undefined && zone.current_distance_pct !== null && !zone.triggered && (
-                <span className="text-gray-400">距阈值 {zone.current_distance_pct}%</span>
+              {zone.status_text && !zone.triggered && (
+                <span className={zone.current_distance_pct !== null && zone.current_distance_pct !== undefined && zone.current_distance_pct < 0 ? 'text-red-500 font-medium' : 'text-gray-400'}>
+                  {zone.status_text}
+                </span>
               )}
             </div>
           );

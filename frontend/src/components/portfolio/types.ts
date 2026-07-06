@@ -203,6 +203,8 @@ export interface IntradayPreviewData {
   score_delta: number | null;
   /** 盘中涨跌幅 */
   gszzl: number | null;
+  /** 估值数据源 */
+  gszzl_source?: string;
   /** 弹性系数 */
   elasticity: number | null;
 
@@ -248,6 +250,7 @@ export interface IntradayGateZone {
   triggered: boolean;
   trigger_price?: number | null;
   current_distance_pct?: number | null;
+  status_text?: string | null;
   drawdown?: number | null;
   exempted?: boolean;
   position?: number | null;
