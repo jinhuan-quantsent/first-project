@@ -285,6 +285,25 @@ class Settings(BaseSettings):
     INTRADAY_PREVIEW_ELASTIC_WEEKLY_UPDATE_DAY: str = "fri"  # 弹性系数周更日
     INTRADAY_PREVIEW_ELASTIC_WEEKLY_UPDATE_TIME: str = "15:45"  # 弹性系数周更时间
 
+    # ============================================================
+    # 策略验证分析表配置 (Strategy Validation Log)
+    # ============================================================
+    # ── Scheduler时间配置 ──
+    VALIDATION_PERSIST_TIME: str = "14:50"        # 任务A: 预演持久化+系统建议
+    VALIDATION_DEEPSEEK_TIME: str = "14:52"       # 任务C: DeepSeek AI建议
+    VALIDATION_BACKFILL_TIME: str = "17:35"        # 任务B: T+1回验回填
+    # ── Redis Key 前缀 ──
+    VALIDATION_CACHE_PREFIX: str = "v5:strategy_validation"
+    VALIDATION_INTRADAY_HL_PREFIX: str = "intraday_preview:v1:hl"  # 盘中高低点追踪
+    # ── DeepSeek API 配置 ──
+    DEEPSEEK_API_KEY: str = ""                      # 为空则跳过AI建议
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+    DEEPSEEK_TIMEOUT: int = 10                       # 秒, 超时后重试1次
+    DEEPSEEK_MAX_TOKENS: int = 2000
+    DEEPSEEK_MAX_RETRIES: int = 1                   # 失败重试次数
+    DEEPSEEK_TEMPERATURE: float = 0.3               # 低温度=稳定输出
+
 
     model_config = {
         "env_file": ".env",
