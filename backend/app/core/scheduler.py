@@ -912,11 +912,18 @@ async def _run_intraday_preview_calculate() -> None:
         user_funds[user_id]["funds"].append(fund_code)
         user_funds[user_id]["total_mv"] += float(market_value or 0)
 
-    # 5. 获取昨日收盘数据（从DailySignalSnapshot）
-    yesterday = date.today() - timedelta(days=1)
-    yesterday_str = yesterday.isoformat()
-    
+    # 5. 获取最近交易日收盘数据（周末/假期：查DB最新快照日期，不用today-1）
     async with AsyncSession(engine) as session:
+        from sqlalchemy import func as sa_func
+        latest_date_stmt = select(sa_func.max(DailySignalSnapshot.snapshot_date)).where(
+            DailySignalSnapshot.snapshot_date < date.today()
+        )
+        yesterday = await session.scalar(latest_date_stmt)
+        if not yesterday:
+            yesterday = date.today() - timedelta(days=1)
+        yesterday_str = yesterday.isoformat() if hasattr(yesterday, 'isoformat') else str(yesterday)
+        logger.info('[Scheduler] [preview] 昨日快照日期=%s', yesterday_str)
+        
         snap_stmt = select(DailySignalSnapshot).where(
             DailySignalSnapshot.snapshot_date == yesterday
         )
@@ -1185,7 +1192,7 @@ async def _run_intraday_meta_pack() -> None:
                 }
 
                 cache_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:meta:{fund_code}"
-                await cache_set(cache_key, meta, ttl=86400)  # TTL=1天，次日重新打包
+                await cache_set(cache_key, meta, ttl=432000)  # TTL=5天，覆盖周末+短假期
 
                 success += 1
                 logger.info("[Scheduler] [meta] %s OK (ma20=%s, track=%s, regime=%s, cooldown=%dd)",
