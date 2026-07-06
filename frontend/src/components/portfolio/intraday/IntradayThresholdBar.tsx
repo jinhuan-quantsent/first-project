@@ -17,7 +17,7 @@ interface Props {
 }
 
 export default function IntradayThresholdBar({ thresholds, previewScore, yesterdayScore }: Props) {
-  const { gate_zones, safe_zone_note, up_trigger_pct, down_trigger_pct } = thresholds;
+  const { gate_zones, safe_zone_note, up_trigger_pct, down_trigger_pct, current_signal, next_signal, prev_signal, gate2_distance_pct } = thresholds;
 
   // 闸门颜色映射
   const GATE_COLORS: Record<string, { triggered: string; safe: string; label: string }> = {
@@ -138,21 +138,36 @@ export default function IntradayThresholdBar({ thresholds, previewScore, yesterd
         })}
       </div>
 
-      {/* 触发阈值 */}
-      {(up_trigger_pct || down_trigger_pct) && (
-        <div className="mt-2 flex gap-4 text-xs">
-          {up_trigger_pct && (
+      {/* 当前信号位置 + 触发阈值 */}
+      <div className="mt-2 space-y-1">
+        {/* 当前位置 */}
+        {current_signal && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-gray-500">当前信号:</span>
+            <span className="font-semibold text-blue-600">{current_signal}</span>
+            <span className="text-gray-400">({previewScore.toFixed(1)}分)</span>
+          </div>
+        )}
+
+        {/* 信号变化触发点 */}
+        <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs">
+          {up_trigger_pct !== null && up_trigger_pct !== undefined && (
             <span className="text-emerald-600">
-              ↗ 升级需涨 {up_trigger_pct}%
+              ↗ 至{next_signal || '下一级'}需涨 {up_trigger_pct}%
             </span>
           )}
-          {down_trigger_pct && (
+          {down_trigger_pct !== null && down_trigger_pct !== undefined && (
             <span className="text-red-600">
-              ↘ 降级需跌 {down_trigger_pct}%
+              ↘ 至{prev_signal || '上一级'}需跌 {down_trigger_pct}%
+            </span>
+          )}
+          {gate2_distance_pct !== null && gate2_distance_pct !== undefined && (
+            <span className="text-amber-600">
+              Gate-2距触发 {gate2_distance_pct}%
             </span>
           )}
         </div>
-      )}
+      </div>
     </div>
   );
 }

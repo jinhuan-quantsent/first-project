@@ -134,9 +134,38 @@ export default function IntradayPreviewPanel({ fundCode }: Props) {
     );
   }
 
+  // 场景状态配置
+  const status = previewData.overall_status || 'normal';
+  const STATUS_STYLE: Record<string, { border: string; bg: string; badge: string; badgeText: string }> = {
+    normal:    { border: 'border-blue-200',   bg: '',                    badge: 'bg-blue-500',   badgeText: '预演' },
+    warning:   { border: 'border-amber-300',  bg: 'bg-amber-50/40',     badge: 'bg-amber-500',  badgeText: '预警' },
+    stop_loss: { border: 'border-red-400',    bg: 'bg-red-50/30',       badge: 'bg-red-600',    badgeText: '风控触发' },
+  };
+  const style = STATUS_STYLE[status] || STATUS_STYLE.normal;
+
+  // stop_loss 场景：异常提示按严重度排序（danger 优先）
+  const sortedNotes = status === 'stop_loss' && previewData.anomaly_notes
+    ? [...previewData.anomaly_notes].sort((a, b) => {
+        const order = { danger: 0, warning: 1, info: 2 };
+        return (order[a.level as keyof typeof order] ?? 3) - (order[b.level as keyof typeof order] ?? 3);
+      })
+    : previewData.anomaly_notes;
+
   // 正常显示
   return (
-    <div className="space-y-2">
+    <div className={`space-y-2 rounded-lg border border-dashed ${style.border} ${style.bg} p-2`}>
+      {/* 状态标签（非 normal 时显示） */}
+      {status !== 'normal' && (
+        <div className="flex items-center gap-1.5">
+          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium text-white ${style.badge}`}>
+            {style.badgeText}
+          </span>
+          {status === 'stop_loss' && (
+            <span className="text-[10px] text-red-600">建议优先关注风控提示</span>
+          )}
+        </div>
+      )}
+
       {/* 午休提示 */}
       {lunchBreak && (
         <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-orange-50 border border-orange-200">
@@ -147,18 +176,31 @@ export default function IntradayPreviewPanel({ fundCode }: Props) {
 
       {/* 综合解读 */}
       {previewData.preview_summary && (
-        <div className="px-2.5 py-1.5 rounded bg-blue-50/60 border border-blue-100">
+        <div className={`px-2.5 py-1.5 rounded border ${
+          status === 'stop_loss' ? 'bg-red-50/50 border-red-100' :
+          status === 'warning' ? 'bg-amber-50/50 border-amber-100' :
+          'bg-blue-50/60 border-blue-100'
+        }`}>
           <p className="text-[11px] text-gray-600 leading-relaxed">{previewData.preview_summary}</p>
         </div>
       )}
 
       {/* 异常场景提示 */}
-      {previewData.anomaly_notes && previewData.anomaly_notes.length > 0 && (
+      {sortedNotes && sortedNotes.length > 0 && (
         <div className="space-y-1">
-          {previewData.anomaly_notes.map((note, idx) => (
+          {sortedNotes.map((note, idx) => (
             <AnomalyNoteBadge key={idx} note={note} />
           ))}
         </div>
+      )}
+
+      {/* stop_loss 场景：阈值进度条优先展示 */}
+      {status === 'stop_loss' && previewData.thresholds && (
+        <IntradayThresholdBar
+          thresholds={previewData.thresholds}
+          previewScore={previewData.preview_score}
+          yesterdayScore={previewData.yesterday_score}
+        />
       )}
 
       {/* 操作预通知 */}
@@ -167,8 +209,8 @@ export default function IntradayPreviewPanel({ fundCode }: Props) {
       {/* 情绪分预览 */}
       <IntradaySentimentPreview data={previewData} />
 
-      {/* 阈值进度条 */}
-      {previewData.thresholds && (
+      {/* 阈值进度条（非 stop_loss 场景或 stop_loss 的 fallback） */}
+      {status !== 'stop_loss' && previewData.thresholds && (
         <IntradayThresholdBar
           thresholds={previewData.thresholds}
           previewScore={previewData.preview_score}

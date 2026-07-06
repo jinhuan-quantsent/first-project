@@ -968,7 +968,7 @@ def _build_preview_summary(
     return summary
 
 
-def _build_threshold_data(preview_result: dict, meta: dict, gszzl: float | None) -> dict:
+def _build_threshold_data(preview_result: dict, meta: dict, gszzl: float | None, preview_score: float = 0) -> dict:
     """构建前端ThresholdBar需要的阈值数据"""
     gates = preview_result.get("gates") or {}
     gate_zones = []
@@ -1034,23 +1034,49 @@ def _build_threshold_data(preview_result: dict, meta: dict, gszzl: float | None)
     # 向上/向下触发阈值
     boundaries = meta.get("signal_boundaries") or list(settings.V5_SIGNAL_BOUNDARIES)
     yesterday_score = meta.get("yesterday_score") or 50.0
+    signal_names = ["S+", "S", "A", "B", "C", "D", "E"]
+
+    # 当前信号位置（基于预演分数）
+    current_signal = _score_to_signal(preview_score, boundaries)
+    current_signal_idx = 0
+    try:
+        current_signal_idx = signal_names.index(current_signal)
+    except ValueError:
+        current_signal_idx = 3  # default to B
+
+    # 下一级信号阈值（分数更高 = 更恐惧方向）
+    next_signal = signal_names[min(current_signal_idx + 1, 6)] if current_signal_idx < 6 else None
     up_trigger_pct = None
-    for b in boundaries:
-        if b > yesterday_score:
-            if yesterday_score > 0:
-                up_trigger_pct = round((b - yesterday_score) / yesterday_score * 100, 1)
+    for i, b in enumerate(boundaries):
+        if b > preview_score:
+            if preview_score > 0:
+                up_trigger_pct = round((b - preview_score) / preview_score * 100, 1)
             break
-    
+
+    # 上一级信号阈值（分数更低 = 更贪婪方向）
+    prev_signal = signal_names[max(current_signal_idx - 1, 0)] if current_signal_idx > 0 else None
     down_trigger_pct = None
+    for i in range(len(boundaries) - 1, -1, -1):
+        if boundaries[i] <= preview_score:
+            if boundaries[i] > 0:
+                down_trigger_pct = round((preview_score - boundaries[i]) / boundaries[i] * 100, 1)
+            break
+
+    # Gate-2 距离（保留原逻辑）
+    gate2_distance_pct = None
     if gate_2.get("current_distance_pct") is not None:
-        down_trigger_pct = round(abs(gate_2["current_distance_pct"]), 2)
+        gate2_distance_pct = round(abs(gate_2["current_distance_pct"]), 2)
     
     return {
         "gate_zones": gate_zones,
         "safe_zone_note": safe_zone_note,
         "current_score": yesterday_score,
+        "current_signal": current_signal,
+        "next_signal": next_signal,
+        "prev_signal": prev_signal,
         "up_trigger_pct": up_trigger_pct,
         "down_trigger_pct": down_trigger_pct,
+        "gate2_distance_pct": gate2_distance_pct,
     }
 
 
@@ -1275,7 +1301,21 @@ async def _run_intraday_preview_calculate() -> None:
                         anomaly_notes=anomaly_notes,
                     )
 
-                    # 5h. 组装预演结果
+                    # 5h. 场景状态判定
+                    _gates = preview_result.get("gates") or {}
+                    _gate_1_triggered = (_gates.get("gate_1") or {}).get("triggered", False)
+                    _gate_2_triggered = (_gates.get("gate_2") or {}).get("triggered", False)
+                    _has_danger = any(n["level"] == "danger" for n in anomaly_notes)
+                    _has_warning = any(n["level"] in ("warning", "danger") for n in anomaly_notes)
+
+                    if _gate_1_triggered or _gate_2_triggered or preview_result.get("action") == "decrease":
+                        overall_status = "stop_loss"
+                    elif _has_warning or (gszzl is not None and abs(gszzl) > 3.0):
+                        overall_status = "warning"
+                    else:
+                        overall_status = "normal"
+
+                    # 5i. 组装预演结果
                     preview_output = {
                         "is_preview": True,
                         "preview_confidence": preview_confidence,
@@ -1308,7 +1348,7 @@ async def _run_intraday_preview_calculate() -> None:
                         "sector_track": preview_result.get("sector_track"),
                         
                         # 阈值数据
-                        "thresholds": _build_threshold_data(preview_result, meta, gszzl),
+                        "thresholds": _build_threshold_data(preview_result, meta, gszzl, round(preview_score, 2)),
                         
                         # 昨今对比
                         "yesterday_signal": yesterday_signal,
@@ -1318,9 +1358,10 @@ async def _run_intraday_preview_calculate() -> None:
                         # 异常场景提示 + 综合解读
                         "anomaly_notes": anomaly_notes,
                         "preview_summary": preview_summary,
+                        "overall_status": overall_status,
                     }
 
-                    # 5i. 写入Redis
+                    # 5j. 写入Redis
                     cache_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:{fund_code}:{user_id}"
                     await cache_set(cache_key, preview_output, ttl=settings.INTRADAY_PREVIEW_CACHE_TTL)
 

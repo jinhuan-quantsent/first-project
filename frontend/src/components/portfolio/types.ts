@@ -233,6 +233,8 @@ export interface IntradayPreviewData {
   anomaly_notes?: AnomalyNote[];
   /** 文字版综合解读 */
   preview_summary?: string;
+  /** 场景状态：normal=正常 / warning=预警 / stop_loss=风控触发 */
+  overall_status?: 'normal' | 'warning' | 'stop_loss';
 
   /** 数据未就绪时的状态标记 */
   status?: 'pending';
@@ -251,8 +253,16 @@ export interface IntradayThresholdData {
   gate_zones: IntradayGateZone[];
   safe_zone_note: string;
   current_score: number;
+  /** 当前信号等级 */
+  current_signal?: string;
+  /** 下一级信号（分数更高方向） */
+  next_signal?: string | null;
+  /** 上一级信号（分数更低方向） */
+  prev_signal?: string | null;
   up_trigger_pct: number | null;
   down_trigger_pct: number | null;
+  /** Gate-2 距离百分比 */
+  gate2_distance_pct?: number | null;
 }
 
 /** 闸门区间数据 */
