@@ -1007,13 +1007,17 @@ async def _run_intraday_preview_calculate() -> None:
                     current_pct = float(fund_mv) / total_assets if total_assets > 0 else 0.0
 
                     # 5f. import复用 PositionEngineV5
+                    # 时段折减：早盘-2星、午盘-1星、尾盘-0星（不低于1星）
+                    preview_discount = 3 - preview_confidence
+                    effective_stars = max(1, yesterday_confidence - preview_discount)
+
                     pos_engine = PositionEngineV5(session)
                     preview_result = await pos_engine.calculate(
                         user_id=user_id,
                         fund_code=fund_code,
                         current_position_pct=current_pct,
                         signal_level=preview_signal,
-                        confidence_stars=preview_confidence,
+                        confidence_stars=effective_stars,
                         regime=meta.get("regime", "sideways"),
                         cash_amount=0,  # 盘中不查现金
                         total_assets=total_assets,
@@ -1043,7 +1047,7 @@ async def _run_intraday_preview_calculate() -> None:
                         "current_position_pct": preview_result.get("current_position_pct", current_pct),
                         "reason": _prefix_preview_reason(preview_result.get("reason", "")),
                         "signal_level": preview_signal,
-                        "confidence_stars": preview_confidence,
+                        "confidence_stars": effective_stars,
                         
                         # 预演风控
                         "gates": preview_result.get("gates"),

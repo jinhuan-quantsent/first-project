@@ -34,6 +34,16 @@ class PositionEngineV5:
 
     LEVELS: list[str] = ["empty", "light", "mid", "heavy", "full"]
 
+    # 逆向轨道信号镜像映射：恐惧↔贪婪（S+↔E, S↔D, A↔C, B→B）
+    _CONTRARIAN_MIRROR: dict[str, str] = {
+        "S+": "E", "S": "D", "A": "C", "B": "B",
+        "C": "A", "D": "S", "E": "S+",
+    }
+
+    def _mirror_signal_for_contrarian(self, signal_level: str) -> str:
+        """逆向轨道信号翻转：恐惧↔贪婪，仅影响矩阵查表"""
+        return self._CONTRARIAN_MIRROR.get(signal_level, signal_level)
+
     def __init__(self, session) -> None:
         self._session = session
         self._matrix = settings.V5_POSITION_MATRIX
@@ -65,11 +75,26 @@ class PositionEngineV5:
         5. 交易成本阈值 → hold
         6. 正常矩阵计算 → increase/hold/decrease
         """
+        # 0. 趋势卫士（提前调用，用于 contrarian 信号翻转 + 后续 Gate 检查）
+        trend_guard_data = await calculate_trend_guard(
+            fund_code=fund_code,
+            signal_level=signal_level,
+            confidence_stars=confidence_stars,
+            current_position=current_position_pct,
+        )
+        sector_track = trend_guard_data.get("sector_track") if trend_guard_data else None
+
         # 1. 确定当前仓位等级
         current_level = self._pct_to_level(current_position_pct)
 
-        # 2. 矩阵查表 → 直接获取目标仓位百分比
-        signal_idx = self._signal_to_idx(signal_level)
+        # 1b. Contrarian 信号翻转（仅影响矩阵查表，不改原始信号）
+        matrix_signal = signal_level
+        if sector_track == "contrarian":
+            matrix_signal = self._mirror_signal_for_contrarian(signal_level)
+            logger.info("[contrarian] %s 信号翻转: %s -> %s", fund_code, signal_level, matrix_signal)
+
+        # 2. 矩阵查表 → 直接获取目标仓位百分比（contrarian 用翻转后信号）
+        signal_idx = self._signal_to_idx(matrix_signal)
         current_idx = self.LEVELS.index(current_level)
         target_pct = self._matrix[current_idx][signal_idx]
 
@@ -121,15 +146,8 @@ class PositionEngineV5:
                 frequency_blocked = True
                 frequency_block_direction = "decrease"  # 仅限减仓方向
 
-        # 7. 调用趋势卫士获取完整趋势数据（含持仓风控Gate + 板块轨道 + 准入层）
-        trend_guard_data = await calculate_trend_guard(
-            fund_code=fund_code,
-            signal_level=signal_level,
-            confidence_stars=confidence_stars,
-            current_position=current_position_pct,
-        )
-
         # 8. 确定操作类型和原因（优先级覆盖）
+        # 注：trend_guard_data 已在 step 0 获取，此处直接使用
         gate_triggered = trend_guard_data.get("gate_triggered") if trend_guard_data else None   # DEPRECATED
         gates = trend_guard_data.get("gates") if trend_guard_data else None  # 新结构化
         sector_track = trend_guard_data.get("sector_track") if trend_guard_data else None
@@ -169,27 +187,32 @@ class PositionEngineV5:
         elif frequency_blocked:
             # 7天频率限制（V5.1: 仅限制减仓，加仓放行）
             # 冷却期只阻止减仓操作，加仓方向仍可正常走矩阵计算
-            # 因为 C类基金买入0手续费，频繁加仓不会产生额外成本
-            # 下面的 else 分支会正常处理 increase/hold/decrease
-            # 当 adjusted_pct > current_pct(即加仓方向)时，frequency_blocked 不阻拦
-            # 当 adjusted_pct <= current_pct(即减仓/持有方向)时，强制 hold
-            if adjusted_pct <= current_pct:
-                # 减仓或持有方向 → 冷却期阻止
+            if adjusted_pct < current_pct - 0.001:
+                # 矩阵建议减仓 → 冷却期拦截
                 action = "hold"
                 adjusted_pct = current_pct
                 reason = "7天内已减仓/赎回，冷却期暂不减仓"
-            else:
-                # 加仓方向 → 冷却期放行，正常走矩阵
-                frequency_blocked = False  # 重置标记，加仓不受冷却限制
-                if abs(adjusted_pct - current_pct) < 0.01:
-                    action = "hold"
-                    reason = "7天内已减仓/赎回，但加仓方向不受冷却限制，当前建议持有"
+            elif abs(adjusted_pct - current_pct) < 0.01:
+                # 矩阵建议持有 → 冷却期不影响，按正常逻辑输出原因
+                frequency_blocked = False
+                action = "hold"
+                if signal_level == "B":
+                    reason = "B级中性信号，建议持有"
+                elif cost_rejected:
+                    reason = "调整幅度小于交易成本阈值（1.5%），建议暂不操作"
                 else:
-                    action = "increase"
                     reason = self._generate_reason(
                         signal_level, confidence_stars, current_level, target_pct,
                         cost_rejected=False, frequency_blocked=False,
-                    ) + "（加仓不受7天冷却限制）"
+                    )
+            else:
+                # 矩阵建议加仓 → 冷却期放行
+                frequency_blocked = False
+                action = "increase"
+                reason = self._generate_reason(
+                    signal_level, confidence_stars, current_level, target_pct,
+                    cost_rejected=False, frequency_blocked=False,
+                ) + "（加仓不受7天冷却限制）"
         elif signal_level == "B":
             # B级中性信号
             action = "hold"
