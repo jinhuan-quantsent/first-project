@@ -9,7 +9,7 @@
  * 5. 午休期间(11:30-13:00)显示上午预演结果并标注
  */
 import React, { useState, useEffect, useCallback } from 'react';
-import { IntradayPreviewData } from '../types';
+import { IntradayPreviewData, AnomalyNote } from '../types';
 import { fetchIntradayPreview } from '../../../api/portfolioV5';
 import IntradayConfidenceBadge from './IntradayConfidenceBadge';
 import IntradayPreviewAction from './IntradayPreviewAction';
@@ -145,6 +145,22 @@ export default function IntradayPreviewPanel({ fundCode }: Props) {
         </div>
       )}
 
+      {/* 综合解读 */}
+      {previewData.preview_summary && (
+        <div className="px-2.5 py-1.5 rounded bg-blue-50/60 border border-blue-100">
+          <p className="text-[11px] text-gray-600 leading-relaxed">{previewData.preview_summary}</p>
+        </div>
+      )}
+
+      {/* 异常场景提示 */}
+      {previewData.anomaly_notes && previewData.anomaly_notes.length > 0 && (
+        <div className="space-y-1">
+          {previewData.anomaly_notes.map((note, idx) => (
+            <AnomalyNoteBadge key={idx} note={note} />
+          ))}
+        </div>
+      )}
+
       {/* 操作预通知 */}
       <IntradayPreviewAction data={previewData} />
 
@@ -171,6 +187,22 @@ export default function IntradayPreviewPanel({ fundCode }: Props) {
           {loading ? '刷新中...' : lunchBreak ? '午休暂停' : '↻ 刷新'}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** 异常提示徽章 */
+function AnomalyNoteBadge({ note }: { note: AnomalyNote }) {
+  const config: Record<string, { bg: string; border: string; text: string; icon: string }> = {
+    danger:  { bg: 'bg-red-50',    border: 'border-red-200',    text: 'text-red-600',    icon: '⚠' },
+    warning: { bg: 'bg-amber-50',  border: 'border-amber-200',  text: 'text-amber-600',  icon: '注意' },
+    info:    { bg: 'bg-gray-50',   border: 'border-gray-200',   text: 'text-gray-500',   icon: 'ℹ' },
+  };
+  const c = config[note.level] || config.info;
+  return (
+    <div className={`flex items-start gap-1 px-2 py-1 rounded ${c.bg} border ${c.border}`}>
+      <span className={`text-[10px] ${c.text} font-medium shrink-0`}>{c.icon}</span>
+      <span className={`text-[10px] ${c.text} leading-relaxed`}>{note.message}</span>
     </div>
   );
 }

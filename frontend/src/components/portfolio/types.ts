@@ -229,9 +229,21 @@ export interface IntradayPreviewData {
   yesterday_confidence?: number;
   signal_change?: 'up' | 'down' | 'stable' | 'unknown';
 
+  /** 异常场景提示 */
+  anomaly_notes?: AnomalyNote[];
+  /** 文字版综合解读 */
+  preview_summary?: string;
+
   /** 数据未就绪时的状态标记 */
   status?: 'pending';
   message?: string;
+}
+
+/** 异常提示项 */
+export interface AnomalyNote {
+  type: string;
+  level: 'info' | 'warning' | 'danger';
+  message: string;
 }
 
 /** 阈值进度条数据 */

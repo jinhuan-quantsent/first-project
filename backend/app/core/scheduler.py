@@ -768,6 +768,206 @@ def _format_gate_distance(distance_pct: float | None) -> str | None:
     else:
         return "恰在触发线上"
 
+
+def _build_anomaly_notes(
+    gszzl: float | None,
+    gszzl_source: str,
+    elasticity: float | None,
+    score_delta: float | None,
+    preview_signal: str,
+    yesterday_signal: str | None,
+    meta_date_used: str | None,
+    today_str: str,
+    has_snapshot: bool,
+    preview_result: dict,
+) -> list[dict]:
+    """构建异常场景提示列表
+
+    检测项：
+    1. 极端行情（|gszzl|>5%）：弹性系数强制降敏
+    2. 情绪分钳位（score_delta 被截断）：信号变动受限制
+    3. 元数据过期（meta_date != today）：预演基准可能偏移
+    4. 无昨日快照（新基金 / 首次预演）：使用缓存基准
+    5. 估值数据不可用：使用昨日信号预演
+    6. 信号变化方向：升级 / 降级提示
+    7. Gate 触发：风控提示
+    """
+    notes: list[dict] = []
+
+    # 1. 极端行情
+    if gszzl is not None and abs(gszzl) > 5.0:
+        direction = "大涨" if gszzl > 0 else "大跌"
+        notes.append({
+            "type": "extreme_volatility",
+            "level": "danger",
+            "message": f"盘中{direction}{abs(gszzl):.1f}%触发极端行情降敏，弹性系数已强制降至1.0",
+        })
+
+    # 2. 情绪分钳位
+    if gszzl is not None and elasticity is not None:
+        raw_delta = abs(gszzl * elasticity)
+        clamp = settings.INTRADAY_PREVIEW_SCORE_DELTA_CLAMP
+        if raw_delta > clamp:
+            notes.append({
+                "type": "score_clamped",
+                "level": "info",
+                "message": f"情绪分变动被限制在±{clamp:.0f}分以内，避免信号过度跳变",
+            })
+
+    # 3. 元数据过期
+    if meta_date_used and meta_date_used != today_str:
+        try:
+            meta_date = date.fromisoformat(meta_date_used)
+            today = date.fromisoformat(today_str)
+            days_diff = (today - meta_date).days
+            notes.append({
+                "type": "stale_meta",
+                "level": "info" if days_diff <= 2 else "warning",
+                "message": f"使用{days_diff}天前({meta_date_used})的元数据预演，基准可能存在偏差",
+            })
+        except (ValueError, TypeError):
+            pass
+
+    # 4. 无昨日快照
+    if not has_snapshot:
+        notes.append({
+            "type": "new_fund",
+            "level": "info",
+            "message": "无昨日决策快照，使用板块/指数缓存作为预演基准",
+        })
+
+    # 5. 估值数据不可用
+    if gszzl_source == "unavailable":
+        notes.append({
+            "type": "no_estimation",
+            "level": "warning",
+            "message": "盘中估值数据获取失败，当前显示为昨日信号预演，不代表实时行情",
+        })
+
+    # 6. 信号变化
+    if yesterday_signal and preview_signal != yesterday_signal:
+        change = _calc_signal_change(yesterday_signal, preview_signal)
+        if change == "up":
+            notes.append({
+                "type": "signal_upgrade",
+                "level": "info",
+                "message": f"信号从{yesterday_signal}升级至{preview_signal}，情绪偏向贪婪",
+            })
+        elif change == "down":
+            notes.append({
+                "type": "signal_downgrade",
+                "level": "warning",
+                "message": f"信号从{yesterday_signal}降级至{preview_signal}，情绪偏向恐惧",
+            })
+
+    # 7. Gate 触发
+    gates = preview_result.get("gates") or {}
+    gate_1 = gates.get("gate_1") or {}
+    gate_2 = gates.get("gate_2") or {}
+    if gate_1.get("triggered"):
+        notes.append({
+            "type": "gate_triggered",
+            "level": "danger",
+            "message": "Gate-1已触发（MA20破位），建议关注减仓信号",
+        })
+    if gate_2.get("triggered"):
+        notes.append({
+            "type": "gate_triggered",
+            "level": "danger",
+            "message": "Gate-2已触发（回撤超限），建议执行减仓",
+        })
+
+    return notes
+
+
+def _build_preview_summary(
+    preview_confidence: int,
+    gszzl: float | None,
+    gszzl_source: str,
+    preview_score: float,
+    yesterday_score: float,
+    score_delta: float | None,
+    preview_signal: str,
+    yesterday_signal: str | None,
+    effective_stars: int,
+    yesterday_confidence: int,
+    preview_result: dict,
+    anomaly_notes: list[dict],
+) -> str:
+    """构建文字版综合解读（一段话）
+
+    结构：时段 → 估值 → 情绪分变化 → 信号 → 置信度 → Gate状态 → 操作建议 → 异常提示
+    """
+    period_map = {1: "早盘", 2: "午盘", 3: "尾盘"}
+    period = period_map.get(preview_confidence, "盘中")
+
+    parts: list[str] = []
+
+    # 1. 时段 + 估值
+    if gszzl is not None and gszzl_source != "unavailable":
+        direction = "涨" if gszzl >= 0 else "跌"
+        parts.append(f"{period}时段，盘中{direction}{abs(gszzl):.2f}%")
+    else:
+        parts.append(f"{period}时段，估值数据暂不可用")
+
+    # 2. 情绪分变化
+    if score_delta is not None:
+        delta_str = f"{'+' if score_delta >= 0 else ''}{score_delta:.1f}"
+        parts.append(f"估算情绪分{preview_score:.1f}（昨收{yesterday_score:.1f}，变动{delta_str}）")
+    else:
+        parts.append(f"估算情绪分{preview_score:.1f}（昨收{yesterday_score:.1f}）")
+
+    # 3. 信号
+    if yesterday_signal and preview_signal != yesterday_signal:
+        parts.append(f"信号{yesterday_signal}→{preview_signal}")
+    else:
+        parts.append(f"信号维持{preview_signal}级")
+
+    # 4. 置信度
+    star_discount = yesterday_confidence - effective_stars
+    if star_discount > 0:
+        parts.append(f"置信度{effective_stars}星（时段折减-{star_discount}星）")
+    else:
+        parts.append(f"置信度{effective_stars}星")
+
+    # 5. Gate 状态
+    gates = preview_result.get("gates") or {}
+    gate_msgs: list[str] = []
+    gate_1 = gates.get("gate_1") or {}
+    gate_2 = gates.get("gate_2") or {}
+    if gate_1.get("triggered"):
+        gate_msgs.append("Gate-1已触发")
+    elif gate_1.get("current_distance_pct") is not None:
+        dist = gate_1["current_distance_pct"]
+        if dist > 0:
+            gate_msgs.append(f"Gate-1距触发还需涨{dist:.1f}%")
+    if gate_2.get("triggered"):
+        gate_msgs.append("Gate-2已触发")
+    elif gate_2.get("current_distance_pct") is not None:
+        dist = gate_2["current_distance_pct"]
+        if dist > 0:
+            gate_msgs.append(f"Gate-2距触发还需涨{dist:.1f}%")
+    if gate_msgs:
+        parts.append("、".join(gate_msgs))
+
+    # 6. 操作建议
+    action = preview_result.get("action", "hold")
+    action_map = {"increase": "建议加仓", "decrease": "建议减仓", "hold": "建议持有"}
+    parts.append(action_map.get(action, "建议持有"))
+
+    summary = "，".join(parts) + "。"
+
+    # 7. 追加异常提示
+    danger_notes = [n for n in anomaly_notes if n["level"] == "danger"]
+    warning_notes = [n for n in anomaly_notes if n["level"] == "warning"]
+    if danger_notes:
+        summary += " ⚠" + "；".join(n["message"] for n in danger_notes) + "。"
+    elif warning_notes:
+        summary += " 注意：" + "；".join(n["message"] for n in warning_notes) + "。"
+
+    return summary
+
+
 def _build_threshold_data(preview_result: dict, meta: dict, gszzl: float | None) -> dict:
     """构建前端ThresholdBar需要的阈值数据"""
     gates = preview_result.get("gates") or {}
@@ -971,6 +1171,7 @@ async def _run_intraday_preview_calculate() -> None:
 
                 # 5c. 获取昨日收盘数据
                 snap = yesterday_snapshots.get(fund_code)
+                has_snapshot = snap is not None
                 if snap:
                     yesterday_score = float(snap.composite_score or 50.0)
                     yesterday_signal = snap.signal_level or "B"
@@ -1046,7 +1247,35 @@ async def _run_intraday_preview_calculate() -> None:
                         total_assets=total_assets,
                     )
 
-                    # 5g. 组装预演结果
+                    # 5g. 构建异常提示 + 综合解读
+                    anomaly_notes = _build_anomaly_notes(
+                        gszzl=gszzl,
+                        gszzl_source=gszzl_source,
+                        elasticity=elasticity,
+                        score_delta=score_delta,
+                        preview_signal=preview_signal,
+                        yesterday_signal=yesterday_signal,
+                        meta_date_used=meta_date_used,
+                        today_str=today_str,
+                        has_snapshot=has_snapshot,
+                        preview_result=preview_result,
+                    )
+                    preview_summary = _build_preview_summary(
+                        preview_confidence=preview_confidence,
+                        gszzl=gszzl,
+                        gszzl_source=gszzl_source,
+                        preview_score=round(preview_score, 2),
+                        yesterday_score=yesterday_score,
+                        score_delta=round(score_delta, 2) if score_delta is not None else None,
+                        preview_signal=preview_signal,
+                        yesterday_signal=yesterday_signal,
+                        effective_stars=effective_stars,
+                        yesterday_confidence=yesterday_confidence,
+                        preview_result=preview_result,
+                        anomaly_notes=anomaly_notes,
+                    )
+
+                    # 5h. 组装预演结果
                     preview_output = {
                         "is_preview": True,
                         "preview_confidence": preview_confidence,
@@ -1085,9 +1314,13 @@ async def _run_intraday_preview_calculate() -> None:
                         "yesterday_signal": yesterday_signal,
                         "yesterday_confidence": yesterday_confidence,
                         "signal_change": _calc_signal_change(yesterday_signal, preview_signal),
+
+                        # 异常场景提示 + 综合解读
+                        "anomaly_notes": anomaly_notes,
+                        "preview_summary": preview_summary,
                     }
 
-                    # 5h. 写入Redis
+                    # 5i. 写入Redis
                     cache_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:{fund_code}:{user_id}"
                     await cache_set(cache_key, preview_output, ttl=settings.INTRADAY_PREVIEW_CACHE_TTL)
 
