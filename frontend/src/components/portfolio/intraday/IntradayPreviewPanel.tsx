@@ -8,7 +8,7 @@
  * 4. 视觉隔离规范：浅蓝背景+虚线边框+橙色角标
  * 5. 午休期间(11:30-13:00)显示上午预演结果并标注
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { IntradayPreviewData, AnomalyNote } from '../types';
 import { fetchIntradayPreview } from '../../../api/portfolioV5';
 import IntradayConfidenceBadge from './IntradayConfidenceBadge';
@@ -56,7 +56,11 @@ export default function IntradayPreviewPanel({ fundCode }: Props) {
   const [inWindow, setInWindow] = useState(isIntradayWindow());
   const [lunchBreak, setLunchBreak] = useState(isLunchBreak());
 
-  // 定时轮询
+  // ref 镜像：refresh 闭包内读取最新 previewData，避免 stale closure
+  const previewDataRef = useRef(previewData);
+  previewDataRef.current = previewData;
+
+  // 定时轮询（仅依赖 fundCode，不依赖 previewData，避免无限循环）
   const refresh = useCallback(async () => {
     // 不在盘中窗口则退出
     if (!isIntradayWindow()) {
@@ -67,7 +71,7 @@ export default function IntradayPreviewPanel({ fundCode }: Props) {
     setLunchBreak(isLunchBreak());
 
     // 午休期间不主动刷新（保留上午结果）
-    if (isLunchBreak() && previewData) {
+    if (isLunchBreak() && previewDataRef.current) {
       return;
     }
 
@@ -90,7 +94,7 @@ export default function IntradayPreviewPanel({ fundCode }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [fundCode, previewData]);
+  }, [fundCode]);
 
   // 每5分钟轮询 + 展开时立即刷新
   useEffect(() => {

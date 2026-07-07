@@ -121,7 +121,6 @@ export default function AIAnalysisPanel({ fundCode }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(true);
-  const [refreshKey, setRefreshKey] = useState(0);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -138,12 +137,12 @@ export default function AIAnalysisPanel({ fundCode }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [fundCode, refreshKey]);
+  }, [fundCode]);
 
   useEffect(() => {
     fetchData();
     // 每5分钟自动刷新
-    const interval = setInterval(() => setRefreshKey(k => k + 1), 5 * 60 * 1000);
+    const interval = setInterval(fetchData, 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, [fetchData]);
 
