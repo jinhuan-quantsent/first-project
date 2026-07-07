@@ -187,7 +187,7 @@ class PositionEngineV5:
                 else:
                     action = "increase"
                     reason = self._generate_reason(
-                        signal_level, confidence_stars, current_level, target_pct,
+                        signal_level, confidence_stars, current_level, adjusted_pct,
                         cost_rejected=False, frequency_blocked=False,
                     ) + "（加仓不受7天冷却限制）"
         elif signal_level == "B":
@@ -208,7 +208,7 @@ class PositionEngineV5:
             else:
                 action = "decrease"
             reason = self._generate_reason(
-                signal_level, confidence_stars, current_level, target_pct,
+                signal_level, confidence_stars, current_level, adjusted_pct,
                 cost_rejected, frequency_blocked,
             )
 
@@ -227,6 +227,12 @@ class PositionEngineV5:
                 if adjusted_pct <= current_pct and action == "increase":
                     action = "hold"
                     reason = "组合约束阻止加仓: " + "; ".join(constraint_result["constraints"])
+                elif action == "increase":
+                    # 约束部分削减目标，更新 reason 显示实际目标
+                    reason = self._generate_reason(
+                        signal_level, confidence_stars, current_level, adjusted_pct,
+                        cost_rejected, frequency_blocked,
+                    )
         # 9. 构建趋势卫士补充文案
         trend_guard_text = ""
         if trend_guard_data:

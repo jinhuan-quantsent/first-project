@@ -78,7 +78,7 @@ class PositionService:
                     return {
                         "source": "broad",
                         "sector_code": None,
-                        "index_code": to_display(raw_code),
+                        "index_code": to_display(ts_code),
                         "category": "broad",
                     }
                 # 其他非宽基指数 → fallback 到沪深300（用宽基 pipeline）

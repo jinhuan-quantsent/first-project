@@ -538,6 +538,7 @@ async def add_portfolio_item(
 
     # Invalidate portfolio cache (summary includes cash_amount and total_assets)
     await cache_delete(f"fsa:portfolio:{user_id}")
+    await cache_delete(f"v5:fund_detail:{new_item.fund_code}:{user_id}")
 
     # 修复P0: 使用 FastAPI BackgroundTasks 替代 asyncio.create_task
     # 确保回填在响应后执行，不会被 event loop 取消
@@ -597,6 +598,7 @@ async def update_portfolio_item(
 
     # Invalidate portfolio cache
     await cache_delete(f"fsa:portfolio:{user_id}")
+    await cache_delete(f"v5:fund_detail:{existing.fund_code}:{user_id}")
 
 
 
@@ -701,6 +703,7 @@ async def delete_portfolio_item(
 
     # Invalidate portfolio cache
     await cache_delete(f"fsa:portfolio:{user_id}")
+    await cache_delete(f"v5:fund_detail:{_fund_code}:{user_id}")
 
     return {"code": 0, "data": None, "message": "删除成功"}
 
@@ -888,6 +891,7 @@ async def increase_position(
 
     # 失效缓存
     await cache_delete(f"fsa:portfolio:{user_id}")
+    await cache_delete(f"v5:fund_detail:{existing.fund_code}:{user_id}")
 
     return {
         "code": 0,
@@ -1080,6 +1084,7 @@ async def decrease_position(
 
     # 失效缓存
     await cache_delete(f"fsa:portfolio:{user_id}")
+    await cache_delete(f"v5:fund_detail:{existing.fund_code}:{user_id}")
 
     return {
         "code": 0,
@@ -1258,6 +1263,11 @@ async def update_cash(
 
     # 失效持仓缓存（因为 summary 包含 cash_amount 和 total_assets）
     await cache_delete(f"fsa:portfolio:{user_id}")
+    # 失效所有基金的详情缓存（total_assets 变化影响所有基金的建议）
+    _fd_stmt = select(UserPortfolio.fund_code).where(UserPortfolio.user_id == user_id)
+    _fd_result = await session.execute(_fd_stmt)
+    for (_fc,) in _fd_result:
+        await cache_delete(f"v5:fund_detail:{_fc}:{user_id}")
 
     return {
         "code": 0,
@@ -1670,8 +1680,8 @@ async def get_fund_detail_for_portfolio(
                 "suggested_action": ad.get("action"),
                 "suggested_amount": round(raw_target_pct * 100, 1),  # DEPRECATED: 此值是百分比而非金额, 请用 suggested_target_pct
                 "suggested_target_pct": round(raw_target_pct * 100, 1),  # 目标仓位百分比(占总资产)
-                "suggested_buy_amount": round((raw_target_pct - raw_current_pct) * denominator * 100, 0) if raw_target_pct > raw_current_pct else 0,  # 建议加仓金额(元)
-                "suggested_sell_amount": round((raw_current_pct - raw_target_pct) * denominator * 100, 0) if raw_current_pct > raw_target_pct else 0,  # 建议减仓金额(元)
+                "suggested_buy_amount": round((raw_target_pct - raw_current_pct) * denominator, 0) if raw_target_pct > raw_current_pct else 0,  # 建议加仓金额(元)
+                "suggested_sell_amount": round((raw_current_pct - raw_target_pct) * denominator, 0) if raw_current_pct > raw_target_pct else 0,  # 建议减仓金额(元)
                 "recommendationReason": ad.get("reason"),
                 "signal_level": ad.get("signal_level"),
                 "confidence_stars": ad.get("confidence_stars"),
@@ -1773,7 +1783,7 @@ async def get_fund_detail_for_portfolio(
 
     # 写入缓存（TTL=300s，盘中估值5分钟过期）
     try:
-        await cache_set(_fund_detail_cache_key, data, ttl=86400)
+        await cache_set(_fund_detail_cache_key, data, ttl=300)
     except Exception:
         pass
 

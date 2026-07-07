@@ -503,7 +503,7 @@ class SentimentService:
                 if result["divergence_type"]:
                     all_clear = False
                     from app.utils.code_format import INDEX_REGISTRY
-                    index_name = INDEX_REGISTRY.get(to_display(code), {}).get("name", code)
+                    index_name = INDEX_REGISTRY.get(to_tushare(code), code)
                     alerts.append({
                         "index_code": to_display(code),
                         "index_name": index_name,
