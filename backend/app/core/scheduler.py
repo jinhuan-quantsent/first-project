@@ -3278,9 +3278,17 @@ async def _run_nav_update() -> None:
                         nav=nav_val,
                     ))
 
-                # 更新 user_portfolio.current_nav
+                # 更新 user_portfolio: current_nav + 级联更新 market_value/total_return/return_rate
                 await session.execute(
-                    text("UPDATE user_portfolio SET current_nav = :nav, updated_at = NOW() WHERE fund_code = :code"),
+                    text("""
+                        UPDATE user_portfolio
+                        SET current_nav = :nav,
+                            market_value = ROUND(holding_shares * :nav, 2),
+                            total_return = ROUND((:nav - cost_nav) * holding_shares, 2),
+                            return_rate = ROUND(((:nav - cost_nav) / NULLIF(cost_nav, 0)) * 100, 2),
+                            updated_at = NOW()
+                        WHERE fund_code = :code
+                    """),
                     {"nav": nav_val, "code": fund_code}
                 )
 
@@ -3316,15 +3324,14 @@ async def _run_nav_update() -> None:
                     yesterday_nav = float(rows[1][0])
                     if yesterday_nav <= 0:
                         continue
-                    daily_pct = (today_nav - yesterday_nav) / yesterday_nav
-                    # 获取市值并计算 daily_return
-                    mv_result = await session.execute(
-                        text("SELECT market_value FROM user_portfolio WHERE fund_code = :code"),
+                    # 获取 holding_shares 并计算 daily_return = shares * (today_nav - yesterday_nav)
+                    hs_result = await session.execute(
+                        text("SELECT holding_shares FROM user_portfolio WHERE fund_code = :code"),
                         {"code": fund_code},
                     )
-                    mv_row = mv_result.first()
-                    if mv_row and mv_row[0]:
-                        dr = round(float(mv_row[0]) * daily_pct, 2)
+                    hs_row = hs_result.first()
+                    if hs_row and hs_row[0]:
+                        dr = round(float(hs_row[0]) * (today_nav - yesterday_nav), 2)
                         await session.execute(
                             text("UPDATE user_portfolio SET daily_return = :dr WHERE fund_code = :code"),
                             {"dr": dr, "code": fund_code},
@@ -3453,22 +3460,31 @@ async def _run_nav_recheck() -> None:
                 )
                 if existing.scalar_one_or_none() is None:
                     session.add(FundNav(fund_code=fund_code, nav_date=nav_date, nav=nav_val))
+                # 级联更新: current_nav + market_value + total_return + return_rate
                 await session.execute(
-                    text("UPDATE user_portfolio SET current_nav = :nav WHERE fund_code = :code"),
+                    text("""
+                        UPDATE user_portfolio
+                        SET current_nav = :nav,
+                            market_value = ROUND(holding_shares * :nav, 2),
+                            total_return = ROUND((:nav - cost_nav) * holding_shares, 2),
+                            return_rate = ROUND(((:nav - cost_nav) / NULLIF(cost_nav, 0)) * 100, 2),
+                            updated_at = NOW()
+                        WHERE fund_code = :code
+                    """),
                     {"nav": nav_val, "code": fund_code}
                 )
-                mv_row = (await session.execute(
-                    text("SELECT market_value FROM user_portfolio WHERE fund_code = :code"),
+                hs_row = (await session.execute(
+                    text("SELECT holding_shares FROM user_portfolio WHERE fund_code = :code"),
                     {"code": fund_code}
                 )).first()
-                if mv_row and mv_row[0]:
+                if hs_row and hs_row[0]:
                     nav_rows = (await session.execute(
                         text("SELECT nav FROM fund_nav WHERE fund_code = :code ORDER BY nav_date DESC LIMIT 2"),
                         {"code": fund_code}
                     )).all()
                     if len(nav_rows) >= 2:
-                        daily_pct = (float(nav_rows[0][0]) - float(nav_rows[1][0])) / float(nav_rows[1][0])
-                        dr = round(float(mv_row[0]) * daily_pct, 2)
+                        shares = float(hs_row[0])
+                        dr = round(shares * (float(nav_rows[0][0]) - float(nav_rows[1][0])), 2)
                         await session.execute(
                             text("UPDATE user_portfolio SET daily_return = :dr WHERE fund_code = :code"),
                             {"dr": dr, "code": fund_code}
@@ -3590,10 +3606,18 @@ async def _run_nav_morning_fetch() -> None:
                         ))
                         new_count += 1
 
-                # 取最新净值更新 current_nav
+                # 取最新净值更新 current_nav + 级联 market_value/total_return/return_rate
                 nav_val = float(df.iloc[0]["unit_nav"])
                 await session.execute(
-                    text("UPDATE user_portfolio SET current_nav = :nav, updated_at = NOW() WHERE fund_code = :code"),
+                    text("""
+                        UPDATE user_portfolio
+                        SET current_nav = :nav,
+                            market_value = ROUND(holding_shares * :nav, 2),
+                            total_return = ROUND((:nav - cost_nav) * holding_shares, 2),
+                            return_rate = ROUND(((:nav - cost_nav) / NULLIF(cost_nav, 0)) * 100, 2),
+                            updated_at = NOW()
+                        WHERE fund_code = :code
+                    """),
                     {"nav": nav_val, "code": fund_code}
                 )
 
@@ -3625,14 +3649,14 @@ async def _run_nav_morning_fetch() -> None:
                     yesterday_nav = float(rows[1][0])
                     if yesterday_nav <= 0:
                         continue
-                    daily_pct = (today_nav - yesterday_nav) / yesterday_nav
-                    mv_result = await session.execute(
-                        text("SELECT market_value FROM user_portfolio WHERE fund_code = :code"),
+                    # 获取 holding_shares 并计算 daily_return = shares * (today_nav - yesterday_nav)
+                    hs_result = await session.execute(
+                        text("SELECT holding_shares FROM user_portfolio WHERE fund_code = :code"),
                         {"code": fund_code}
                     )
-                    mv_row = mv_result.first()
-                    if mv_row and mv_row[0]:
-                        dr = round(float(mv_row[0]) * daily_pct, 2)
+                    hs_row = hs_result.first()
+                    if hs_row and hs_row[0]:
+                        dr = round(float(hs_row[0]) * (today_nav - yesterday_nav), 2)
                         await session.execute(
                             text("UPDATE user_portfolio SET daily_return = :dr WHERE fund_code = :code"),
                             {"dr": dr, "code": fund_code}
