@@ -298,7 +298,7 @@ class Settings(BaseSettings):
     # ── DeepSeek API 配置 ──
     DEEPSEEK_API_KEY: str = ""                      # 为空则跳过AI建议
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
-    DEEPSEEK_MODEL: str = "deepseek-chat"
+    DEEPSEEK_MODEL: str = "deepseek-v4-flash"         # V4-flash (deepseek-chat已于2026-07-24弃用)
     DEEPSEEK_TIMEOUT: int = 10                       # 秒, 超时后重试1次
     DEEPSEEK_MAX_TOKENS: int = 2000
     DEEPSEEK_MAX_RETRIES: int = 1                   # 失败重试次数
