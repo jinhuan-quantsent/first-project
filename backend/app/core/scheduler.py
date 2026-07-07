@@ -3131,9 +3131,23 @@ def init_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    # 任务 5b：每日 08:00 早盘补拉（17:00+22:00 兜底窗口，基金公司延迟发布最终兜底）
+    scheduler.add_job(
+        _run_nav_morning_fetch,
+        trigger=CronTrigger(
+            day_of_week="mon-fri",
+            hour=8,
+            minute=0,
+            timezone="Asia/Shanghai",
+        ),
+        id="daily_nav_morning_fetch",
+        name="每日08:00早盘补拉",
+        replace_existing=True,
+    )
+
     scheduler.start()
     logger.info(
-        "[Scheduler] 已启动 — 14:30/14:45/15:00 实时估值 | 15:30 市场快照 | 15:45 板块快照 | 16:00 因子更新 | 16:05 基金净值(crontab) | 17:00 净值更新 | 17:05 决策快照 | 15:35 板块价格 | 15:50 指数情绪映射 | 16:15 融资融券 | 17:30 缓存刷新 | 22:00 净值复查 | 数据就绪检查 16:30/17:00/17:30/18:00 | 9:30-15:00 盘中预演(5min) | 15:40 预演元数据 | 周五17:35 弹性系数周更 | 15:50 对账校准 | 每周日 22:00 建议验证 | 14:50 策略验证持久化 | 14:52 AI建议 | 17:35 T+1回验"
+        "[Scheduler] 已启动 — 08:00 早盘补拉 | 14:30/14:45/15:00 实时估值 | 15:30 市场快照 | 15:45 板块快照 | 16:00 因子更新 | 16:05 基金净值(crontab) | 17:00 净值更新 | 17:05 决策快照 | 15:35 板块价格 | 15:50 指数情绪映射 | 16:15 融资融券 | 17:30 缓存刷新 | 22:00 净值复查 | 数据就绪检查 16:30/17:00/17:30/18:00 | 9:30-15:00 盘中预演(5min) | 15:40 预演元数据 | 周五17:35 弹性系数周更 | 15:50 对账校准 | 每周日 22:00 建议验证 | 14:50 策略验证持久化 | 14:52 AI建议 | 17:35 T+1回验"
     )
     return scheduler
 
@@ -3417,6 +3431,170 @@ async def _run_nav_recheck() -> None:
                 logger.warning("[Scheduler] %s 净值复查失败: %s", fund_code, e)
         await session.commit()
         logger.info("[Scheduler] 净值复查完成 — %d/%d", updated, len(fund_codes))
+
+
+# ============================================================
+# 任务 7b：每日 08:00 早盘补拉（基金公司延迟发布兜底）
+# 17:00 + 22:00 两轮仍可能缺净值，08:00 是最终兜底窗口。
+# ============================================================
+
+async def _run_nav_morning_fetch() -> None:
+    """
+    08:00 早盘补拉：检查所有持仓基金 fund_nav 最新日期，
+    若不满足则拉取最近3天补全，并更新 current_nav + daily_return。
+    与 _run_nav_update 的区别：只补缺失的基金，遍历所有返回行。
+    """
+    from sqlalchemy import select, text
+    from sqlalchemy.ext.asyncio import AsyncSession as AsyncSessionType
+    from app.core.database import get_async_engine
+    from app.models.fund_nav import FundNav
+    from app.models.user_portfolio import UserPortfolio
+    import tushare as ts
+    from datetime import date as date_type
+
+    today = date_type.today()
+    today_str = today.strftime("%Y%m%d")
+    lookback_str = (today - timedelta(days=3)).strftime("%Y%m%d")
+    logger.info("[Scheduler] 开始08:00早盘补拉 — %s (拉取 %s~%s)", today_str, lookback_str, today_str)
+
+    from app.core.config import settings
+    if not settings.TUSHARE_TOKEN:
+        logger.error("[Scheduler] TUSHARE_TOKEN 未配置，跳过早盘补拉")
+        return
+
+    try:
+        pro = ts.pro_api(settings.TUSHARE_TOKEN)
+    except Exception as e:
+        logger.error("[Scheduler] Tushare 初始化失败: %s", e)
+        return
+
+    engine = get_async_engine()
+    async with AsyncSessionType(engine) as session:
+        result = await session.execute(select(UserPortfolio.fund_code).distinct())
+        fund_codes = [row[0] for row in result.all()]
+
+        if not fund_codes:
+            logger.info("[Scheduler] 无持仓基金，跳过早盘补拉")
+            return
+
+        # 逐只检查最新 nav_date，决定是否需要补拉
+        to_fetch: list[str] = []
+        for fund_code in fund_codes:
+            latest_row = (await session.execute(
+                text("SELECT MAX(nav_date) FROM fund_nav WHERE fund_code = :code"),
+                {"code": fund_code}
+            )).scalar()
+            if latest_row is None or str(latest_row) < today_str:
+                to_fetch.append(fund_code)
+            # latest_row >= today_str 说明已有今天净值，跳过
+
+        if not to_fetch:
+            logger.info("[Scheduler] 早盘补拉：所有 %d 只基金净值已是最新，无需补拉", len(fund_codes))
+            return
+
+        logger.info("[Scheduler] 早盘补拉：%d/%d 只基金需要补拉", len(to_fetch), len(fund_codes))
+
+        updated = 0
+        failed = 0
+
+        for fund_code in to_fetch:
+            try:
+                from app.utils.code_format import to_tushare
+                ts_code = to_tushare(fund_code)
+                base_code = ts_code.split('.')[0]
+                primary_suffix = ts_code.split('.')[-1]
+                suffixes = [primary_suffix]
+                if primary_suffix == 'OF':
+                    suffixes.extend(['SH', 'SZ'])
+                elif primary_suffix in ('SH', 'SZ'):
+                    suffixes.extend(['OF', 'SZ' if primary_suffix == 'SH' else 'SH'])
+
+                df = None
+                for suf in suffixes:
+                    try_code = f"{base_code}.{suf}"
+                    try:
+                        df = pro.fund_nav(ts_code=try_code, start_date=lookback_str, end_date=today_str)
+                        if df is not None and not df.empty:
+                            break
+                    except Exception:
+                        continue
+
+                if df is None or df.empty:
+                    logger.warning("[Scheduler] 早盘补拉 %s：Tushare 仍无数据", fund_code)
+                    failed += 1
+                    continue
+
+                # 遍历所有返回行，补全缺失的日期
+                new_count = 0
+                for _, row in df.iterrows():
+                    nav_val = float(row["unit_nav"])
+                    nav_date = str(row["nav_date"])
+                    existing = await session.execute(
+                        select(FundNav).where(
+                            FundNav.fund_code == fund_code,
+                            FundNav.nav_date == nav_date
+                        )
+                    )
+                    if existing.scalar_one_or_none() is None:
+                        session.add(FundNav(
+                            fund_code=fund_code,
+                            nav_date=nav_date,
+                            nav=nav_val,
+                        ))
+                        new_count += 1
+
+                # 取最新净值更新 current_nav
+                nav_val = float(df.iloc[0]["unit_nav"])
+                await session.execute(
+                    text("UPDATE user_portfolio SET current_nav = :nav, updated_at = NOW() WHERE fund_code = :code"),
+                    {"nav": nav_val, "code": fund_code}
+                )
+
+                updated += 1
+                logger.info("[Scheduler] ✅ 早盘补拉 %s：新增 %d 条，最新净值 %.4f (%s)",
+                           fund_code, new_count, nav_val, df.iloc[0]["nav_date"])
+
+            except Exception as e:
+                failed += 1
+                logger.error("[Scheduler] ❌ 早盘补拉 %s 失败: %s", fund_code, e)
+
+        await session.commit()
+        logger.info("[Scheduler] 早盘补拉完成 — 成功 %d, 失败 %d, 跳过 %d",
+                    updated, failed, len(fund_codes) - len(to_fetch))
+
+        # 更新 daily_return
+        if updated > 0:
+            dr_updated = 0
+            for fund_code in to_fetch:
+                try:
+                    nav_result = await session.execute(
+                        text("SELECT nav FROM fund_nav WHERE fund_code = :code ORDER BY nav_date DESC LIMIT 2"),
+                        {"code": fund_code}
+                    )
+                    rows = nav_result.all()
+                    if len(rows) < 2:
+                        continue
+                    today_nav = float(rows[0][0])
+                    yesterday_nav = float(rows[1][0])
+                    if yesterday_nav <= 0:
+                        continue
+                    daily_pct = (today_nav - yesterday_nav) / yesterday_nav
+                    mv_result = await session.execute(
+                        text("SELECT market_value FROM user_portfolio WHERE fund_code = :code"),
+                        {"code": fund_code}
+                    )
+                    mv_row = mv_result.first()
+                    if mv_row and mv_row[0]:
+                        dr = round(float(mv_row[0]) * daily_pct, 2)
+                        await session.execute(
+                            text("UPDATE user_portfolio SET daily_return = :dr WHERE fund_code = :code"),
+                            {"dr": dr, "code": fund_code}
+                        )
+                        dr_updated += 1
+                except Exception as e:
+                    logger.warning("[Scheduler] 早盘补拉 %s daily_return 失败: %s", fund_code, e)
+            logger.info("[Scheduler] 早盘补拉 daily_return 更新 — %d 只", dr_updated)
+
 
 # ============================================================
 # 修复⑤: 启动时自检持仓基金 nav 深度，不足60天自动补365天
