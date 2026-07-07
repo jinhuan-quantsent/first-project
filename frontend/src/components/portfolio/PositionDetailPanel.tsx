@@ -30,6 +30,7 @@ import NavTrendChart from './NavTrendChart';
 import NavHistoryList from './NavHistoryList';
 import TrendGuardPanel from './TrendGuardPanel';
 import IntradayPreviewPanel from './intraday/IntradayPreviewPanel';
+import AIAnalysisPanel from './AIAnalysisPanel';
 import CollapsibleSection from './CollapsibleSection';
 import SafetyPadBar from './SafetyPadBar';
 import AdjustDialog from './AdjustDialog';
@@ -482,6 +483,9 @@ export default function PositionDetailPanel({ data, onCollapse, onExecute, onDel
 
         {/* ====== 盘中预演（交易时段内显示） ====== */}
         <IntradayPreviewPanel fundCode={data.fundCode} />
+
+        {/* ====== AI 分析面板（系统建议 vs DeepSeek + T+1回验） ====== */}
+        <AIAnalysisPanel fundCode={data.fundCode} />
 
         {/* ====== 趋势卫士解读 ====== */}
         {data.trendGuard ? (

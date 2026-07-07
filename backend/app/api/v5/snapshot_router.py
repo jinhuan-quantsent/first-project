@@ -757,3 +757,149 @@ async def get_validation_stats(
         },
         "message": "ok",
     }
+
+
+# ============================================================
+# 单基金当日 AI 分析查询 API
+# ============================================================
+
+@router.get("/validation-today/{fund_code}")
+async def get_validation_today(
+    fund_code: str,
+    db: AsyncSession = Depends(get_session),
+):
+    """
+    获取指定基金当天的策略验证分析数据（系统建议 + DeepSeek AI建议 + T+1回验）
+
+    时间线：
+    - 14:45 系统建议写入 system_advice_text
+    - 14:47 DeepSeek AI建议写入 deepseek_advice
+    - 次日17:35 T+1回验回填 validation_score 等字段
+
+    因此当天返回的 T+1回验字段为 NULL，前端展示"等待T+1回验"。
+    同时返回昨天的记录（含T+1回验结果）供前端展示最近的回验反馈。
+    """
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+
+    # 查今天的记录（系统建议 + DeepSeek建议）
+    today_stmt = select(StrategyValidationLog).where(
+        StrategyValidationLog.fund_code == fund_code,
+        StrategyValidationLog.trade_date == today,
+    ).order_by(StrategyValidationLog.id.desc()).limit(1)
+    today_result = await db.execute(today_stmt)
+    today_row = today_result.scalars().first()
+
+    # 查最近5天有T+1回验结果的记录（validation_score 非空）
+    backfill_stmt = select(StrategyValidationLog).where(
+        StrategyValidationLog.fund_code == fund_code,
+        StrategyValidationLog.trade_date < today,
+        StrategyValidationLog.validation_score.isnot(None),
+    ).order_by(StrategyValidationLog.trade_date.desc()).limit(3)
+    backfill_result = await db.execute(backfill_stmt)
+    backfill_rows = backfill_result.scalars().all()
+
+    if not today_row and not backfill_rows:
+        return {
+            "code": 0,
+            "data": None,
+            "message": "暂无验证数据(等待14:45系统建议生成)",
+        }
+
+    def _serialize_advice(row):
+        """序列化单条验证记录"""
+        return {
+            "trade_date": row.trade_date.isoformat() if row.trade_date else None,
+            "fund_code": row.fund_code,
+            "fund_name": row.fund_name,
+            "sector_name": row.sector_name,
+            # G2 昨日基线
+            "yesterday_signal": row.yesterday_signal,
+            "yesterday_confidence": row.yesterday_confidence,
+            "yesterday_score": float(row.yesterday_score) if row.yesterday_score is not None else None,
+            "yesterday_position": float(row.yesterday_position) if row.yesterday_position is not None else None,
+            "yesterday_nav": float(row.yesterday_nav) if row.yesterday_nav is not None else None,
+            "yesterday_track_type": row.yesterday_track_type,
+            # G3 盘中预演
+            "preview_score": float(row.preview_score) if row.preview_score is not None else None,
+            "preview_signal": row.preview_signal,
+            "preview_confidence": row.preview_confidence,
+            "gszzl": float(row.gszzl) if row.gszzl is not None else None,
+            "gszzl_source": row.gszzl_source,
+            "elasticity": float(row.elasticity) if row.elasticity is not None else None,
+            "score_delta": float(row.score_delta) if row.score_delta is not None else None,
+            "effective_stars": row.effective_stars,
+            "intraday_high_gszzl": float(row.intraday_high_gszzl) if row.intraday_high_gszzl is not None else None,
+            "intraday_low_gszzl": float(row.intraday_low_gszzl) if row.intraday_low_gszzl is not None else None,
+            "preview_summary": row.preview_summary,
+            "anomaly_flags": row.anomaly_flags,
+            # G3b 市场上下文
+            "market_index_chg_pct": float(row.market_index_chg_pct) if row.market_index_chg_pct is not None else None,
+            "sector_chg_pct": float(row.sector_chg_pct) if row.sector_chg_pct is not None else None,
+            # G4 当日决策
+            "actual_action": row.actual_action,
+            "actual_target_position": float(row.actual_target_position) if row.actual_target_position is not None else None,
+            "actual_nav": float(row.actual_nav) if row.actual_nav is not None else None,
+            "actual_signal": row.actual_signal,
+            # G4b 持仓盈亏
+            "cost_basis": float(row.cost_basis) if row.cost_basis is not None else None,
+            "unrealized_pnl_pct": float(row.unrealized_pnl_pct) if row.unrealized_pnl_pct is not None else None,
+            "holding_shares": float(row.holding_shares) if row.holding_shares is not None else None,
+            "holding_market_value": float(row.holding_market_value) if row.holding_market_value is not None else None,
+            # G5 Gate风控
+            "gate_1_triggered": row.gate_1_triggered,
+            "gate_2_triggered": row.gate_2_triggered,
+            "gate_e_triggered": row.gate_e_triggered,
+            "gate_1_distance_pct": float(row.gate_1_distance_pct) if row.gate_1_distance_pct is not None else None,
+            "gate_2_distance_pct": float(row.gate_2_distance_pct) if row.gate_2_distance_pct is not None else None,
+            "gate_e_distance_pct": float(row.gate_e_distance_pct) if row.gate_e_distance_pct is not None else None,
+            "overall_status": row.overall_status,
+            "frequency_block_direction": row.frequency_block_direction,
+            # G7 系统建议
+            "system_advice_text": row.system_advice_text,
+            "advice_reason": row.advice_reason,
+            # G8 AI建议
+            "deepseek_advice": row.deepseek_advice,
+            "deepseek_advice_action": row.deepseek_advice_action,
+            # G6/G7 T+1回验（当天为NULL，次日17:35回填）
+            "validation_score": float(row.validation_score) if row.validation_score is not None else None,
+            "signal_accuracy": float(row.signal_accuracy) if row.signal_accuracy is not None else None,
+            "advice_accuracy": float(row.advice_accuracy) if row.advice_accuracy is not None else None,
+            "gate_accuracy": float(row.gate_accuracy) if row.gate_accuracy is not None else None,
+            "deepseek_advice_correct": row.deepseek_advice_correct,
+            "actual_trend": row.actual_trend,
+            "actual_nav_change_pct": float(row.actual_nav_change_pct) if row.actual_nav_change_pct is not None else None,
+            "actual_score": float(row.actual_score) if row.actual_score is not None else None,
+            "actual_signal_level": row.actual_signal_level,
+        }
+
+    # 构建响应
+    today_data = _serialize_advice(today_row) if today_row else None
+
+    # 一致性分析：系统建议 vs DeepSeek 建议
+    consistency = None
+    if today_data and today_data.get("actual_action") and today_data.get("deepseek_advice_action"):
+        sys_action = today_data["actual_action"]
+        ai_action = today_data["deepseek_advice_action"]
+        if sys_action == ai_action:
+            consistency = "consistent"
+        elif (sys_action == "increase" and ai_action == "decrease") or \
+             (sys_action == "decrease" and ai_action == "increase"):
+            consistency = "conflict"
+        else:
+            consistency = "partial"
+
+    # 历史回验记录（最近3天有T+1结果的）
+    history_backfill = [_serialize_advice(r) for r in backfill_rows]
+
+    return {
+        "code": 0,
+        "data": {
+            "today": today_data,
+            "consistency": consistency,
+            "has_system_advice": bool(today_data and today_data.get("system_advice_text")),
+            "has_deepseek_advice": bool(today_data and today_data.get("deepseek_advice")),
+            "backfill_history": history_backfill,
+        },
+        "message": "ok",
+    }
