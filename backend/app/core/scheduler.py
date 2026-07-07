@@ -1347,8 +1347,22 @@ async def _run_intraday_preview_calculate() -> None:
                             logger.info("[Scheduler] [preview] %s 使用%d天前元数据(%s)", fund_code, offset, check_date)
                         break
                 if not meta:
-                    logger.warning("[Scheduler] [preview] %s 元数据缺失(近5天均无)，跳过", fund_code)
-                    continue
+                    logger.warning("[Scheduler] [preview] %s 元数据缺失(近5天均无)，尝试即时打包", fund_code)
+                    packed = await _pack_meta_for_fund(fund_code)
+                    if packed:
+                        # 打包成功，重新读取 meta
+                        meta = await cache_get(
+                            f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:meta:{fund_code}"
+                        )
+                        if meta:
+                            meta_date_used = today_str
+                            logger.info("[Scheduler] [preview] %s 即时打包成功，继续预演", fund_code)
+                        else:
+                            logger.warning("[Scheduler] [preview] %s 即时打包后仍无meta，跳过", fund_code)
+                            continue
+                    else:
+                        logger.warning("[Scheduler] [preview] %s 即时打包失败(nav不足?)，跳过", fund_code)
+                        continue
 
                 # 5c. 获取昨日收盘数据
                 snap = yesterday_snapshots.get(fund_code)
@@ -1531,32 +1545,122 @@ async def _run_intraday_preview_calculate() -> None:
 
     logger.info("[Scheduler] 盘中预演计算完成 -- %d 成功", success)
 
+# ============================================================
+# 辅助函数：为单个基金打包预演元数据（meta_pack 定时任务 & preview_calculate 即时补打共用）
+# ============================================================
+async def _pack_meta_for_fund(fund_code: str) -> bool:
+    """
+    为单个基金打包预演元数据 -- 可被 _run_intraday_meta_pack() 定时任务和
+    _run_intraday_preview_calculate() 即时补打共同调用。
+
+    返回 True 表示打包成功，False 表示失败（nav 数据不足或其他异常）。
+    """
+    from app.core.database import get_async_engine
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy import select
+    from app.models.position_execution import PositionExecution
+    from app.models.fund_nav import FundNav
+    from app.engine.trend_guard import _calculate_ma20_trend, _calculate_macd
+    from app.engine.trend_guard import _get_sector_track, _get_fund_sector_code
+    from app.core.redis_client import cache_get, cache_set
+
+    today = date.today()
+    today_str = today.isoformat()
+    engine = get_async_engine()
+
+    try:
+        async with AsyncSession(engine) as session:
+            # 1. MA20价格 -- 从 fund_nav 表获取最近60条
+            nav_stmt = select(FundNav.nav, FundNav.nav_date).where(
+                FundNav.fund_code == fund_code
+            ).order_by(FundNav.nav_date.desc()).limit(60)
+            nav_result = await session.execute(nav_stmt)
+            nav_rows = nav_result.all()
+
+            if len(nav_rows) < 20:
+                logger.warning("[Scheduler] [meta] %s nav数据不足(%d<20)，跳过MA20", fund_code, len(nav_rows))
+                return False
+
+            # 重组为 trend_guard 需要的 nav_history 格式
+            nav_history = [{"date": str(r[1]), "nav": float(r[0])} for r in reversed(nav_rows)]
+
+            # 纯计算函数，可直接在async环境调用
+            ma20_trend = _calculate_ma20_trend(nav_history) if len(nav_history) >= 20 else "unknown"
+
+            # 计算MA20价格（最近20条的均值）
+            prices = [float(r[0]) for r in reversed(nav_rows)]
+            ma20_price = sum(prices[-20:]) / 20 if len(prices) >= 20 else None
+
+            # 2. MACD状态 -- 纯计算函数
+            macd_result = _calculate_macd(nav_history) if len(nav_history) >= 35 else None
+
+            # 3. 轨道类型 -- 同步函数，需asyncio.to_thread包装（内部用同步pymysql）
+            sector_track = await asyncio.to_thread(_get_sector_track, fund_code)
+
+            # 4. 板块代码 -- 同步函数，需asyncio.to_thread包装
+            sector_code = await asyncio.to_thread(_get_fund_sector_code, fund_code)
+
+            # 5. 冷却期 -- 从 PositionExecution 查询所有用户的最近减仓日期
+            cooldown_stmt = select(PositionExecution.execute_date).where(
+                PositionExecution.fund_code == fund_code,
+                PositionExecution.operation_type.in_(["sell", "decrease"])
+            ).order_by(PositionExecution.execute_date.desc()).limit(1)
+            cooldown_result = await session.execute(cooldown_stmt)
+            last_execute_date = cooldown_result.scalar_one_or_none()
+            cooldown_days = (today - last_execute_date).days if last_execute_date else 999
+
+            # 6. regime -- 从沪深300缓存获取（15:30快照已写入）
+            regime_cache = await cache_get("fsa:sentiment:SH000300")
+            regime = regime_cache.get("regime", "sideways") if isinstance(regime_cache, dict) else "sideways"
+
+            # 7. 组合打包
+            meta = {
+                "fund_code": fund_code,
+                "date": today_str,
+                "ma20_price": round(ma20_price, 4) if ma20_price else None,
+                "ma20_trend": ma20_trend,
+                "macd": macd_result,
+                "sector_track": sector_track,
+                "sector_code": sector_code,
+                "cooldown_days": cooldown_days,
+                "cooldown_last_date": str(last_execute_date) if last_execute_date else None,
+                "regime": regime,
+                "matrix": settings.V5_POSITION_MATRIX,
+                "conf_adj": {str(k): v for k, v in settings.V5_CONFIDENCE_POSITION_ADJ.items()},
+                "cost_threshold": settings.V5_COST_THRESHOLD_PCT,
+                "freq_days": settings.V5_FREQUENCY_LIMIT_DAYS,
+                "signal_boundaries": list(settings.V5_SIGNAL_BOUNDARIES),
+                "nav_history_length": len(nav_history),
+                "is_data_sufficient": len(nav_history) >= 60,
+                "packed_at": datetime.now().isoformat(),
+            }
+
+            cache_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:meta:{fund_code}"
+            await cache_set(cache_key, meta, ttl=432000)  # TTL=5天，覆盖周末+短假期
+
+            logger.info("[Scheduler] [meta] %s OK (ma20=%s, track=%s, regime=%s, cooldown=%dd)",
+                       fund_code, ma20_trend, sector_track, regime, cooldown_days)
+            return True
+    except Exception as e:
+        logger.error("[Scheduler] [meta] %s FAIL: %s", fund_code, e)
+        return False
+
+
 # 任务 14：盘中预演元数据打包（15:40 — 收盘后，在快照15:30+板块价格15:35之后）
 # ============================================================
 async def _run_intraday_meta_pack() -> None:
     """
     盘中预演元数据打包 -- 收盘后15:40执行
 
-    将 MA20价格/MACD状态/轨道类型/冷却期/regime/矩阵/板块黑名单
-    打包写入 Redis intraday_preview:v1:meta:{date}:{fund_code}
-
-    数据来源：
-    - MA20价格: fund_nav 计算（需>=60条，使用 trend_guard._calculate_ma20_trend）
-    - MACD状态: trend_guard._calculate_macd 纯计算函数
-    - 轨道类型: trend_guard._get_sector_track() -- 同步函数，需asyncio.to_thread包装
-    - 冷却期: PositionExecution DB表查询
-    - regime: 沪深300 fsa:sentiment 缓存
-    - 矩阵/置信度映射: config.py 已有
+    遍历所有持仓基金，调用 _pack_meta_for_fund() 逐个打包。
+    新加入的基金无需等待此任务 -- 预演计算检测到 meta 缺失时会自动调用
+    _pack_meta_for_fund() 即时补打。
     """
     from app.core.database import get_async_engine
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy import select
     from app.models.user_portfolio import UserPortfolio
-    from app.models.position_execution import PositionExecution
-    from app.models.fund_nav import FundNav
-    from app.engine.trend_guard import _calculate_ma20_trend, _calculate_macd
-    from app.engine.trend_guard import _get_sector_track, _get_fund_sector_code
-    from app.core.redis_client import cache_get, cache_set
+    from app.core.redis_client import cache_get
 
     if not settings.ENABLE_INTRADAY_PREVIEW:
         logger.info("[Scheduler] 盘中预演全局关闭，跳过元数据打包")
@@ -1568,8 +1672,6 @@ async def _run_intraday_meta_pack() -> None:
         logger.info("[Scheduler] Redis全局开关关闭，跳过元数据打包")
         return
 
-    today = date.today()
-    today_str = today.isoformat()
     engine = get_async_engine()
 
     # 获取所有持仓基金代码
@@ -1583,81 +1685,9 @@ async def _run_intraday_meta_pack() -> None:
 
     success = 0
     for fund_code in fund_codes:
-        try:
-            async with AsyncSession(engine) as session:
-                # 1. MA20价格 -- 从 fund_nav 表获取最近60条
-                nav_stmt = select(FundNav.nav, FundNav.nav_date).where(
-                    FundNav.fund_code == fund_code
-                ).order_by(FundNav.nav_date.desc()).limit(60)
-                nav_result = await session.execute(nav_stmt)
-                nav_rows = nav_result.all()
-
-                if len(nav_rows) < 20:
-                    logger.warning("[Scheduler] %s nav数据不足(%d<20)，跳过MA20", fund_code, len(nav_rows))
-                    continue
-
-                # 重组为 trend_guard 需要的 nav_history 格式
-                nav_history = [{"date": str(r[1]), "nav": float(r[0])} for r in reversed(nav_rows)]
-
-                # 纯计算函数，可直接在async环境调用
-                ma20_trend = _calculate_ma20_trend(nav_history) if len(nav_history) >= 20 else "unknown"
-
-                # 计算MA20价格（最近20条的均值）
-                prices = [float(r[0]) for r in reversed(nav_rows)]
-                ma20_price = sum(prices[-20:]) / 20 if len(prices) >= 20 else None
-
-                # 2. MACD状态 -- 纯计算函数
-                macd_result = _calculate_macd(nav_history) if len(nav_history) >= 35 else None
-
-                # 3. 轨道类型 -- 同步函数，需asyncio.to_thread包装（内部用同步pymysql）
-                sector_track = await asyncio.to_thread(_get_sector_track, fund_code)
-
-                # 4. 板块代码 -- 同步函数，需asyncio.to_thread包装
-                sector_code = await asyncio.to_thread(_get_fund_sector_code, fund_code)
-
-                # 5. 冷却期 -- 从 PositionExecution 查询所有用户的最近减仓日期
-                cooldown_stmt = select(PositionExecution.execute_date).where(
-                    PositionExecution.fund_code == fund_code,
-                    PositionExecution.operation_type.in_(["sell", "decrease"])
-                ).order_by(PositionExecution.execute_date.desc()).limit(1)
-                cooldown_result = await session.execute(cooldown_stmt)
-                last_execute_date = cooldown_result.scalar_one_or_none()
-                cooldown_days = (today - last_execute_date).days if last_execute_date else 999
-
-                # 6. regime -- 从沪深300缓存获取（15:30快照已写入）
-                regime_cache = await cache_get("fsa:sentiment:SH000300")
-                regime = regime_cache.get("regime", "sideways") if isinstance(regime_cache, dict) else "sideways"
-
-                # 7. 组合打包
-                meta = {
-                    "fund_code": fund_code,
-                    "date": today_str,
-                    "ma20_price": round(ma20_price, 4) if ma20_price else None,
-                    "ma20_trend": ma20_trend,
-                    "macd": macd_result,
-                    "sector_track": sector_track,
-                    "sector_code": sector_code,
-                    "cooldown_days": cooldown_days,
-                    "cooldown_last_date": str(last_execute_date) if last_execute_date else None,
-                    "regime": regime,
-                    "matrix": settings.V5_POSITION_MATRIX,
-                    "conf_adj": {str(k): v for k, v in settings.V5_CONFIDENCE_POSITION_ADJ.items()},
-                    "cost_threshold": settings.V5_COST_THRESHOLD_PCT,
-                    "freq_days": settings.V5_FREQUENCY_LIMIT_DAYS,
-                    "signal_boundaries": list(settings.V5_SIGNAL_BOUNDARIES),
-                    "nav_history_length": len(nav_history),
-                    "is_data_sufficient": len(nav_history) >= 60,
-                    "packed_at": datetime.now().isoformat(),
-                }
-
-                cache_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:meta:{fund_code}"
-                await cache_set(cache_key, meta, ttl=432000)  # TTL=5天，覆盖周末+短假期
-
-                success += 1
-                logger.info("[Scheduler] [meta] %s OK (ma20=%s, track=%s, regime=%s, cooldown=%dd)",
-                           fund_code, ma20_trend, sector_track, regime, cooldown_days)
-        except Exception as e:
-            logger.error("[Scheduler] [meta] %s FAIL: %s", fund_code, e)
+        ok = await _pack_meta_for_fund(fund_code)
+        if ok:
+            success += 1
 
     logger.info("[Scheduler] 元数据打包完成 -- %d/%d 成功", success, len(fund_codes))
 
