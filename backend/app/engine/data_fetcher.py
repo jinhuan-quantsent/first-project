@@ -48,35 +48,49 @@ SW_INDUSTRY_MAPPING = {
 def fetch_index_hist(index_code: str, days: int = 60) -> List[Dict]:
     """
     获取指数历史数据（支持沪深300、上证指数等）
-    使用AKShare指数历史数据接口
-    
+    使用AKShare stock_zh_index_hist_csindex 接口
+
     Args:
-        index_code: 指数代码，例如 "000300"（沪深300）、"000001"（上证指数）
+        index_code: 指数代码，例如 "000300.SH"（沪深300）、"000001.SH"（上证指数）
         days: 获取最近N天的数据
-    
+
     Returns:
         历史数据列表，每个元素包含 date, close, change_pct
     """
     try:
         import akshare as ak
-        
-        # 获取指数历史数据
-        df = ak.index_hist_cg(symbol=index_code, period="day")
-        
+        from datetime import date as date_type, timedelta
+
+        # 剥离交易所后缀（000300.SH → 000300）
+        bare_code = index_code.split(".")[0]
+
+        end_date = date_type.today().strftime("%Y%m%d")
+        start_date = (date_type.today() - timedelta(days=days + 30)).strftime("%Y%m%d")
+
+        df = ak.stock_zh_index_hist_csindex(
+            symbol=bare_code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
         if df is None or df.empty:
             logger.warning(f"AKShare获取指数 {index_code} 历史数据失败")
             return []
-        
-        # 转换为标准格式
+
+        # 转换为标准格式（stock_zh_index_hist_csindex 返回 日期/收盘/涨跌幅 列）
         data = []
         for _, row in df.iterrows():
+            raw_date = row["日期"]
+            if hasattr(raw_date, "strftime"):
+                date_str = raw_date.strftime("%Y-%m-%d")
+            else:
+                date_str = str(raw_date)[:10]
             data.append({
-                "date": row["日期"].strftime("%Y-%m-%d"),
+                "date": date_str,
                 "close": float(row["收盘"]),
-                "change_pct": float(row["涨跌幅"]) if "涨跌幅" in row else 0.0
+                "change_pct": float(row["涨跌幅"]) if "涨跌幅" in df.columns else 0.0,
             })
-        
-        # 返回最近N天的数据
+
         return data[-days:]
     except Exception as e:
         logger.error(f"获取指数 {index_code} 历史数据失败: {e}")
