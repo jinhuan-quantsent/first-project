@@ -211,7 +211,7 @@ async def get_fund_realtime(code: str) -> Optional[dict]:
             text = resp.text
 
         # 解析JSONP: jsonpgz({...});
-        match = re.search(r'jsonpgz\((.+?)\);?', text, re.DOTALL)
+        match = re.search(r'jsonpgz\((.+)\);?', text, re.DOTALL)
         if not match:
             return None
 
@@ -280,7 +280,7 @@ async def get_fund_realtime_nav(code: str) -> Optional[float]:
             resp.raise_for_status()
             text = resp.text
 
-        match = re.search(r'jsonpgz\((.+?)\);?', text, re.DOTALL)
+        match = re.search(r'jsonpgz\((.+)\);?', text, re.DOTALL)
         if match:
             data = json.loads(match.group(1))
             raw_gszzl = data.get("gszzl", None)
@@ -313,7 +313,7 @@ async def get_fund_realtime_nav(code: str) -> Optional[float]:
 
             # Mobile API返回JSONP或JSON
             # 尝试JSONP解析
-            mobile_match = re.search(r'jsonpgz\((.+?)\);?', text, re.DOTALL)
+            mobile_match = re.search(r'jsonpgz\((.+)\);?', text, re.DOTALL)
             if mobile_match:
                 mobile_data = json.loads(mobile_match.group(1))
             else:

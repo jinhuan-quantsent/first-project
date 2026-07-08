@@ -1084,16 +1084,18 @@ def _build_system_advice_text(
     else:
         parts.append("【历史】暂无历史回验数据。")
 
-    # 7. 【结论】
+    # 7. 【结论】— 结论方向严格与实际 action 一致
+    # 修复: 原 stop_loss/warning 分支用固定文案覆盖方向，可能与 engine 的 action 矛盾
+    #       (如 1星基金 target=0%/action=hold，却曾因信号等级显示"加仓")。
+    #       现统一以 action 决定方向词，风控状态仅作为补充提示，杜绝方向不一致。
     overall_status = preview_output.get("overall_status", "normal")
     action = preview_output.get("action", "hold")
+    direction_map = {"increase": "建议加仓", "decrease": "建议减仓", "hold": "建议持有"}
+    conclusion = direction_map.get(action, "建议持有")
     if overall_status == "stop_loss":
-        conclusion = "建议执行减仓，尾盘10分钟内完成操作"
+        conclusion += "，尾盘10分钟内完成止损操作"
     elif overall_status == "warning":
-        conclusion = "建议持有，维持仓位观望，关注尾盘资金流向"
-    else:
-        action_map = {"increase": "建议加仓", "decrease": "建议减仓", "hold": "建议持有，维持仓位"}
-        conclusion = action_map.get(action, "建议持有，维持仓位")
+        conclusion += "，维持仓位观望，关注尾盘资金流向"
     parts.append(f"【结论】{conclusion}。")
 
     return "\n".join(parts)
@@ -2011,7 +2013,7 @@ async def _run_validation_persist() -> None:
     from app.models.user_portfolio import UserPortfolio
     from app.models.daily_signal_snapshot import DailySignalSnapshot
     from app.models.strategy_validation_log import StrategyValidationLog
-    from app.models.sector_heatmap_cache import SectorHeatmapCache
+    from app.models.sector_sentiment import SectorSentiment
     from app.engine.position_v5 import PositionEngineV5
     from app.utils.eastmoney import get_fund_realtime_nav
     from app.core.redis_client import cache_get, cache_set
@@ -2026,14 +2028,37 @@ async def _run_validation_persist() -> None:
 
     logger.info("[Scheduler] [validation-A] 开始预演持久化 -- %s", today_str)
 
-    # 1. 获取大盘涨跌幅（沪深300）
+    # 1. 获取大盘涨跌幅（沪深300）— 盘中实时
+    # 修复: 原代码走 data_source.get_all_index_data() 且用 .get("change_pct", 0) 默认0，
+    #       盘中14:45今天日线未生成时 change_pct 缺失 → 被伪装成平盘(0%)。
+    #       改用混合策略: 优先东财 push2 实时(盘中当日涨跌幅, f170字段)；
+    #       被限流/失败则降级到项目既有 get_index_data("SH000300")(与 market/snapshot
+    #       同源, 返回真实涨跌幅, 非0)。任何缺失一律返回 None，绝不填 0。
     market_index_chg_pct = None
+    # 优先: 东财 push2 实时行情(stock/get, secid=1.000300, f170=涨跌幅%)
     try:
-        index_data = await data_source.get_all_index_data()
-        hs300 = index_data.get("SH000300") or {}
-        market_index_chg_pct = float(hs300.get("change_pct", 0))
-    except Exception as e:
-        logger.warning("[Scheduler] [validation-A] 获取大盘数据失败: %s", e)
+        import httpx
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            r = await client.get(
+                "https://push2.eastmoney.com/api/qt/stock/get",
+                params={"secid": "1.000300", "fields": "f170", "fltt": "2", "invt": "2"},
+            )
+            r.raise_for_status()
+            chg = (r.json().get("data") or {}).get("f170")
+            if chg is not None:
+                market_index_chg_pct = float(chg)
+    except Exception:
+        pass  # 限流/失败 → 降级到下方项目既有源
+    # 兜底: 项目既有指数源(get_index_data, 与 market/snapshot 同源, 返回真实涨跌幅)
+    if market_index_chg_pct is None:
+        try:
+            index_data = await data_source.get_index_data("SH000300")
+            chg = (index_data or {}).get("change_pct")
+            if chg is not None:
+                market_index_chg_pct = float(chg)
+        except Exception as e:
+            logger.warning("[validation-A] 获取沪深300涨跌幅失败: %s", e)
+    # 最终未取到则保持 None（0 会伪装成平盘，必须避免）
 
     # 2. 获取所有持仓
     async with AsyncSession(engine) as session:
@@ -2138,7 +2163,11 @@ async def _run_validation_persist() -> None:
                     yesterday_score = float(snap.composite_score or 50.0)
                     yesterday_signal = snap.signal_level or "B"
                     yesterday_confidence = snap.confidence_stars or 3
-                    yesterday_position = float(snap.target_position_pct or 0)
+                    # Fix E: 昨日实际持仓近似。DailySignalSnapshot 仅存 target_position_pct
+                    # (建议目标仓位)，无"实际持仓"字段；UserPortfolio 也无逐日持仓历史。
+                    # 故用今日实际持仓(market_value/total_assets，盘中14:45已反映昨日
+                    # 建议执行后的仓位)近似昨日实际持仓，避免把"建议目标0%"误当真实仓位。
+                    yesterday_position = (finfo["market_value"] / total_assets) if total_assets > 0 else 0.0
                     yesterday_nav = float(snap.nav) if snap.nav else None
                     yesterday_track_type = snap.track_type or ""
                 else:
@@ -2241,23 +2270,55 @@ async def _run_validation_persist() -> None:
                     intraday_low_gszzl = float(hl_data["low"]) if hl_data.get("low") is not None else None
 
                 # 5j. 板块涨跌幅
+                # 修复: 原查 SectorHeatmapCache 表 → 该表从不写入，永远返回 None。
+                # 改为从 Redis v5:sector:sentiment(板块情绪缓存，盘中实时)读取；
+                # sector_return 已是百分比数值(如 1.5 表示 +1.5%)，绝不乘100。
+                # 周一缓存过期兜底: 查 SectorSentiment 表最新一行补全 sector_name。
+                # 注意: SectorSentiment 表无 sector_code/sector_return 字段(仅有
+                #       sector_name + calc_date + 情绪评分)，无法按代码关联，也不能恢复
+                #       sector_chg_pct；且 meta 未携带 sector_name，故兜底仅能尽力补全
+                #       sector_name，sector_chg_pct 保持 None(避免伪造 0% 平盘)。
                 sector_code = meta.get("sector_code") or ""
-                sector_chg_pct = None
                 sector_name = ""
+                sector_chg_pct = None
                 if sector_code:
                     try:
-                        async with AsyncSession(engine) as session:
-                            sec_stmt = select(SectorHeatmapCache).where(
-                                SectorHeatmapCache.sector_code == sector_code,
-                                SectorHeatmapCache.cache_date <= today,
-                            ).order_by(SectorHeatmapCache.cache_date.desc()).limit(1)
-                            sec_result = await session.execute(sec_stmt)
-                            sec_row = sec_result.scalar_one_or_none()
-                            if sec_row:
-                                sector_chg_pct = float(sec_row.change_pct) if sec_row.change_pct else None
-                                sector_name = sec_row.sector_name or ""
+                        sector_cache = await cache_get("v5:sector:sentiment")
+                        if sector_cache:
+                            sectors_list = (
+                                sector_cache.get("data", {}).get("sectors", [])
+                                if isinstance(sector_cache, dict)
+                                else []
+                            )
+                            for sec in sectors_list:
+                                if str(sec.get("sector_code", "")) == str(sector_code):
+                                    sector_name = sec.get("sector_name", "") or ""
+                                    ret = sec.get("sector_return")
+                                    if ret is not None:
+                                        # sector_return 已是百分比数值，不乘100
+                                        sector_chg_pct = float(ret)
+                                    break
                     except Exception:
                         pass
+                    # 兜底: Redis 为空(如周一缓存过期)时，用 sector_name 查 SectorSentiment 表
+                    if not sector_name:
+                        sname = meta.get("sector_name") or ""
+                        if sname:
+                            try:
+                                async with AsyncSession(engine) as session:
+                                    ss_stmt = (
+                                        select(SectorSentiment)
+                                        .where(SectorSentiment.sector_name == sname)
+                                        .order_by(SectorSentiment.calc_date.desc())
+                                        .limit(1)
+                                    )
+                                    ss_res = await session.execute(ss_stmt)
+                                    ss_row = ss_res.scalar_one_or_none()
+                                    if ss_row:
+                                        sector_name = ss_row.sector_name or ""
+                                        # 表无 sector_return 字段，sector_chg_pct 保持 None
+                            except Exception:
+                                pass
 
                 # 5k. 持仓盈亏
                 cost_basis = finfo["cost_nav"] if finfo["cost_nav"] > 0 else None
