@@ -1088,11 +1088,16 @@ def _build_system_advice_text(
     # 修复: 原 stop_loss/warning 分支用固定文案覆盖方向，可能与 engine 的 action 矛盾
     #       (如 1星基金 target=0%/action=hold，却曾因信号等级显示"加仓")。
     #       现统一以 action 决定方向词，风控状态仅作为补充提示，杜绝方向不一致。
+    # 修复②: 当前仓位为空仓(≈0%)时，不再输出"加仓/减仓/止损"等无效操作建议
+    #       (如 012538 空仓却因 gate_2 止损触发显示"建议减仓"，对用户无意义)。
     overall_status = preview_output.get("overall_status", "normal")
     action = preview_output.get("action", "hold")
+    current_position_pct = preview_output.get("current_position_pct", 0) or 0
     direction_map = {"increase": "建议加仓", "decrease": "建议减仓", "hold": "建议持有"}
     conclusion = direction_map.get(action, "建议持有")
-    if overall_status == "stop_loss":
+    if current_position_pct < 0.001:
+        conclusion = "建议持有，当前空仓无需操作"
+    elif overall_status == "stop_loss":
         conclusion += "，尾盘10分钟内完成止损操作"
     elif overall_status == "warning":
         conclusion += "，维持仓位观望，关注尾盘资金流向"
