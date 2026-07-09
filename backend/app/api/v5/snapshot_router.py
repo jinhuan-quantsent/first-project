@@ -20,6 +20,7 @@ from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
+from app.core.auth import get_authenticated_user
 from app.models.daily_signal_snapshot import DailySignalSnapshot
 from app.models.strategy_validation_log import StrategyValidationLog
 from app.models.user_portfolio import UserPortfolio
@@ -533,6 +534,13 @@ def _format_validation_value(en: str, val) -> str:
     return str(val) if val is not None else ""
 
 
+def _csv_escape(value: str) -> str:
+    """CSV 公式注入防护：转义以 = + - @ 开头的单元格"""
+    if value and value[0] in ('=', '+', '-', '@'):
+        return "'" + value
+    return value
+
+
 @router.get("/validation-download")
 async def download_validation_csv(
     start_date: Optional[str] = Query(None, description="起始日期 YYYY-MM-DD"),
@@ -540,6 +548,7 @@ async def download_validation_csv(
     fund_code: Optional[str] = Query(None, description="基金代码"),
     sector_code: Optional[str] = Query(None, description="板块代码"),
     db: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_authenticated_user),
 ):
     """导出策略验证分析表为CSV（中英双语表头，59列）"""
     if start_date:
@@ -576,7 +585,7 @@ async def download_validation_csv(
     writer.writerow([col[1] for col in VALIDATION_CSV_COLUMNS])
 
     for r in rows:
-        row_data = [_format_validation_value(en, getattr(r, en, None)) for cn, en in VALIDATION_CSV_COLUMNS]
+        row_data = [_csv_escape(_format_validation_value(en, getattr(r, en, None))) for cn, en in VALIDATION_CSV_COLUMNS]
         writer.writerow(row_data)
 
     output.seek(0)
@@ -601,6 +610,7 @@ async def get_validation_history(
     sector_code: Optional[str] = Query(None, description="板块代码"),
     limit: int = Query(100, description="返回条数上限"),
     db: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_authenticated_user),
 ):
     """查询策略验证分析历史记录"""
     if start_date:
@@ -677,6 +687,7 @@ async def get_validation_stats(
     days: int = Query(30, description="统计天数"),
     fund_code: Optional[str] = Query(None, description="基金代码"),
     db: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_authenticated_user),
 ):
     """策略验证统计分析"""
     sd = date.today() - timedelta(days=days)
@@ -826,6 +837,7 @@ async def _compute_validation_amounts(db: AsyncSession, row, today: date) -> dic
 async def get_validation_today(
     fund_code: str,
     db: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_authenticated_user),
 ):
     """
     获取指定基金当天的策略验证分析数据（系统建议 + DeepSeek AI建议 + T+1回验）

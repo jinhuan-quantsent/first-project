@@ -89,13 +89,14 @@ export default function Login() {
         </div>
         <button
           type="button"
-          onClick={() => {
-            auth.guestLogin();
+          onClick={async () => {
+            await auth.guestLogin();
             navigate('/');
           }}
-          className="mt-3 w-full py-2.5 border border-gray-300 text-gray-600 hover:bg-gray-50 font-medium rounded-lg transition-colors"
+          disabled={auth.authLoading}
+          className="mt-3 w-full py-2.5 border border-gray-300 text-gray-600 hover:bg-gray-50 font-medium rounded-lg transition-colors disabled:opacity-50"
         >
-          以游客身份访问
+          {auth.authLoading ? '加载中...' : '以游客身份访问'}
         </button>
 
         <p className="mt-6 text-center text-sm text-gray-500">

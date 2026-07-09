@@ -11,7 +11,7 @@ const client = axios.create({
 
 const TOKEN_KEY = 'fsa_jwt_token';
 
-// 请求拦截器：注入 JWT（游客 token 不注入，让后端 AUTH_DISABLED 自动降级）
+// 请求拦截器：注入 JWT
 client.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem(TOKEN_KEY);

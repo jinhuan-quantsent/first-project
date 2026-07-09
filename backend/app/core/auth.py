@@ -105,6 +105,37 @@ async def get_current_user(
     return user_id
 
 
+async def get_authenticated_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> str:
+    """
+    强制认证依赖：始终要求有效 JWT，不受 AUTH_DISABLED 影响。
+    用于保护敏感数据端点（如策略验证数据导出）。
+    """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "code": 40101,
+                "data": None,
+                "message": "未提供认证凭据",
+            },
+        )
+
+    payload = decode_access_token(credentials.credentials)
+    user_id: str = payload.get("sub", "")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "code": 40103,
+                "data": None,
+                "message": "Token 中无有效用户标识",
+            },
+        )
+    return user_id
+
+
 async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> Optional[str]:

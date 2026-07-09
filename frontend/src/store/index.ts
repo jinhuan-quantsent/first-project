@@ -24,7 +24,7 @@ interface AuthState {
 
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string) => Promise<void>;
-  guestLogin: () => void;
+  guestLogin: () => Promise<void>;
   logout: () => void;
   restoreSession: () => void;
   clearError: () => void;
@@ -97,20 +97,38 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     },
 
-    guestLogin: () => {
-      const guestUser = { user_id: 'guest', email: 'guest@fundsent.top', role: 'guest' } as User;
-      const guestToken = 'guest-token';
-      set({
-        auth: {
-          user: guestUser,
-          token: guestToken,
-          isAuthenticated: true,
-          authLoading: false,
-          authError: null,
-        },
-      });
-      localStorage.setItem(TOKEN_KEY, guestToken);
-      localStorage.setItem(USER_KEY, JSON.stringify(guestUser));
+    guestLogin: async () => {
+      set({ auth: { ...get().auth, authLoading: true, authError: null } });
+      try {
+        // 调用后端 login 端点获取真实 JWT（AUTH_DISABLED 模式下后端签发 demo_user token）
+        const data: AuthResponse = await authLogin('guest@fundsent.top', 'guest-pass');
+        set({
+          auth: {
+            user: data.user,
+            token: data.access_token,
+            isAuthenticated: true,
+            authLoading: false,
+            authError: null,
+          },
+        });
+        localStorage.setItem(TOKEN_KEY, data.access_token);
+        localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+      } catch (err: any) {
+        // 如果 login 端点不可用，降级为旧的 guest-token 模式
+        const guestUser = { user_id: 'guest', email: 'guest@fundsent.top', role: 'guest' } as User;
+        const guestToken = 'guest-token';
+        set({
+          auth: {
+            user: guestUser,
+            token: guestToken,
+            isAuthenticated: true,
+            authLoading: false,
+            authError: null,
+          },
+        });
+        localStorage.setItem(TOKEN_KEY, guestToken);
+        localStorage.setItem(USER_KEY, JSON.stringify(guestUser));
+      }
     },
 
     logout: () => {
@@ -131,6 +149,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       const token = localStorage.getItem(TOKEN_KEY);
       const userStr = localStorage.getItem(USER_KEY);
       if (token && userStr) {
+        // 检测旧的 guest-token（无 JWT），清除以触发重新获取真实 JWT
+        if (token === 'guest-token') {
+          localStorage.removeItem(TOKEN_KEY);
+          localStorage.removeItem(USER_KEY);
+          return;
+        }
         try {
           const user = JSON.parse(userStr) as User;
           set({

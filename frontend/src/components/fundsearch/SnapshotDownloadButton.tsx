@@ -66,7 +66,13 @@ export default function SnapshotDownloadButton() {
         filename = `决策快照_${startDate}_${endDate}.csv`;
       }
 
-      const resp = await fetch(url);
+      const token = localStorage.getItem('fsa_jwt_token');
+      const headers: Record<string, string> = {};
+      if (token && token !== 'guest-token') {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const resp = await fetch(url, { headers });
       if (!resp.ok) throw new Error(`下载失败: HTTP ${resp.status}`);
 
       const blob = await resp.blob();
