@@ -792,6 +792,13 @@ async def _compute_validation_amounts(db: AsyncSession, row, today: date) -> dic
         DailySignalSnapshot.target_code == fund_code,
     ).order_by(DailySignalSnapshot.id.desc()).limit(1)
     snap_row = (await db.execute(snap_stmt)).scalar_one_or_none()
+    # FIX: 今天没有则 fallback 到最近一次 snapshot（验证C运行时今天的尚未生成）
+    if snap_row is None:
+        fb_stmt = select(DailySignalSnapshot).where(
+            DailySignalSnapshot.snapshot_date < today,
+            DailySignalSnapshot.target_code == fund_code,
+        ).order_by(DailySignalSnapshot.snapshot_date.desc()).limit(1)
+        snap_row = (await db.execute(fb_stmt)).scalar_one_or_none()
     if snap_row is not None:
         target_position_pct = float(snap_row.target_position_pct) if snap_row.target_position_pct is not None else 0.0
         action_advice = snap_row.action_advice

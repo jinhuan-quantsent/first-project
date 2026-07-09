@@ -2739,6 +2739,13 @@ async def _run_validation_deepseek_advice() -> None:
                     ).order_by(DailySignalSnapshot.id.desc()).limit(1)
                     snap_res = await s.execute(snap_stmt)
                     snap_row = snap_res.scalar_one_or_none()
+                    # FIX: 今天没有则 fallback 到最近一次 snapshot（14:47验证C时今天的尚未生成）
+                    if snap_row is None:
+                        fb_stmt = select(DailySignalSnapshot).where(
+                            DailySignalSnapshot.snapshot_date < today,
+                            DailySignalSnapshot.target_code == record.fund_code,
+                        ).order_by(DailySignalSnapshot.snapshot_date.desc()).limit(1)
+                        snap_row = (await s.execute(fb_stmt)).scalar_one_or_none()
                     snap_target_pct = float(snap_row.target_position_pct) if (snap_row and snap_row.target_position_pct is not None) else 0.0
                     snap_action = snap_row.action_advice if snap_row else None
                     target_position_pct = snap_target_pct
