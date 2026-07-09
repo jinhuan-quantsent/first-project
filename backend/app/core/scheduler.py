@@ -2627,6 +2627,17 @@ async def _run_validation_deepseek_advice() -> None:
                 continue
 
             # 2b. 组装提示词
+            # Phase 1: 规则5/Q4/step1 根据模式区分
+            _is_independent = settings.DEEPSEEK_MODE == "independent"
+            _rule5_dir = ("可参考系统建议，也可给出你的独立判断"
+                          if _is_independent
+                          else "【必须】等于用户输入中的'系统仓位引擎建议方向'")
+            _step1_text = ("参考'系统已推导的仓位与金额'区块，给出你的首行结论"
+                           if _is_independent
+                           else "原样复述'系统已推导的仓位与金额'区块首行")
+            _q4_text = ("请给出你的独立操作方向判断（加仓/持有/减仓），并说明依据。如与系统建议不同，请解释分歧原因。"
+                        if _is_independent
+                        else "请分析系统建议方向（加仓/持有/减仓）的合理性依据，结合预演数据说明为何此方向是恰当的。")
             system_prompt = (
                 "你是基金投资策略分析师。基于系统预演数据给出尾盘建议。\n"
                 "规则：\n"
@@ -2636,7 +2647,7 @@ async def _run_validation_deepseek_advice() -> None:
                 "4. 回复控制在500-2000字，必须包含明确的操作方向\n"
                 "5. 【强制首行格式】回复第1行必须严格为：\n"
                 "   【操作方向】{加仓/持有/减仓} | 当前市值¥X | 目标仓位Y% | 建议金额≈¥Z\n"
-                "   其中操作方向【必须】等于用户输入中的'系统仓位引擎建议方向'；"
+                f"   其中操作方向{_rule5_dir}；"
                 "X/Y/Z【必须】等于'系统已推导的仓位与金额'区块中的数值"
                 "（金额由系统计算，禁止自编、禁止改动任何数字）。\n"
                 "6. '5问策略分析'仅作为首行之后的补充内容，不得覆盖首行结构化结论。\n"
@@ -2762,14 +2773,13 @@ async def _run_validation_deepseek_advice() -> None:
             # 段5: 先复述首行，再做补充分析（阶段1）
             user_parts.append(
                 "【请按以下结构回复】\n"
-                "第一步：原样复述'系统已推导的仓位与金额'区块首行"
+                f"第一步：{_step1_text}"
                 "（操作方向 | 当前市值 | 目标仓位 | 建议金额），不得改动任何数字。\n"
                 "第二步：基于预演数据做补充策略分析，回答如下问题：\n"
                 "1. 弹性系数是否合理？盘中估值变化对情绪分的影响是否过大或过小？\n"
                 "2. 信号等级的边界是否需要调整？当前信号与昨日信号的切换是否合理？\n"
                 "3. Gate阈值（Gate-1/Gate-2）的触发距离是否合适？\n"
-                "4. 请分析系统建议方向（加仓/持有/减仓）的合理性依据，"
-                "结合预演数据说明为何此方向是恰当的。\n"
+                f"4. {_q4_text}\n"
                 "5. 预演估算与实际收盘可能存在多少偏差？\n"
             )
 
@@ -2835,25 +2845,35 @@ async def _run_validation_deepseek_advice() -> None:
             elif "减仓" in first_line or "减持" in first_line or "止损" in first_line:
                 advice_action = "decrease"
 
-            # 阶段1：代码层强制以系统权威 action 为准，根治"文本与 action 矛盾"
+            # Phase 1: Feature Flag 控制 override 行为
             _action_cn_to_code = {"加仓": "increase", "持有": "hold", "减仓": "decrease"}
             system_action_code = _action_cn_to_code.get(system_action, "hold")
             final_action = advice_action
             action_mismatch = False
-            if system_action_code != advice_action:
-                final_action = system_action_code
-                action_mismatch = True
-                logger.warning(
-                    "[Scheduler] [validation-C] %s 模型解析action(%s)与系统权威(%s)不一致，强制override为系统action",
-                    record.fund_code, advice_action, system_action_code,
-                )
-                # 在advice文本前插入override标注，使存储文本自洽
-                _action_code_to_cn = {"increase": "加仓", "hold": "持有", "decrease": "减仓"}
-                override_note = (
-                    f"[系统override] 模型首行方向解析为{_action_code_to_cn.get(advice_action, advice_action)}，"
-                    f"系统权威方向为{system_action}，已强制采用系统方向。\n\n"
-                )
-                ai_response = override_note + ai_response
+            if _is_independent:
+                # 独立顾问模式：不 override，保留 AI 原始方向
+                if system_action_code != advice_action:
+                    action_mismatch = True
+                    logger.info(
+                        "[Scheduler] [validation-C] %s AI独立方向(%s)与系统(%s)不同 — independent模式保留AI方向",
+                        record.fund_code, advice_action, system_action_code,
+                    )
+            else:
+                # 翻译器模式：强制 override 为系统方向
+                if system_action_code != advice_action:
+                    final_action = system_action_code
+                    action_mismatch = True
+                    logger.warning(
+                        "[Scheduler] [validation-C] %s 模型解析action(%s)与系统权威(%s)不一致，强制override为系统action",
+                        record.fund_code, advice_action, system_action_code,
+                    )
+                    # 在advice文本前插入override标注，使存储文本自洽
+                    _action_code_to_cn = {"increase": "加仓", "hold": "持有", "decrease": "减仓"}
+                    override_note = (
+                        f"[系统override] 模型首行方向解析为{_action_code_to_cn.get(advice_action, advice_action)}，"
+                        f"系统权威方向为{system_action}，已强制采用系统方向。\n\n"
+                    )
+                    ai_response = override_note + ai_response
 
             # 2e. 更新DB
             async with AsyncSession(engine) as session:
@@ -3059,6 +3079,8 @@ async def _run_validation_backfill() -> None:
             )
 
             # 11. DeepSeek准确度
+            # Phase 1: independent模式下 deepseek_advice_action = AI原始方向（未被override），此处计算正确
+            #          translator模式下 deepseek_advice_action = 系统方向（被override），此处测的是系统准确率（已知局限）
             deepseek_advice_correct = None
             if record.deepseek_advice_action:
                 ds_action = record.deepseek_advice_action
