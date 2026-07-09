@@ -2852,7 +2852,21 @@ async def _run_validation_deepseek_advice() -> None:
             action_mismatch = False
             if _is_independent:
                 # 独立顾问模式：不 override，保留 AI 原始方向
-                if system_action_code != advice_action:
+                # 但 Gate 安全边界仍强制系统方向（安全官建议）
+                _gate_triggered = (record.gate_1_triggered == 1) or (record.gate_2_triggered == 1)
+                if _gate_triggered and system_action_code != advice_action:
+                    final_action = system_action_code
+                    action_mismatch = True
+                    logger.warning(
+                        "[Scheduler] [validation-C] %s Gate已触发，强制系统方向(%s)覆盖AI方向(%s) — 安全边界",
+                        record.fund_code, system_action_code, advice_action,
+                    )
+                    _action_code_to_cn = {"increase": "加仓", "hold": "持有", "decrease": "减仓"}
+                    override_note = (
+                        f"[系统override-Gate安全] Gate已触发，模型方向{_action_code_to_cn.get(advice_action, advice_action)}被强制覆盖为系统方向{system_action}。\n\n"
+                    )
+                    ai_response = override_note + ai_response
+                elif system_action_code != advice_action:
                     action_mismatch = True
                     logger.info(
                         "[Scheduler] [validation-C] %s AI独立方向(%s)与系统(%s)不同 — independent模式保留AI方向",
