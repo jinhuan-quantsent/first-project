@@ -2536,6 +2536,9 @@ async def _run_validation_deepseek_advice() -> None:
     from app.core.database import get_async_engine
     from sqlalchemy import select, func as sa_func
     from app.models.strategy_validation_log import StrategyValidationLog
+    from app.models.daily_signal_snapshot import DailySignalSnapshot
+    from app.models.user_portfolio import UserPortfolio
+    from app.models.user_cash import UserCash
 
     if not await _is_trade_day():
         logger.info("[Scheduler] [validation-C] 非交易日，跳过")
@@ -2605,6 +2608,12 @@ async def _run_validation_deepseek_advice() -> None:
                 "2. Gate-1/Gate-2触发时必须明确提示减仓风险\n"
                 "3. 建议方向只能是：加仓/持有/减仓\n"
                 "4. 回复控制在500-2000字，必须包含明确的操作方向\n"
+                "5. 【强制首行格式】回复第1行必须严格为：\n"
+                "   【操作方向】{加仓/持有/减仓} | 当前市值¥X | 目标仓位Y% | 建议金额≈¥Z\n"
+                "   其中操作方向【必须】等于用户输入中的'系统仓位引擎建议方向'；"
+                "X/Y/Z【必须】等于'系统已推导的仓位与金额'区块中的数值"
+                "（金额由系统计算，禁止自编、禁止改动任何数字）。\n"
+                "6. '5问策略分析'仅作为首行之后的补充内容，不得覆盖首行结构化结论。\n"
             )
 
             user_parts = []
@@ -2656,9 +2665,74 @@ async def _run_validation_deepseek_advice() -> None:
             # 段4: 系统建议
             user_parts.append(f"【系统建议参考】\n{record.system_advice_text or '无'}")
 
-            # 段5: 分析问题
+            # 段4.5: 系统已推导金额区块（阶段1 — 金额由系统算，模型只翻译，零黑箱）
+            system_action = "持有"
+            target_position_pct = 0.0
+            current_position_pct = 0.0
+            total_assets = 0.0
+            suggested_amount = 0.0
+            try:
+                async with AsyncSession(engine) as s:
+                    # target_position_pct / action_advice 来自当日 daily_signal_snapshot
+                    snap_stmt = select(DailySignalSnapshot).where(
+                        DailySignalSnapshot.snapshot_date == today,
+                        DailySignalSnapshot.target_code == record.fund_code,
+                    ).order_by(DailySignalSnapshot.id.desc()).limit(1)
+                    snap_res = await s.execute(snap_stmt)
+                    snap_row = snap_res.scalar_one_or_none()
+                    snap_target_pct = float(snap_row.target_position_pct) if (snap_row and snap_row.target_position_pct is not None) else 0.0
+                    snap_action = snap_row.action_advice if snap_row else None
+                    target_position_pct = snap_target_pct
+
+                    # 实时算总资产 = Σ(user_portfolio.market_value) + user_cash.cash_amount
+                    mv_res = await s.execute(
+                        select(sa_func.sum(UserPortfolio.market_value)).where(UserPortfolio.user_id == record.user_id)
+                    )
+                    total_market_value = float(mv_res.scalar() or 0.0)
+                    cash_row = (await s.execute(select(UserCash).where(UserCash.user_id == record.user_id))).scalar_one_or_none()
+                    cash_amount = float(cash_row.cash_amount) if cash_row else 0.0
+                    total_assets = total_market_value + cash_amount
+
+                    # 本基金持仓市值
+                    fund_mv_res = await s.execute(
+                        select(UserPortfolio.market_value).where(
+                            UserPortfolio.user_id == record.user_id,
+                            UserPortfolio.fund_code == record.fund_code,
+                        ).limit(1)
+                    )
+                    fund_market_value = float(fund_mv_res.scalar() or 0.0)
+                    current_position_pct = fund_market_value / total_assets if total_assets > 0 else 0.0
+
+                # 映射 action_advice -> system_action（中文方向）
+                if snap_action == "increase":
+                    system_action = "加仓"
+                elif snap_action in ("decrease", "sell"):
+                    system_action = "减仓"
+                else:
+                    system_action = "持有"
+
+                # 持有时建议金额=0；否则 = |target - current| × total_assets
+                suggested_amount = 0.0 if system_action == "持有" else abs(target_position_pct - current_position_pct) * total_assets
+            except Exception as _e:
+                logger.warning("[Scheduler] [validation-C] %s 推导金额失败，降级为空金额区块: %s", record.fund_code, _e)
+
+            # 系统已推导金额区块（模型严禁修改金额，仅翻译）
             user_parts.append(
-                "【请分析以下问题】\n"
+                "【系统已推导的仓位与金额（请勿修改任何数字，仅供翻译）】\n"
+                f"基金代码: {record.fund_code}\n"
+                f"当前持仓市值: ¥{current_position_pct * total_assets:.0f}  (持仓占比 {current_position_pct * 100:.1f}%)\n"
+                f"目标仓位: {target_position_pct * 100:.1f}%\n"
+                f"系统总资产: ¥{total_assets:.0f}\n"
+                f"系统仓位引擎建议方向: {system_action}\n"
+                f"系统推导建议金额: ≈¥{suggested_amount:.0f}   （= |{target_position_pct:.4f} - {current_position_pct:.4f}| × ¥{total_assets:.0f}）\n"
+            )
+
+            # 段5: 先复述首行，再做补充分析（阶段1）
+            user_parts.append(
+                "【请按以下结构回复】\n"
+                "第一步：原样复述'系统已推导的仓位与金额'区块首行"
+                "（操作方向 | 当前市值 | 目标仓位 | 建议金额），不得改动任何数字。\n"
+                "第二步：基于预演数据做补充策略分析，回答如下问题：\n"
                 "1. 弹性系数是否合理？盘中估值变化对情绪分的影响是否过大或过小？\n"
                 "2. 信号等级的边界是否需要调整？当前信号与昨日信号的切换是否合理？\n"
                 "3. Gate阈值（Gate-1/Gate-2）的触发距离是否合适？\n"
@@ -2687,6 +2761,7 @@ async def _run_validation_deepseek_advice() -> None:
             }
 
             ai_response = None
+            last_err = None
             for attempt in range(settings.DEEPSEEK_MAX_RETRIES + 1):
                 try:
                     async with httpx.AsyncClient(timeout=settings.DEEPSEEK_TIMEOUT) as client:
@@ -2696,21 +2771,48 @@ async def _run_validation_deepseek_advice() -> None:
                         ai_response = resp_data["choices"][0]["message"]["content"]
                         break
                 except Exception as e:
+                    last_err = e
                     if attempt < settings.DEEPSEEK_MAX_RETRIES:
                         logger.warning("[Scheduler] [validation-C] %s 第%d次调用失败，重试: %s", record.fund_code, attempt + 1, e)
                     else:
-                        logger.warning("[Scheduler] [validation-C] %s DeepSeek调用最终失败(降级): %s", record.fund_code, e)
+                        logger.error("[Scheduler] [validation-C] %s DeepSeek调用最终失败(降级): %s", record.fund_code, e)
 
             if ai_response is None:
                 fail += 1
+                # 失败可见化：写入可区分标记，便于排查（不抛异常，scheduler 继续其它基金）
+                try:
+                    async with AsyncSession(engine) as session:
+                        fail_stmt = select(StrategyValidationLog).where(
+                            StrategyValidationLog.id == record.id
+                        )
+                        fail_result = await session.execute(fail_stmt)
+                        fail_record = fail_result.scalar_one_or_none()
+                        if fail_record:
+                            fail_record.deepseek_advice = f"[DEEPSEEK_CALL_FAILED: {str(last_err)[:200]}]"
+                            await session.commit()
+                except Exception:
+                    logger.warning("[Scheduler] [validation-C] %s 标记CALL_FAILED写入失败", record.fund_code)
                 continue
 
-            # 2d. 提取建议方向
+            # 2d. 提取建议方向（模型文本解析）
             advice_action = "hold"
             if "加仓" in ai_response or "增持" in ai_response:
                 advice_action = "increase"
             elif "减仓" in ai_response or "减持" in ai_response or "止损" in ai_response:
                 advice_action = "decrease"
+
+            # 阶段1：代码层强制以系统权威 action 为准，根治"文本与 action 矛盾"
+            _action_cn_to_code = {"加仓": "increase", "持有": "hold", "减仓": "decrease"}
+            system_action_code = _action_cn_to_code.get(system_action, "hold")
+            final_action = advice_action
+            action_mismatch = False
+            if system_action_code != advice_action:
+                final_action = system_action_code
+                action_mismatch = True
+                logger.warning(
+                    "[Scheduler] [validation-C] %s 模型解析action(%s)与系统权威(%s)不一致，强制override为系统action",
+                    record.fund_code, advice_action, system_action_code,
+                )
 
             # 2e. 更新DB
             async with AsyncSession(engine) as session:
@@ -2721,12 +2823,17 @@ async def _run_validation_deepseek_advice() -> None:
                 db_record = update_result.scalar_one_or_none()
                 if db_record:
                     db_record.deepseek_advice = ai_response
-                    db_record.deepseek_advice_action = advice_action
+                    db_record.deepseek_advice_action = final_action
+                    if action_mismatch:
+                        # ext_text1 为预留 String(200) 列，存原模型解析 + 标记（零DDL）
+                        db_record.ext_text1 = (
+                            '{"raw_action": "%s", "flag": "model_mismatch"}' % advice_action
+                        )
                     await session.commit()
 
             success += 1
             logger.info("[Scheduler] [validation-C] %s AI建议=%s (%d字)",
-                       record.fund_code, advice_action, len(ai_response))
+                       record.fund_code, final_action, len(ai_response))
         except Exception as e:
             fail += 1
             logger.error("[Scheduler] [validation-C] %s FAIL: %s", record.fund_code, e)

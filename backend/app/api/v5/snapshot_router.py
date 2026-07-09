@@ -22,6 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_session
 from app.models.daily_signal_snapshot import DailySignalSnapshot
 from app.models.strategy_validation_log import StrategyValidationLog
+from app.models.user_portfolio import UserPortfolio
+from app.models.user_cash import UserCash
 
 logger = logging.getLogger(__name__)
 
@@ -763,6 +765,63 @@ async def get_validation_stats(
 # 单基金当日 AI 分析查询 API
 # ============================================================
 
+async def _compute_validation_amounts(db: AsyncSession, row, today: date) -> dict:
+    """阶段1：实时计算元金额字段（零DDL）。
+
+    target_position_pct / action_advice 来自当日 daily_signal_snapshot；
+    current_position_pct / total_assets 实时算（user_portfolio + user_cash）。
+    """
+    fund_code = row.fund_code
+    user_id = row.user_id
+
+    target_position_pct = 0.0
+    action_advice = None
+    snap_stmt = select(DailySignalSnapshot).where(
+        DailySignalSnapshot.snapshot_date == today,
+        DailySignalSnapshot.target_code == fund_code,
+    ).order_by(DailySignalSnapshot.id.desc()).limit(1)
+    snap_row = (await db.execute(snap_stmt)).scalar_one_or_none()
+    if snap_row is not None:
+        target_position_pct = float(snap_row.target_position_pct) if snap_row.target_position_pct is not None else 0.0
+        action_advice = snap_row.action_advice
+
+    # 实时算总资产 = Σ(user_portfolio.market_value) + user_cash.cash_amount
+    mv_res = await db.execute(
+        select(func.sum(UserPortfolio.market_value)).where(UserPortfolio.user_id == user_id)
+    )
+    total_market_value = float(mv_res.scalar() or 0.0)
+    cash_row = (await db.execute(select(UserCash).where(UserCash.user_id == user_id))).scalar_one_or_none()
+    cash_amount = float(cash_row.cash_amount) if cash_row else 0.0
+    total_assets = total_market_value + cash_amount
+
+    # 本基金持仓市值
+    fund_mv_res = await db.execute(
+        select(UserPortfolio.market_value).where(
+            UserPortfolio.user_id == user_id,
+            UserPortfolio.fund_code == fund_code,
+        ).limit(1)
+    )
+    fund_market_value = float(fund_mv_res.scalar() or 0.0)
+    current_position_pct = fund_market_value / total_assets if total_assets > 0 else 0.0
+
+    if action_advice == "increase":
+        system_action = "加仓"
+    elif action_advice in ("decrease", "sell"):
+        system_action = "减仓"
+    else:
+        system_action = "持有"
+
+    suggested_amount = 0.0 if system_action == "持有" else abs(target_position_pct - current_position_pct) * total_assets
+
+    return {
+        "total_assets": round(total_assets, 2),
+        "current_position_pct": current_position_pct,
+        "target_position_pct": target_position_pct,
+        "suggested_amount": round(suggested_amount, 2),
+        "system_action": system_action,
+    }
+
+
 @router.get("/validation-today/{fund_code}")
 async def get_validation_today(
     fund_code: str,
@@ -806,8 +865,8 @@ async def get_validation_today(
             "message": "暂无验证数据(等待14:45系统建议生成)",
         }
 
-    def _serialize_advice(row):
-        """序列化单条验证记录"""
+    def _serialize_advice(row, amount_fields=None):
+        """序列化单条验证记录；amount_fields 为阶段1实时计算的元金额字段（仅 today 记录有）"""
         return {
             "trade_date": row.trade_date.isoformat() if row.trade_date else None,
             "fund_code": row.fund_code,
@@ -871,10 +930,19 @@ async def get_validation_today(
             "actual_nav_change_pct": float(row.actual_nav_change_pct) if row.actual_nav_change_pct is not None else None,
             "actual_score": float(row.actual_score) if row.actual_score is not None else None,
             "actual_signal_level": row.actual_signal_level,
+            # 阶段1：实时元金额字段（零DDL，仅 today 记录计算）
+            "total_assets": amount_fields["total_assets"] if amount_fields else None,
+            "current_position_pct": amount_fields["current_position_pct"] if amount_fields else None,
+            "target_position_pct": amount_fields["target_position_pct"] if amount_fields else None,
+            "suggested_amount": amount_fields["suggested_amount"] if amount_fields else None,
+            "system_action": amount_fields["system_action"] if amount_fields else None,
         }
 
     # 构建响应
-    today_data = _serialize_advice(today_row) if today_row else None
+    today_data = None
+    if today_row:
+        amount_fields = await _compute_validation_amounts(db, today_row, today)
+        today_data = _serialize_advice(today_row, amount_fields)
 
     # 一致性分析：系统建议 vs DeepSeek 建议
     consistency = None
@@ -890,7 +958,7 @@ async def get_validation_today(
             consistency = "partial"
 
     # 历史回验记录（最近3天有T+1结果的）
-    history_backfill = [_serialize_advice(r) for r in backfill_rows]
+    history_backfill = [_serialize_advice(r, None) for r in backfill_rows]
 
     return {
         "code": 0,

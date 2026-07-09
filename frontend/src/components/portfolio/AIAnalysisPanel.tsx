@@ -68,6 +68,12 @@ interface ValidationRecord {
   advice_reason: string | null;
   deepseek_advice: string | null;
   deepseek_advice_action: string | null;
+  // 阶段1 元金额字段（后端实时算，零DDL）
+  total_assets: number | null;
+  current_position_pct: number | null;
+  target_position_pct: number | null;
+  suggested_amount: number | null;
+  system_action: string | null;
   // T+1回验
   validation_score: number | null;
   signal_accuracy: number | null;
@@ -161,6 +167,11 @@ export default function AIAnalysisPanel({ fundCode }: Props) {
   const aiActionInfo = aiAction ? ACTION_MAP[aiAction] : null;
   const consistencyInfo = consistency ? CONSISTENCY_MAP[consistency] : null;
 
+  // 阶段1：从 DeepSeek 首行正则提取建议金额（优先于自由文本，避免 DDL）
+  const _deepseekFirstLine = today?.deepseek_advice ? today.deepseek_advice.split('\n')[0] : '';
+  const _deepseekAmountMatch = _deepseekFirstLine.match(/建议金额[^¥]*¥\s*([\d,]+)/);
+  const deepseekSuggestedAmount = _deepseekAmountMatch ? _deepseekAmountMatch[1] : null;
+
   return (
     <div className="bg-gradient-to-br from-indigo-50/40 to-purple-50/40 rounded-lg border border-indigo-100/50 overflow-hidden">
       {/* ====== 标题栏 ====== */}
@@ -220,6 +231,9 @@ export default function AIAnalysisPanel({ fundCode }: Props) {
                         {today.actual_target_position != null && (
                           <span className="text-[9px] text-gray-400 ml-1">→{(today.actual_target_position * 100).toFixed(1)}%</span>
                         )}
+                        {today.total_assets != null && today.target_position_pct != null && (
+                          <span className="text-[9px] text-gray-500 ml-1">目标¥{(today.total_assets * today.target_position_pct).toFixed(0)}</span>
+                        )}
                       </div>
                     ) : (
                       <span className="text-[10px] text-gray-400">等待生成...</span>
@@ -233,9 +247,14 @@ export default function AIAnalysisPanel({ fundCode }: Props) {
                       <span className="text-[9px] text-gray-500 font-medium">DeepSeek AI</span>
                     </div>
                     {aiActionInfo ? (
-                      <div className="flex items-center gap-1">
-                        <aiActionInfo.icon className={clsx('w-4 h-4', aiActionInfo.color)} />
-                        <span className={clsx('text-sm font-bold', aiActionInfo.color)}>{aiActionInfo.label}</span>
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-1">
+                          <aiActionInfo.icon className={clsx('w-4 h-4', aiActionInfo.color)} />
+                          <span className={clsx('text-sm font-bold', aiActionInfo.color)}>{aiActionInfo.label}</span>
+                        </div>
+                        {deepseekSuggestedAmount && (
+                          <div className="text-[10px] text-indigo-600">建议¥{deepseekSuggestedAmount}</div>
+                        )}
                       </div>
                     ) : (
                       <span className="text-[10px] text-gray-400">等待14:47生成...</span>
