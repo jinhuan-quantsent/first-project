@@ -2640,6 +2640,12 @@ async def _run_validation_deepseek_advice() -> None:
                 "X/Y/Z【必须】等于'系统已推导的仓位与金额'区块中的数值"
                 "（金额由系统计算，禁止自编、禁止改动任何数字）。\n"
                 "6. '5问策略分析'仅作为首行之后的补充内容，不得覆盖首行结构化结论。\n"
+                "7. 【全文方向一致性】正文分析中不得出现与首行矛盾的方向词。"
+                "例如首行是'持有'，正文不得出现'建议减仓''应加仓'等相反表述；"
+                "分析应围绕首行方向的合理性展开。\n"
+                "8. 【偏差提示】如确有必要提示系统方向可能存在偏差，"
+                "仅可在正文末尾以'【偏差提示】'开头的独立段落补充说明，"
+                "该段落不得使用与首行相反的方向词作为建议，仅做风险提示。\n"
             )
 
             user_parts = []
@@ -2762,7 +2768,8 @@ async def _run_validation_deepseek_advice() -> None:
                 "1. 弹性系数是否合理？盘中估值变化对情绪分的影响是否过大或过小？\n"
                 "2. 信号等级的边界是否需要调整？当前信号与昨日信号的切换是否合理？\n"
                 "3. Gate阈值（Gate-1/Gate-2）的触发距离是否合适？\n"
-                "4. 当日操作建议方向（加仓/持有/减仓）是否正确？\n"
+                "4. 请分析系统建议方向（加仓/持有/减仓）的合理性依据，"
+                "结合预演数据说明为何此方向是恰当的。\n"
                 "5. 预演估算与实际收盘可能存在多少偏差？\n"
             )
 
@@ -2820,11 +2827,12 @@ async def _run_validation_deepseek_advice() -> None:
                     logger.warning("[Scheduler] [validation-C] %s 标记CALL_FAILED写入失败", record.fund_code)
                 continue
 
-            # 2d. 提取建议方向（模型文本解析）
+            # 2d. 提取建议方向（仅从首行解析，避免分析段中的方向词污染）
+            first_line = ai_response.strip().split("\n")[0] if ai_response else ""
             advice_action = "hold"
-            if "加仓" in ai_response or "增持" in ai_response:
+            if "加仓" in first_line or "增持" in first_line:
                 advice_action = "increase"
-            elif "减仓" in ai_response or "减持" in ai_response or "止损" in ai_response:
+            elif "减仓" in first_line or "减持" in first_line or "止损" in first_line:
                 advice_action = "decrease"
 
             # 阶段1：代码层强制以系统权威 action 为准，根治"文本与 action 矛盾"
@@ -2839,6 +2847,13 @@ async def _run_validation_deepseek_advice() -> None:
                     "[Scheduler] [validation-C] %s 模型解析action(%s)与系统权威(%s)不一致，强制override为系统action",
                     record.fund_code, advice_action, system_action_code,
                 )
+                # 在advice文本前插入override标注，使存储文本自洽
+                _action_code_to_cn = {"increase": "加仓", "hold": "持有", "decrease": "减仓"}
+                override_note = (
+                    f"[系统override] 模型首行方向解析为{_action_code_to_cn.get(advice_action, advice_action)}，"
+                    f"系统权威方向为{system_action}，已强制采用系统方向。\n\n"
+                )
+                ai_response = override_note + ai_response
 
             # 2e. 更新DB
             async with AsyncSession(engine) as session:
