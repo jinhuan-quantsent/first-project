@@ -1243,6 +1243,7 @@ async def _run_intraday_preview_calculate() -> None:
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy import select
     from app.models.user_portfolio import UserPortfolio
+    from app.models.user_cash import UserCash
     from app.models.daily_signal_snapshot import DailySignalSnapshot
     from app.engine.position_v5 import PositionEngineV5
     from app.utils.eastmoney import get_fund_realtime_nav
@@ -1289,6 +1290,14 @@ async def _run_intraday_preview_calculate() -> None:
         user_funds[user_id]["funds"].append(fund_code)
         user_funds[user_id]["total_mv"] += float(market_value or 0)
 
+    # 4b. 查询各用户现金余额，加入总资产（与14:47 DeepSeek统一口径）
+    async with AsyncSession(engine) as session:
+        cash_stmt = select(UserCash.user_id, UserCash.cash_amount)
+        cash_result = await session.execute(cash_stmt)
+        for uid, cash in cash_result:
+            if uid in user_funds:
+                user_funds[uid]["cash_amount"] = float(cash or 0.0)
+
     # 5. 获取最近交易日收盘数据（周末/假期：查DB最新快照日期，不用today-1）
     async with AsyncSession(engine) as session:
         from sqlalchemy import func as sa_func
@@ -1309,7 +1318,7 @@ async def _run_intraday_preview_calculate() -> None:
 
     success = 0
     for user_id, data in user_funds.items():
-        total_assets = data["total_mv"]
+        total_assets = data["total_mv"] + data.get("cash_amount", 0.0)
 
         for fund_code in data["funds"]:
             try:
@@ -1445,7 +1454,7 @@ async def _run_intraday_preview_calculate() -> None:
                         signal_level=preview_signal,
                         confidence_stars=effective_stars,
                         regime=meta.get("regime", "sideways"),
-                        cash_amount=0,  # 盘中不查现金
+                        cash_amount=data.get("cash_amount", 0.0),  # 盘中含现金（与14:47统一）
                         total_assets=total_assets,
                     )
 
@@ -2016,6 +2025,7 @@ async def _run_validation_persist() -> None:
     from app.core.database import get_async_engine
     from sqlalchemy import select, func as sa_func
     from app.models.user_portfolio import UserPortfolio
+    from app.models.user_cash import UserCash
     from app.models.daily_signal_snapshot import DailySignalSnapshot
     from app.models.strategy_validation_log import StrategyValidationLog
     from app.models.fund_nav import FundNav
@@ -2095,7 +2105,13 @@ async def _run_validation_persist() -> None:
         })
         user_funds[uid]["total_mv"] += float(mv or 0)
 
-    # 3. 获取昨日快照
+    # 2b. 查询各用户现金余额，加入总资产（与14:47 DeepSeek统一口径）
+    async with AsyncSession(engine) as session:
+        cash_stmt = select(UserCash.user_id, UserCash.cash_amount)
+        cash_result = await session.execute(cash_stmt)
+        for cuid, cash in cash_result:
+            if cuid in user_funds:
+                user_funds[cuid]["cash_amount"] = float(cash or 0.0)
     async with AsyncSession(engine) as session:
         latest_date_stmt = select(sa_func.max(DailySignalSnapshot.snapshot_date)).where(
             DailySignalSnapshot.snapshot_date < today
@@ -2158,7 +2174,7 @@ async def _run_validation_persist() -> None:
     success = 0
     fail = 0
     for user_id, udata in user_funds.items():
-        total_assets = udata["total_mv"]
+        total_assets = udata["total_mv"] + udata.get("cash_amount", 0.0)
 
         for finfo in udata["funds"]:
             fund_code = finfo["fund_code"]
@@ -2259,7 +2275,7 @@ async def _run_validation_persist() -> None:
                         signal_level=preview_signal,
                         confidence_stars=effective_stars,
                         regime=meta.get("regime", "sideways"),
-                        cash_amount=0,
+                        cash_amount=udata.get("cash_amount", 0.0),
                         total_assets=total_assets,
                     )
 
