@@ -2018,6 +2018,7 @@ async def _run_validation_persist() -> None:
     from app.models.user_portfolio import UserPortfolio
     from app.models.daily_signal_snapshot import DailySignalSnapshot
     from app.models.strategy_validation_log import StrategyValidationLog
+    from app.models.fund_nav import FundNav
     from app.models.sector_sentiment import SectorSentiment
     from app.engine.position_v5 import PositionEngineV5
     from app.utils.eastmoney import get_fund_realtime_nav
@@ -2109,6 +2110,26 @@ async def _run_validation_persist() -> None:
         snap_result = await session.execute(snap_stmt)
         yesterday_snapshots = {s.target_code: s for s in snap_result.scalars().all()}
 
+    # 3b. Fix A: 直接从 fund_nav 表获取最新净值
+    # 根因：快照在 T-1 17:05 生成时 fund_nav 可能还没有 T-1 净值，
+    #   导致 snap.nav 存的是 T-2 的值。14:45 时 T-1 净值早已入库，直接查更准确。
+    all_fund_codes = list({row[1] for row in portfolio_rows})
+    latest_nav_map: dict[str, float] = {}
+    if all_fund_codes:
+        async with AsyncSession(engine) as session:
+            for fc in all_fund_codes:
+                nav_result = await session.execute(
+                    select(FundNav.nav)
+                    .where(FundNav.fund_code == fc, FundNav.nav_date <= today)
+                    .order_by(FundNav.nav_date.desc())
+                    .limit(1)
+                )
+                nav_row = nav_result.first()
+                if nav_row and nav_row[0]:
+                    latest_nav_map[fc] = float(nav_row[0])
+    logger.info("[validation-A] Fix A: fund_nav 直接取值 %d/%d 只基金",
+                len(latest_nav_map), len(all_fund_codes))
+
     # 4. 获取历史准确率（近30天）
     historical_accuracy: dict = {"signal_accuracy": None, "advice_accuracy": None, "gate_accuracy": None}
     try:
@@ -2173,7 +2194,11 @@ async def _run_validation_persist() -> None:
                     # 故用今日实际持仓(market_value/total_assets，盘中14:45已反映昨日
                     # 建议执行后的仓位)近似昨日实际持仓，避免把"建议目标0%"误当真实仓位。
                     yesterday_position = (finfo["market_value"] / total_assets) if total_assets > 0 else 0.0
-                    yesterday_nav = float(snap.nav) if snap.nav else None
+                    # Fix A: 优先从 fund_nav 表直接取最新净值，避免快照 nav 滞后1天
+                    yesterday_nav = latest_nav_map.get(fund_code)
+                    if yesterday_nav is None:
+                        # fallback: 快照中的 nav（可能滞后但总比 None 好）
+                        yesterday_nav = float(snap.nav) if snap.nav else None
                     yesterday_track_type = snap.track_type or ""
                 else:
                     sector_code = meta.get("sector_code")
@@ -2195,7 +2220,8 @@ async def _run_validation_persist() -> None:
                             yesterday_signal = "B"
                     yesterday_confidence = 3
                     yesterday_position = 0.0
-                    yesterday_nav = None
+                    # Fix A: 无快照时也尝试从 fund_nav 取最新净值
+                    yesterday_nav = latest_nav_map.get(fund_code)
                     yesterday_track_type = ""
 
                 meta["yesterday_score"] = yesterday_score
