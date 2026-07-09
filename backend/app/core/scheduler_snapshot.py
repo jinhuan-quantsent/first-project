@@ -178,7 +178,7 @@ async def _run_signal_snapshot() -> None:
                     sentiment_source = advice.get("sentiment_source", "broad")
                     track_type = advice.get("track_type")
                     position_rating = advice.get("position_rating")
-                    target_position_pct = advice.get("adjusted_pct")
+                    target_position_pct = advice.get("target_position_pct")
                     action_advice = advice.get("action")
                     advice_reason = advice.get("reason")
                     overall_status = advice.get("overall_status", "normal")

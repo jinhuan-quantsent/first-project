@@ -24,3 +24,15 @@ frontend/.vite/
 *.csv
 historical_data/
 *.bak*
+
+# ECS 运维产物 — 严禁入 git
+backend/.env.*-backup
+
+# ECS 误放的 api/ 目录副本（非权威源，真实文件在 core/ engine/ services/ api/v5/ 下）
+backend/app/api/scheduler.py
+backend/app/api/snapshot_router.py
+backend/app/api/data_fetcher.py
+backend/app/api/position_router.py
+backend/app/api/position_service.py
+backend/app/api/position_v5.py
+backend/app/api/sentiment_service.py
