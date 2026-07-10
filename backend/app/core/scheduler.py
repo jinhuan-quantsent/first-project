@@ -3180,9 +3180,9 @@ async def _run_validation_backfill() -> None:
                 async with AsyncSession(engine) as session:
                     # 尝试 fund_code → sector_code → broad 递减查找
                     lookup_codes = []
-                    if record.sector_code:
-                        lookup_codes.append(record.sector_code)
-                    lookup_codes.extend(["SH000300", "SH000001"])
+                    if record.fund_code:
+                        lookup_codes.append(record.fund_code)
+                    lookup_codes.extend(["000300.SH", "000001.SH"])
 
                     for code in lookup_codes:
                         snap_stmt = select(DailySignalSnapshot).where(
@@ -3228,21 +3228,21 @@ async def _run_validation_backfill() -> None:
             is_neutral = preview_signal in ("B", "C")
 
             if is_bullish:
-                signal_accuracy = 1.0 if actual_trend == "up" else 0.0
+                signal_accuracy = 1.0 if actual_trend == "up" else (0.5 if actual_trend == "flat" else 0.0)
             elif is_bearish:
-                signal_accuracy = 1.0 if actual_trend == "down" else 0.0
+                signal_accuracy = 1.0 if actual_trend == "down" else (0.5 if actual_trend == "flat" else 0.0)
             else:
-                signal_accuracy = 1.0 if actual_trend == "flat" else 0.0
+                signal_accuracy = 1.0 if actual_trend == "flat" else 0.5
 
             # 8. 建议准确度
             advice_accuracy = None
             if actual_action:
                 if actual_action == "increase":
-                    advice_accuracy = 1.0 if actual_trend == "up" else 0.0
+                    advice_accuracy = 1.0 if actual_trend == "up" else (0.5 if actual_trend == "flat" else 0.0)
                 elif actual_action == "decrease":
-                    advice_accuracy = 1.0 if actual_trend == "down" else 0.0
+                    advice_accuracy = 1.0 if actual_trend == "down" else (0.5 if actual_trend == "flat" else 0.0)
                 else:  # hold
-                    advice_accuracy = 1.0 if actual_trend == "flat" else 0.5
+                    advice_accuracy = 1.0 if actual_trend in ("down", "flat") else 0.5
 
             # 9. Gate准确度
             gate_triggered = (record.gate_1_triggered == 1) or (record.gate_2_triggered == 1)
@@ -3267,8 +3267,8 @@ async def _run_validation_backfill() -> None:
                     deepseek_advice_correct = 1 if actual_trend == "up" else 0
                 elif ds_action == "decrease":
                     deepseek_advice_correct = 1 if actual_trend == "down" else 0
-                else:
-                    deepseek_advice_correct = 1 if actual_trend == "flat" else 0
+                else:  # hold
+                    deepseek_advice_correct = 1 if actual_trend in ("down", "flat") else 0
 
             # 12. UPDATE
             async with AsyncSession(engine) as session:
