@@ -1068,19 +1068,21 @@ def _build_system_advice_text(
     freq_msg = f"，频率限制({freq_block})" if freq_block else "，无频率限制"
     parts.append(f"【风控】{'，'.join(gate_msgs) if gate_msgs else 'Gate正常'}{freq_msg}。")
 
-    # 6. 【历史】
-    if historical_accuracy and any(v is not None for v in historical_accuracy.values()):
-        sig_acc = historical_accuracy.get("signal_accuracy")
-        adv_acc = historical_accuracy.get("advice_accuracy")
-        gate_acc = historical_accuracy.get("gate_accuracy")
-        hist_parts = []
-        if sig_acc is not None:
-            hist_parts.append(f"信号准确率{sig_acc*100:.0f}%")
-        if adv_acc is not None:
-            hist_parts.append(f"建议准确率{adv_acc*100:.0f}%")
-        if gate_acc is not None:
-            hist_parts.append(f"Gate准确率{gate_acc*100:.0f}%")
-        parts.append(f"【历史】近30天{'，'.join(hist_parts)}。")
+    # 6. 【历史】— 多窗口准确率(30/60/90天)
+    def _fmt_pct(v):
+        return f"{v*100:.0f}%" if v is not None else "--"
+
+    mw = historical_accuracy.get("multi_window", {}) if historical_accuracy else {}
+    if mw and any(mw.get(w, {}).get(k) is not None for w in ("30d", "60d", "90d") for k in ("signal", "advice", "gate")):
+        sig_parts = []
+        adv_parts = []
+        gate_parts = []
+        for w in ("30d", "60d", "90d"):
+            wd = mw.get(w, {})
+            sig_parts.append(f"{w}={_fmt_pct(wd.get('signal'))}")
+            adv_parts.append(f"{w}={_fmt_pct(wd.get('advice'))}")
+            gate_parts.append(f"{w}={_fmt_pct(wd.get('gate'))}")
+        parts.append(f"【历史】准确率趋势(以近30天为主): 信号[{', '.join(sig_parts)}] 建议[{', '.join(adv_parts)}] Gate[{', '.join(gate_parts)}]。")
     else:
         parts.append("【历史】暂无历史回验数据。")
 
@@ -2307,27 +2309,35 @@ async def _run_validation_persist() -> None:
     logger.info("[validation-A] Fix A: fund_nav 直接取值 %d/%d 只基金",
                 len(latest_nav_map), len(all_fund_codes))
 
-    # 4. 获取历史准确率（近30天）
-    historical_accuracy: dict = {"signal_accuracy": None, "advice_accuracy": None, "gate_accuracy": None}
+    # 4. 获取历史准确率（多窗口: 30/60/90天）
+    historical_accuracy: dict = {"signal_accuracy": None, "advice_accuracy": None, "gate_accuracy": None, "multi_window": {}}
     try:
         async with AsyncSession(engine) as session:
-            thirty_days_ago = today - timedelta(days=30)
-            hist_stmt = select(
-                sa_func.avg(StrategyValidationLog.signal_accuracy),
-                sa_func.avg(StrategyValidationLog.advice_accuracy),
-                sa_func.avg(StrategyValidationLog.gate_accuracy),
-            ).where(
-                StrategyValidationLog.trade_date >= thirty_days_ago,
-                StrategyValidationLog.trade_date < today,
-            )
-            hist_result = await session.execute(hist_stmt)
-            hist_row = hist_result.one_or_none()
-            if hist_row:
-                historical_accuracy = {
-                    "signal_accuracy": float(hist_row[0]) if hist_row[0] is not None else None,
-                    "advice_accuracy": float(hist_row[1]) if hist_row[1] is not None else None,
-                    "gate_accuracy": float(hist_row[2]) if hist_row[2] is not None else None,
+            multi_window = {}
+            for window_days in (30, 60, 90):
+                window_ago = today - timedelta(days=window_days)
+                w_stmt = select(
+                    sa_func.avg(StrategyValidationLog.signal_accuracy),
+                    sa_func.avg(StrategyValidationLog.advice_accuracy),
+                    sa_func.avg(StrategyValidationLog.gate_accuracy),
+                ).where(
+                    StrategyValidationLog.trade_date >= window_ago,
+                    StrategyValidationLog.trade_date < today,
+                )
+                w_result = await session.execute(w_stmt)
+                w_row = w_result.one_or_none()
+                key = f"{window_days}d"
+                multi_window[key] = {
+                    "signal": round(float(w_row[0]), 2) if w_row and w_row[0] is not None else None,
+                    "advice": round(float(w_row[1]), 2) if w_row and w_row[1] is not None else None,
+                    "gate": round(float(w_row[2]), 2) if w_row and w_row[2] is not None else None,
                 }
+            historical_accuracy["multi_window"] = multi_window
+            # 30天数据保持向后兼容
+            d30 = multi_window.get("30d", {})
+            historical_accuracy["signal_accuracy"] = d30.get("signal")
+            historical_accuracy["advice_accuracy"] = d30.get("advice")
+            historical_accuracy["gate_accuracy"] = d30.get("gate")
     except Exception as e:
         logger.warning("[Scheduler] [validation-A] 获取历史准确率失败(首次运行正常): %s", e)
 
@@ -2750,33 +2760,43 @@ async def _run_validation_deepseek_advice() -> None:
         logger.info("[Scheduler] [validation-C] 无待处理记录，跳过")
         return
 
-    # 2. 获取历史准确率（供提示词使用）
-    historical_accuracy: dict = {"signal_accuracy": None, "advice_accuracy": None, "gate_accuracy": None, "deepseek_accuracy": None, "ds_count": 0}
+    # 2. 获取历史准确率（多窗口: 30/60/90天，供提示词使用）
+    historical_accuracy: dict = {"signal_accuracy": None, "advice_accuracy": None, "gate_accuracy": None, "deepseek_accuracy": None, "ds_count": 0, "multi_window": {}}
     try:
         async with AsyncSession(engine) as session:
-            thirty_days_ago = today - timedelta(days=30)
-            hist_stmt = select(
-                sa_func.avg(StrategyValidationLog.signal_accuracy),
-                sa_func.avg(StrategyValidationLog.advice_accuracy),
-                sa_func.avg(StrategyValidationLog.gate_accuracy),
-                sa_func.avg(StrategyValidationLog.deepseek_advice_correct),
-                sa_func.count(StrategyValidationLog.deepseek_advice_correct),
-            ).where(
-                StrategyValidationLog.trade_date >= thirty_days_ago,
-                StrategyValidationLog.trade_date < today,
-            )
-            hist_result = await session.execute(hist_stmt)
-            hist_row = hist_result.one_or_none()
-            if hist_row:
-                historical_accuracy = {
-                    "signal_accuracy": round(float(hist_row[0]), 2) if hist_row[0] is not None else None,
-                    "advice_accuracy": round(float(hist_row[1]), 2) if hist_row[1] is not None else None,
-                    "gate_accuracy": round(float(hist_row[2]), 2) if hist_row[2] is not None else None,
-                    "deepseek_accuracy": round(float(hist_row[3]), 2) if hist_row[3] is not None else None,
-                    "ds_count": int(hist_row[4]) if hist_row[4] is not None else 0,
+            multi_window = {}
+            for window_days in (30, 60, 90):
+                window_ago = today - timedelta(days=window_days)
+                w_stmt = select(
+                    sa_func.avg(StrategyValidationLog.signal_accuracy),
+                    sa_func.avg(StrategyValidationLog.advice_accuracy),
+                    sa_func.avg(StrategyValidationLog.gate_accuracy),
+                    sa_func.avg(StrategyValidationLog.deepseek_advice_correct),
+                    sa_func.count(StrategyValidationLog.deepseek_advice_correct),
+                ).where(
+                    StrategyValidationLog.trade_date >= window_ago,
+                    StrategyValidationLog.trade_date < today,
+                )
+                w_result = await session.execute(w_stmt)
+                w_row = w_result.one_or_none()
+                key = f"{window_days}d"
+                multi_window[key] = {
+                    "signal": round(float(w_row[0]), 2) if w_row and w_row[0] is not None else None,
+                    "advice": round(float(w_row[1]), 2) if w_row and w_row[1] is not None else None,
+                    "gate": round(float(w_row[2]), 2) if w_row and w_row[2] is not None else None,
+                    "deepseek": round(float(w_row[3]), 2) if w_row and w_row[3] is not None else None,
+                    "ds_count": int(w_row[4]) if w_row and w_row[4] is not None else 0,
                 }
-    except Exception:
-        pass
+            historical_accuracy["multi_window"] = multi_window
+            # 30天数据保持向后兼容
+            d30 = multi_window.get("30d", {})
+            historical_accuracy["signal_accuracy"] = d30.get("signal")
+            historical_accuracy["advice_accuracy"] = d30.get("advice")
+            historical_accuracy["gate_accuracy"] = d30.get("gate")
+            historical_accuracy["deepseek_accuracy"] = d30.get("deepseek")
+            historical_accuracy["ds_count"] = d30.get("ds_count", 0)
+    except Exception as e:
+        logger.debug("[Scheduler] [validation-C] 获取历史准确率失败(首次运行正常): %s", e)
 
     success = 0
     fail = 0
@@ -2994,23 +3014,47 @@ async def _run_validation_deepseek_advice() -> None:
                 user_parts.append("【近5日板块情绪】暂无数据")
 
 
-            # 段3: 历史回验
-            _acc_keys = ["signal_accuracy", "advice_accuracy", "gate_accuracy", "deepseek_accuracy"]
-            if any(historical_accuracy.get(k) is not None for k in _acc_keys):
-                hist_parts = []
-                if historical_accuracy["signal_accuracy"] is not None:
-                    hist_parts.append(f"信号准确率{historical_accuracy['signal_accuracy']*100:.0f}%")
-                if historical_accuracy["advice_accuracy"] is not None:
-                    hist_parts.append(f"系统建议准确率{historical_accuracy['advice_accuracy']*100:.0f}%")
-                if historical_accuracy["gate_accuracy"] is not None:
-                    hist_parts.append(f"Gate准确率{historical_accuracy['gate_accuracy']*100:.0f}%")
-                if historical_accuracy.get("deepseek_accuracy") is not None:
-                    hist_parts.append(f"AI建议准确率{historical_accuracy['deepseek_accuracy']*100:.0f}%")
+            # 段3: 历史回验 — 多窗口准确率(30/60/90天)
+            def _fmt_pct_v(v):
+                return f"{v*100:.0f}%" if v is not None else "--"
+
+            mw = historical_accuracy.get("multi_window", {})
+            if mw and any(mw.get(w, {}).get(k) is not None for w in ("30d", "60d", "90d") for k in ("signal", "advice", "gate", "deepseek")):
+                # 单行紧凑格式: 准确率趋势(以近30天为主): 信号[30d=72%, 60d=78%, 90d=--] 建议[...] Gate[...] AI[...](n=9)
+                sig_p = ", ".join(f"{w}={_fmt_pct_v(mw.get(w, {}).get('signal'))}" for w in ("30d", "60d", "90d"))
+                adv_p = ", ".join(f"{w}={_fmt_pct_v(mw.get(w, {}).get('advice'))}" for w in ("30d", "60d", "90d"))
+                gate_p = ", ".join(f"{w}={_fmt_pct_v(mw.get(w, {}).get('gate'))}" for w in ("30d", "60d", "90d"))
+                ds_p = ", ".join(f"{w}={_fmt_pct_v(mw.get(w, {}).get('deepseek'))}" for w in ("30d", "60d", "90d"))
                 _ds_cnt = historical_accuracy.get("ds_count", 0)
-                _cnt_str = f"(AI建议{_ds_cnt}次)" if _ds_cnt else ""
-                user_parts.append(f"【历史回验】近30天{'，'.join(hist_parts)}{_cnt_str}")
+                _cnt_str = f"(n={_ds_cnt})" if _ds_cnt else ""
+                user_parts.append(f"【历史回验】准确率趋势(以近30天为主): 信号[{sig_p}] 建议[{adv_p}] Gate[{gate_p}] AI[{ds_p}]{_cnt_str}")
             else:
                 user_parts.append("【历史回验】暂无历史数据")
+
+            # 段3.1: Per-fund历史成绩单 — min_samples=10硬门槛
+            try:
+                async with AsyncSession(engine) as _pf_session:
+                    thirty_days_ago = today - timedelta(days=30)
+                    pf_stmt = select(
+                        sa_func.avg(StrategyValidationLog.signal_accuracy),
+                        sa_func.avg(StrategyValidationLog.advice_accuracy),
+                        sa_func.avg(StrategyValidationLog.deepseek_advice_correct),
+                        sa_func.count(StrategyValidationLog.deepseek_advice_correct),
+                    ).where(
+                        StrategyValidationLog.fund_code == record.fund_code,
+                        StrategyValidationLog.trade_date >= thirty_days_ago,
+                        StrategyValidationLog.trade_date < today,
+                    )
+                    pf_result = await _pf_session.execute(pf_stmt)
+                    pf_row = pf_result.one_or_none()
+                    if pf_row and pf_row[3] is not None and pf_row[3] >= 10:
+                        pf_sig = f"{pf_row[0]*100:.0f}%" if pf_row[0] is not None else "--"
+                        pf_adv = f"{pf_row[1]*100:.0f}%" if pf_row[1] is not None else "--"
+                        pf_ds = f"{pf_row[2]*100:.0f}%" if pf_row[2] is not None else "--"
+                        pf_n = int(pf_row[3])
+                        user_parts.append(f"【本基金历史回验参考】信号{pf_sig} 建议{pf_adv} AI{pf_ds} (n={pf_n})")
+            except Exception as e:
+                logger.debug("[Scheduler] [validation-C] Per-fund准确率查询失败: %s", e)
 
             # 段3.5: P2 前日信号对比
             if record.yesterday_signal or record.yesterday_score is not None:
@@ -3500,6 +3544,56 @@ async def _run_validation_backfill() -> None:
             logger.error("[Scheduler] [validation-B] %s FAIL: %s", record.fund_code, e)
 
     logger.info("[Scheduler] [validation-B] T+1回验完成 -- %d 成功, %d 失败, %d 跳过", success, fail, skipped)
+
+    # 13. 数据完整性检查 — 分级阈值监控
+    try:
+        from sqlalchemy import text as _text
+        async with AsyncSession(engine) as session:
+            comp_sql = _text("""
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN elasticity IS NULL THEN 1 ELSE 0 END) as elasticity_null,
+                    SUM(CASE WHEN preview_score IS NULL THEN 1 ELSE 0 END) as preview_null,
+                    SUM(CASE WHEN yesterday_score IS NULL THEN 1 ELSE 0 END) as yesterday_null,
+                    SUM(CASE WHEN market_index_chg_pct IS NULL THEN 1 ELSE 0 END) as market_null,
+                    SUM(CASE WHEN sector_chg_pct IS NULL THEN 1 ELSE 0 END) as sector_null,
+                    SUM(CASE WHEN gszzl IS NULL THEN 1 ELSE 0 END) as gszzl_null,
+                    SUM(CASE WHEN actual_trend IS NULL THEN 1 ELSE 0 END) as trend_null,
+                    SUM(CASE WHEN deepseek_advice_correct IS NULL THEN 1 ELSE 0 END) as ds_null,
+                    SUM(CASE WHEN unrealized_pnl_pct IS NULL THEN 1 ELSE 0 END) as pnl_null,
+                    SUM(CASE WHEN holding_market_value IS NULL THEN 1 ELSE 0 END) as holding_null
+                FROM strategy_validation_log
+                WHERE trade_date = :check_date
+            """)
+            comp_result = await session.execute(comp_sql, {"check_date": yesterday})
+            comp_row = comp_result.one()
+            total = comp_row[0] or 0
+            if total > 0:
+                # 分级阈值: 核心因子98%, 市场数据90%, 派生数据80%
+                field_checks = [
+                    ("elasticity", comp_row[1] or 0, 0.98, "核心"),
+                    ("preview_score", comp_row[2] or 0, 0.98, "核心"),
+                    ("yesterday_score", comp_row[3] or 0, 0.98, "核心"),
+                    ("market_index_chg_pct", comp_row[4] or 0, 0.90, "市场"),
+                    ("sector_chg_pct", comp_row[5] or 0, 0.90, "市场"),
+                    ("gszzl", comp_row[6] or 0, 0.90, "市场"),
+                    ("actual_trend", comp_row[7] or 0, 0.98, "核心"),
+                    ("deepseek_advice_correct", comp_row[8] or 0, 0.98, "核心"),
+                    ("unrealized_pnl_pct", comp_row[9] or 0, 0.80, "派生"),
+                    ("holding_market_value", comp_row[10] or 0, 0.80, "派生"),
+                ]
+                alert_count = 0
+                for field_name, null_count, threshold, tier in field_checks:
+                    fill_rate = 1 - null_count / total
+                    if fill_rate < threshold:
+                        alert_count += 1
+                        logger.warning(
+                            "[validation-B] [数据完整性告警] %s: NULL率=%.0f%% (%d/%d), 低于阈值%.0f%% [%s]",
+                            field_name, (1 - fill_rate) * 100, null_count, total, threshold * 100, tier,
+                        )
+                logger.info("[validation-B] [数据完整性] %s 检查完成: %d/%d 字段告警", yesterday, alert_count, len(field_checks))
+    except Exception as e:
+        logger.warning("[Scheduler] [validation-B] 数据完整性检查失败: %s", e)
 
 
 # ============================================================

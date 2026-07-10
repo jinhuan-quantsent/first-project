@@ -13,6 +13,7 @@ from app.api.v5.factor_data_router import router as factor_data_router
 from app.api.v5.health_router import router as health_router
 from app.api.v5.sector_router import router as sector_router
 from app.api.v5.snapshot_router import router as snapshot_router
+from app.api.v5.analysis_router import router as analysis_router
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ router.include_router(factor_data_router)
 router.include_router(health_router)
 router.include_router(sector_router)
 router.include_router(snapshot_router)
+router.include_router(analysis_router)
 
 
 __all__ = [
