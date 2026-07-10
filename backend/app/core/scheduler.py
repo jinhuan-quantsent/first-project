@@ -2645,6 +2645,7 @@ async def _run_validation_persist() -> None:
                         existing_record.frequency_block_direction = preview_result.get("frequency_block_direction")
                         existing_record.overall_status = overall_status
                         existing_record.system_advice_text = system_advice_text
+                        existing_record.system_advice_action = preview_result.get("action", "hold")
                         existing_record.advice_reason = preview_result.get("reason", "")
                         existing_record.consecutive_signal_days = consecutive_signal_days
                     else:
@@ -2688,6 +2689,7 @@ async def _run_validation_persist() -> None:
                             frequency_block_direction=preview_result.get("frequency_block_direction"),
                             overall_status=overall_status,
                             system_advice_text=system_advice_text,
+                            system_advice_action=preview_result.get("action", "hold"),
                             advice_reason=preview_result.get("reason", ""),
                             consecutive_signal_days=consecutive_signal_days,
                         )
@@ -2817,6 +2819,71 @@ async def _run_validation_deepseek_advice() -> None:
                 "该段落不得使用与首行相反的方向词作为建议，仅做风险提示。\n"
             )
 
+            # P0+P1+P2: 历史数据补充查询
+            nav_history_data = []
+            signal_history_data = []
+            market_sentiment_data = []
+            sector_sentiment_data = []
+            try:
+                from app.models.fund_nav import FundNav
+                async with AsyncSession(engine) as s:
+                    # P0-1: 净值走势 (近10个交易日)
+                    nav_stmt = select(
+                        FundNav.nav_date, FundNav.nav, FundNav.daily_return
+                    ).where(
+                        FundNav.fund_code == record.fund_code,
+                        FundNav.nav_date < today,
+                    ).order_by(FundNav.nav_date.desc()).limit(10)
+                    nav_rows = (await s.execute(nav_stmt)).all()
+                    nav_history_data = [(r[0], r[1], r[2]) for r in nav_rows]
+
+                    # P0-2: 信号趋势 (近10个交易日)
+                    sig_stmt = select(
+                        DailySignalSnapshot.snapshot_date,
+                        DailySignalSnapshot.composite_score,
+                        DailySignalSnapshot.signal_level,
+                        DailySignalSnapshot.action_advice,
+                        DailySignalSnapshot.regime,
+                        DailySignalSnapshot.drawdown_pct,
+                        DailySignalSnapshot.macd_state,
+                    ).where(
+                        DailySignalSnapshot.target_code == record.fund_code,
+                        DailySignalSnapshot.snapshot_date < today,
+                    ).order_by(DailySignalSnapshot.snapshot_date.desc()).limit(10)
+                    sig_rows = (await s.execute(sig_stmt)).all()
+                    signal_history_data = list(sig_rows)
+
+                    # P1-1: 大盘情绪 (000300.SH 近5天)
+                    mkt_stmt = select(
+                        DailySignalSnapshot.snapshot_date,
+                        DailySignalSnapshot.composite_score,
+                        DailySignalSnapshot.signal_level,
+                        DailySignalSnapshot.action_advice,
+                        DailySignalSnapshot.regime,
+                    ).where(
+                        DailySignalSnapshot.target_code == "000300.SH",
+                        DailySignalSnapshot.snapshot_date < today,
+                    ).order_by(DailySignalSnapshot.snapshot_date.desc()).limit(5)
+                    mkt_rows = (await s.execute(mkt_stmt)).all()
+                    market_sentiment_data = list(mkt_rows)
+
+                    # P1-2: 板块情绪 (sector_code 近5天)
+                    if record.sector_code:
+                        sec_stmt = select(
+                            DailySignalSnapshot.snapshot_date,
+                            DailySignalSnapshot.composite_score,
+                            DailySignalSnapshot.signal_level,
+                            DailySignalSnapshot.action_advice,
+                        ).where(
+                            DailySignalSnapshot.target_code == record.sector_code,
+                            DailySignalSnapshot.target_type == "sector",
+                            DailySignalSnapshot.snapshot_date < today,
+                        ).order_by(DailySignalSnapshot.snapshot_date.desc()).limit(5)
+                        sec_rows = (await s.execute(sec_stmt)).all()
+                        sector_sentiment_data = list(sec_rows)
+            except Exception as _e:
+                logger.warning("[Scheduler] [validation-C] %s 历史数据查询失败，降级为空: %s", record.fund_code, _e)
+
             user_parts = []
 
             # 段1: 今日预演数据
@@ -2837,6 +2904,46 @@ async def _run_validation_deepseek_advice() -> None:
                 f"Gate-2: {gate_2_str}\n"
                 f"总状态: {record.overall_status}\n"
             )
+            # 段1.5: P0 净值走势 (近10个交易日)
+            if nav_history_data:
+                nav_lines = []
+                for nd, nv, dr in reversed(nav_history_data):
+                    dr_str = f"{dr:+.2f}%" if dr is not None else "N/A"
+                    nav_lines.append(f"  {nd} | 净值 {nv:.4f} | 日涨跌 {dr_str}")
+                navs = [nv for _, nv, _ in nav_history_data]
+                dd_str = ""
+                if navs:
+                    peak = max(navs)
+                    trough = min(navs)
+                    drawdown = (trough - peak) / peak * 100 if peak > 0 else 0
+                    dd_str = f"\n  近10日最大回撤: {drawdown:.2f}% (峰值{peak:.4f} -> 谷值{trough:.4f})"
+                user_parts.append(
+                    "【近10日净值走势】\n"
+                    + "\n".join(nav_lines)
+                    + dd_str
+                )
+            else:
+                user_parts.append("【近10日净值走势】暂无历史净值数据")
+
+            # 段1.6: P0 信号趋势 (近10个交易日)
+            if signal_history_data:
+                sig_lines = []
+                _aa_map = {"increase": "加仓", "hold": "持有", "decrease": "减仓"}
+                for row in reversed(signal_history_data):
+                    sd, sc, sl, aa, rg, dd, ms = row
+                    sc_str = f"{sc:.1f}" if sc is not None else "N/A"
+                    aa_str = _aa_map.get(aa, aa or "N/A")
+                    rg_str = rg or "N/A"
+                    ms_str = ms or "N/A"
+                    dd_str = f"{dd:.2f}%" if dd is not None else "N/A"
+                    sig_lines.append(f"  {sd} | 信号 {sl or 'N/A'} | 情绪分 {sc_str} | 操作 {aa_str} | 回撤 {dd_str} | MACD {ms_str} | 体制 {rg_str}")
+                user_parts.append(
+                    "【近10日信号趋势】\n"
+                    + "\n".join(sig_lines)
+                )
+            else:
+                user_parts.append("【近10日信号趋势】暂无历史信号数据")
+
 
             # 段2: 大盘/板块/持仓
             mkt_str = f"{record.market_index_chg_pct:+.2f}%" if record.market_index_chg_pct is not None else "不可用"
@@ -2849,6 +2956,39 @@ async def _run_validation_deepseek_advice() -> None:
                 f"浮盈亏: {pnl_str}\n"
                 f"成本净值: {record.cost_basis}\n"
             )
+            # 段2.5: P1 大盘情绪 (近5个交易日)
+            if market_sentiment_data:
+                mkt_lines = []
+                _aa_map = {"increase": "加仓", "hold": "持有", "decrease": "减仓"}
+                for row in reversed(market_sentiment_data):
+                    sd, sc, sl, aa, rg = row
+                    sc_str = f"{sc:.1f}" if sc is not None else "N/A"
+                    aa_str = _aa_map.get(aa, aa or "N/A")
+                    mkt_lines.append(f"  {sd} | 情绪分 {sc_str} | 信号 {sl or 'N/A'} | 操作 {aa_str} | 体制 {rg or 'N/A'}")
+                user_parts.append(
+                    "【近5日大盘情绪(沪深300)】\n"
+                    + "\n".join(mkt_lines)
+                )
+            else:
+                user_parts.append("【近5日大盘情绪(沪深300)】暂无数据")
+
+            # 段2.6: P1 板块情绪 (近5个交易日)
+            if sector_sentiment_data:
+                sec_lines = []
+                _aa_map = {"increase": "加仓", "hold": "持有", "decrease": "减仓"}
+                for row in reversed(sector_sentiment_data):
+                    sd, sc, sl, aa = row
+                    sc_str = f"{sc:.1f}" if sc is not None else "N/A"
+                    aa_str = _aa_map.get(aa, aa or "N/A")
+                    sec_lines.append(f"  {sd} | 情绪分 {sc_str} | 信号 {sl or 'N/A'} | 操作 {aa_str}")
+                sec_name = record.sector_name or record.sector_code or "N/A"
+                user_parts.append(
+                    f"【近5日板块情绪({sec_name})】\n"
+                    + "\n".join(sec_lines)
+                )
+            else:
+                user_parts.append("【近5日板块情绪】暂无数据")
+
 
             # 段3: 历史回验
             if any(v is not None for v in historical_accuracy.values()):
@@ -2862,6 +3002,22 @@ async def _run_validation_deepseek_advice() -> None:
                 user_parts.append(f"【历史回验】近30天{'，'.join(hist_parts)}")
             else:
                 user_parts.append("【历史回验】暂无历史数据")
+
+            # 段3.5: P2 前日信号对比
+            if record.yesterday_signal or record.yesterday_score is not None:
+                y_sig = record.yesterday_signal or "N/A"
+                y_score = f"{record.yesterday_score:.1f}" if record.yesterday_score is not None else "N/A"
+                t_sig = record.preview_signal or "N/A"
+                t_score = f"{record.preview_score:.1f}" if record.preview_score is not None else "N/A"
+                delta_str = f"{record.score_delta:+.1f}" if record.score_delta is not None else "N/A"
+                _switched = "有变化" if y_sig != t_sig else "维持不变"
+                user_parts.append(
+                    f"【前日信号对比】\n"
+                    f"  昨日信号: {y_sig} (情绪分 {y_score})\n"
+                    f"  今日预演: {t_sig} (情绪分 {t_score})\n"
+                    f"  情绪分变化: {delta_str}\n"
+                    f"  信号切换: {_switched}"
+                )
 
             # 段4: 系统建议
             user_parts.append(f"【系统建议参考】\n{record.system_advice_text or '无'}")
@@ -2911,10 +3067,11 @@ async def _run_validation_deepseek_advice() -> None:
                     fund_market_value = float(fund_mv_res.scalar() or 0.0)
                     current_position_pct = fund_market_value / total_assets if total_assets > 0 else 0.0
 
-                # 映射 action_advice -> system_action（中文方向）
-                if snap_action == "increase":
+                # 统一真相源：优先用 record.system_advice_action（Validation-A 写入）
+                _raw_action = record.system_advice_action or snap_action
+                if _raw_action == "increase":
                     system_action = "加仓"
-                elif snap_action in ("decrease", "sell"):
+                elif _raw_action in ("decrease", "sell"):
                     system_action = "减仓"
                 else:
                     system_action = "持有"

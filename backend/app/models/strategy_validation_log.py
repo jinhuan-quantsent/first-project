@@ -193,6 +193,9 @@ class StrategyValidationLog(Base, TimestampMixin):
     system_advice_text: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True, comment="系统建议文本(7段300-500字, 14:50生成)",
     )
+    system_advice_action: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True, comment="系统建议方向(increase/hold/decrease)",
+    )
     advice_reason: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True, comment="引擎原始建议原因",
     )
