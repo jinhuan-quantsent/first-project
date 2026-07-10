@@ -303,7 +303,7 @@ class Settings(BaseSettings):
     DEEPSEEK_MAX_TOKENS: int = 2000
     DEEPSEEK_MAX_RETRIES: int = 1                   # 失败重试次数
     DEEPSEEK_TEMPERATURE: float = 0.3               # 低温度=稳定输出
-    DEEPSEEK_MODE: str = "translator"               # translator | independent (方案B Phase 1 Feature Flag)
+    DEEPSEEK_MODE: str = "independent"               # translator | independent (方案B Phase 1 Feature Flag)
 
 
     model_config = {
