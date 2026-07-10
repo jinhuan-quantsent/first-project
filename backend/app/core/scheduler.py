@@ -3722,6 +3722,7 @@ async def _run_nav_update() -> None:
                         nav_date=nav_date,
                         nav=nav_val,
                     ))
+                    await session.flush()
 
                 # 更新 user_portfolio: current_nav + 级联更新 market_value/total_return/return_rate
                 await session.execute(
@@ -3838,7 +3839,7 @@ async def _run_realtime_estimate() -> None:
         req = urllib.request.Request(url, headers={"Referer": "https://fund.eastmoney.com/"})
         with urllib.request.urlopen(req, timeout=5) as resp:
             raw = resp.read().decode("utf-8")
-        m = re.search(r"jsonpgz\((.*)\\)", raw)
+        m = re.search(r"jsonpgz\((.*)\)", raw)
         if not m:
             return None
         d = json.loads(m.group(1))
@@ -3905,6 +3906,7 @@ async def _run_nav_recheck() -> None:
                 )
                 if existing.scalar_one_or_none() is None:
                     session.add(FundNav(fund_code=fund_code, nav_date=nav_date, nav=nav_val))
+                    await session.flush()
                 # 级联更新: current_nav + market_value + total_return + return_rate
                 await session.execute(
                     text("""
@@ -4049,6 +4051,7 @@ async def _run_nav_morning_fetch() -> None:
                             nav_date=nav_date,
                             nav=nav_val,
                         ))
+                        await session.flush()
                         new_count += 1
 
                 # 取最新净值更新 current_nav + 级联 market_value/total_return/return_rate
@@ -4217,6 +4220,7 @@ async def _startup_nav_depth_check() -> None:
                             nav_date=nav_date,
                             nav=nav_val,
                         ))
+                        await session.flush()
                         inserted += 1
 
                 total_inserted += inserted
