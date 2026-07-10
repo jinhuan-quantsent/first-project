@@ -2005,47 +2005,121 @@ def _signal_level_distance(signal_a: str, signal_b: str) -> int:
     return abs(a_val - b_val)
 
 
+# ============================================================
+# 申万行业分类常量 — 申万代码/名称映射 + 申万→同花顺映射表
+# ============================================================
+
+# 申万一级行业代码 → 行业名称（31个，2021版）
+SW_CODE_TO_NAME: dict[str, str] = {
+    "801010": "农林牧渔", "801030": "基础化工", "801040": "钢铁",
+    "801050": "有色金属", "801080": "电子", "801110": "家用电器",
+    "801120": "食品饮料", "801130": "纺织服饰", "801140": "轻工制造",
+    "801150": "医药生物", "801160": "公用事业", "801170": "交通运输",
+    "801180": "房地产", "801200": "商贸零售", "801210": "社会服务",
+    "801230": "综合", "801710": "建筑材料", "801720": "建筑装饰",
+    "801730": "电力设备", "801740": "国防军工", "801750": "计算机",
+    "801760": "传媒", "801770": "通信", "801780": "银行",
+    "801790": "非银金融", "801880": "汽车", "801890": "机械设备",
+    "801950": "煤炭", "801960": "石油石化", "801970": "环保",
+    "801980": "美容护理",
+}
+
+# 申万一级行业 → 同花顺子板块列表映射表
+# 用于从同花顺 stock_board_industry_summary_ths() 实时数据转换为申万行业涨跌幅
+# 多个子板块取等权平均（实时涨跌幅仅作DeepSeek上下文参考，方向对即可）
+SW_TO_THS_MAPPING: dict[str, list[str]] = {
+    "农林牧渔": ["养殖业", "农产品加工", "种植业与林业"],
+    "基础化工": ["化学制品", "化学原料", "化学纤维", "农化制品", "塑料制品", "橡胶制品", "非金属材料"],
+    "钢铁": ["钢铁"],
+    "有色金属": ["工业金属", "小金属", "贵金属", "能源金属", "金属新材料"],
+    "电子": ["半导体", "消费电子", "光学光电子", "元件", "电子化学品", "其他电子"],
+    "家用电器": ["白色家电", "黑色家电", "小家电", "厨卫电器"],
+    "食品饮料": ["白酒", "食品加工制造", "饮料制造"],
+    "纺织服饰": ["服装家纺", "纺织制造"],
+    "轻工制造": ["家居用品", "包装印刷", "造纸"],
+    "医药生物": ["化学制药", "中药", "生物制品", "医疗器械", "医疗服务", "医药商业"],
+    "公用事业": ["电力", "燃气"],
+    "交通运输": ["公路铁路运输", "机场航运", "港口航运", "物流"],
+    "房地产": ["房地产"],
+    "商贸零售": ["零售", "贸易", "互联网电商"],
+    "社会服务": ["旅游及酒店", "教育", "其他社会服务"],
+    "综合": ["综合"],
+    "建筑材料": ["建筑材料"],
+    "建筑装饰": ["建筑装饰"],
+    "电力设备": ["光伏设备", "电池", "电网设备", "风电设备", "其他电源设备"],
+    "国防军工": ["军工电子", "军工装备"],
+    "计算机": ["软件开发", "IT服务", "计算机设备"],
+    "传媒": ["影视院线", "文化传媒", "游戏"],
+    "通信": ["通信服务", "通信设备"],
+    "银行": ["银行"],
+    "非银金融": ["证券", "保险", "多元金融"],
+    "汽车": ["汽车整车", "汽车零部件", "汽车服务及其他"],
+    "机械设备": ["通用设备", "专用设备", "工程机械", "自动化设备", "电机", "轨交设备"],
+    "煤炭": ["煤炭开采加工"],
+    "石油石化": ["油气开采及服务", "石油加工贸易"],
+    "环保": ["环保设备", "环境治理"],
+    "美容护理": ["美容护理"],
+}
+
+
 async def _fetch_realtime_sector_changes() -> dict[str, float]:
     """
     获取申万一级行业涨跌幅（盘中实时优先，T-1降级）。
 
     数据源优先级:
-    1. 东财 web API (stock_board_industry_name_em) — T-0 盘中实时，可能被限流
-    2. 申万指数历史 (index_hist_sw) — T-1 昨日日涨跌幅，稳定可用
+    1. 同花顺 (stock_board_industry_summary_ths) + 映射表 — T-0 盘中实时，主力(稳定免费)
+    2. 东财 web API (stock_board_industry_name_em) — T-0 盘中实时，补充(可能被限流)
+    3. 申万指数历史 (index_hist_sw) — T-1 昨日日涨跌幅，兜底
 
     返回 {sector_name: change_pct} 字典，如 {"通信": 5.37, "有色金属": -2.80}。
+    key 为申万一级行业名称。
     """
     result: dict[str, float] = {}
 
-    # 方式1: 东财 web API 实时板块涨跌幅 (T-0)
+    # 方式1: 同花顺实时板块涨跌幅 + 申万映射表 (T-0, 主力)
+    try:
+        import akshare as ak
+        import asyncio
+        df = await asyncio.to_thread(ak.stock_board_industry_summary_ths)
+        ths_data: dict[str, float] = {}
+        for _, row in df.iterrows():
+            name = str(row.get("板块", "")).strip()
+            chg = row.get("涨跌幅")
+            if name and chg is not None:
+                ths_data[name] = float(chg)
+        # 通过映射表转换为申万一级行业涨跌幅（等权平均）
+        for sw_name, ths_list in SW_TO_THS_MAPPING.items():
+            matched = [ths_data[t] for t in ths_list if t in ths_data]
+            if matched:
+                result[sw_name] = round(sum(matched) / len(matched), 2)
+        if result:
+            logger.info("[validation-A] 板块实时涨跌幅(同花顺 T-0): %d 个行业", len(result))
+            return result
+    except Exception as e:
+        logger.warning("[validation-A] 同花顺板块涨跌幅获取失败，将降级到东财web: %s", e)
+
+    # 方式2: 东财 web API 实时板块涨跌幅 (T-0, 补充 — 可能被限流)
     try:
         import akshare as ak
         import asyncio
         df = await asyncio.to_thread(ak.stock_board_industry_name_em)
+        em_data: dict[str, float] = {}
         for _, row in df.iterrows():
             name = str(row.get("板块名称", "")).strip()
             chg = row.get("涨跌幅")
             if name and chg is not None:
-                result[name] = float(chg)
+                em_data[name] = float(chg)
+        # 东财行业名称与申万不完全一致，尝试直接匹配申万行业名
+        for sw_name in SW_TO_THS_MAPPING.keys():
+            if sw_name in em_data:
+                result[sw_name] = em_data[sw_name]
         if result:
             logger.info("[validation-A] 板块实时涨跌幅(东财web T-0): %d 个行业", len(result))
             return result
     except Exception as e:
         logger.warning("[validation-A] 东财web板块涨跌幅获取失败，将降级到申万指数T-1: %s", e)
 
-    # 方式2: 申万指数历史 (T-1 降级 — 稳定可用)
-    SW_SECTORS = {
-        "801010": "农林牧渔", "801030": "基础化工", "801040": "钢铁",
-        "801050": "有色金属", "801080": "电子", "801110": "家用电器",
-        "801120": "食品饮料", "801130": "纺织服饰", "801140": "轻工制造",
-        "801150": "医药生物", "801160": "公用事业", "801170": "交通运输",
-        "801180": "房地产", "801200": "商贸零售", "801210": "社会服务",
-        "801220": "银行", "801230": "非银金融", "801710": "建筑材料",
-        "801720": "建筑装饰", "801730": "电力设备", "801740": "国防军工",
-        "801750": "计算机", "801760": "传媒", "801770": "通信",
-        "801780": "煤炭", "801790": "石油石化", "801880": "汽车",
-        "801890": "机械设备", "801960": "环保", "801970": "美容护理",
-    }
+    # 方式3: 申万指数历史 (T-1 降级 — 兜底)
     try:
         import akshare as ak
         import asyncio
@@ -2068,7 +2142,7 @@ async def _fetch_realtime_sector_changes() -> dict[str, float]:
             async with sem:
                 return await _fetch_one(code, name)
 
-        tasks = [_fetch_with_sem(c, n) for c, n in SW_SECTORS.items()]
+        tasks = [_fetch_with_sem(c, n) for c, n in SW_CODE_TO_NAME.items()]
         results = await asyncio.gather(*tasks)
         for name, chg in results:
             if chg is not None:
@@ -2408,7 +2482,7 @@ async def _run_validation_persist() -> None:
                 #       (15:45评分时akshare当天数据未出→用前日收盘→次日14:45读到的是T-2数据)。
                 #       改为东财 web API 实时获取(与大盘同口径)，Redis 作为降级。
                 sector_code = meta.get("sector_code") or ""
-                sector_name = meta.get("sector_name") or ""
+                sector_name = meta.get("sector_name") or SW_CODE_TO_NAME.get(sector_code, "")
                 sector_chg_pct = None
                 if sector_code:
                     # 优先: 东财实时板块涨跌幅（盘中实时，与大盘同口径）
