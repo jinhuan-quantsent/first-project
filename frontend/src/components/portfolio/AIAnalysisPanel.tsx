@@ -84,6 +84,7 @@ interface ValidationRecord {
   actual_nav_change_pct: number | null;
   actual_score: number | null;
   actual_signal_level: string | null;
+  ext_text1: string | null;
 }
 
 interface ApiResponse {
@@ -420,11 +421,40 @@ function BackfillRecord({ record }: { record: ValidationRecord }) {
           </span>
         )}
         {/* AI建议 vs 实际 */}
-        {aiActionInfo && (
-          <span className={clsx('px-1 py-0.5 rounded', aiActionInfo.bg, aiActionInfo.color)}>
-            AI{aiActionInfo.label}
-          </span>
-        )}
+        {aiActionInfo && (() => {
+          // 解析 ext_text1 检测是否被 Gate 覆盖
+          let isOverridden = false;
+          let rawActionLabel = '';
+          if (record.ext_text1) {
+            try {
+              const ext = JSON.parse(record.ext_text1);
+              if (ext.raw_action && ext.raw_action !== record.deepseek_advice_action) {
+                isOverridden = true;
+                rawActionLabel = ext.raw_action === 'increase' ? '加仓' : ext.raw_action === 'decrease' ? '减仓' : '持有';
+              }
+            } catch {}
+          }
+          return (
+            <span className={clsx('px-1 py-0.5 rounded', aiActionInfo.bg, aiActionInfo.color)}>
+              AI{rawActionLabel ? `${rawActionLabel}→` : ''}{aiActionInfo.label}
+            </span>
+          );
+        })()}
+        {(() => {
+          // 被覆盖标记
+          if (!record.ext_text1) return null;
+          try {
+            const ext = JSON.parse(record.ext_text1);
+            if (ext.raw_action && ext.raw_action !== record.deepseek_advice_action) {
+              return (
+                <span className="px-1 py-0.5 rounded bg-amber-50 text-amber-500 font-medium">
+                  被覆盖
+                </span>
+              );
+            }
+          } catch {}
+          return null;
+        })()}
         {/* AI正确性 */}
         {aiCorrect != null && (
           <span className={clsx('px-1 py-0.5 rounded', aiCorrect === 1 ? 'bg-green-50 text-green-500' : 'bg-red-50 text-red-400')}>

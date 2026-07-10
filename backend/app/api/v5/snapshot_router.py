@@ -949,6 +949,7 @@ async def get_validation_today(
             "actual_nav_change_pct": float(row.actual_nav_change_pct) if row.actual_nav_change_pct is not None else None,
             "actual_score": float(row.actual_score) if row.actual_score is not None else None,
             "actual_signal_level": row.actual_signal_level,
+            "ext_text1": row.ext_text1,
             # 阶段1：实时元金额字段（零DDL，仅 today 记录计算）
             "total_assets": amount_fields["total_assets"] if amount_fields else None,
             "current_position_pct": amount_fields["current_position_pct"] if amount_fields else None,
