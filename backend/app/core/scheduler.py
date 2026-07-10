@@ -3265,7 +3265,7 @@ async def _run_validation_backfill() -> None:
     8. UPDATE strategy_validation_log
     """
     from app.core.database import get_async_engine
-    from sqlalchemy import select
+    from sqlalchemy import select, or_
     from app.models.strategy_validation_log import StrategyValidationLog
     from app.models.fund_nav import FundNav
     from app.models.daily_signal_snapshot import DailySignalSnapshot
@@ -3285,7 +3285,10 @@ async def _run_validation_backfill() -> None:
     async with AsyncSession(engine) as session:
         stmt = select(StrategyValidationLog).where(
             StrategyValidationLog.trade_date == yesterday,
-            StrategyValidationLog.actual_trend.is_(None),
+            or_(
+                StrategyValidationLog.actual_trend.is_(None),
+                StrategyValidationLog.actual_score.is_(None),
+            ),
         )
         result = await session.execute(stmt)
         records = result.scalars().all()
@@ -3410,11 +3413,18 @@ async def _run_validation_backfill() -> None:
                 else:  # hold
                     advice_accuracy = 1.0 if actual_trend in ("down", "flat") else 0.5
 
-            # 9. Gate准确度
-            gate_triggered = (record.gate_1_triggered == 1) or (record.gate_2_triggered == 1)
-            if gate_triggered:
+            # 9. Gate准确度 — 区分 Gate-1(加仓信号) vs Gate-2(减仓信号)
+            if record.gate_1_triggered == 1 and record.gate_2_triggered == 1:
+                # 两个Gate同时触发(矛盾信号), 取0.5部分正确
+                gate_accuracy = 0.5
+            elif record.gate_1_triggered == 1:
+                # Gate-1: 加仓信号 — 大涨(>3%)=正确, 其他=错误
+                gate_accuracy = 1.0 if actual_nav_change_pct > 3.0 else 0.0
+            elif record.gate_2_triggered == 1:
+                # Gate-2: 减仓信号 — 大跌(<-3%)=正确(规避风险), 其他=错误
                 gate_accuracy = 1.0 if actual_nav_change_pct < -3.0 else 0.0
             else:
+                # 无Gate触发 — 未大跌(>-5%)=正确(无需干预), 大跌=错误(应预警)
                 gate_accuracy = 1.0 if actual_nav_change_pct > -5.0 else 0.0
 
             # 10. 综合评分
