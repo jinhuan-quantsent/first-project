@@ -2005,6 +2005,82 @@ def _signal_level_distance(signal_a: str, signal_b: str) -> int:
     return abs(a_val - b_val)
 
 
+async def _fetch_realtime_sector_changes() -> dict[str, float]:
+    """
+    获取申万一级行业涨跌幅（盘中实时优先，T-1降级）。
+
+    数据源优先级:
+    1. 东财 web API (stock_board_industry_name_em) — T-0 盘中实时，可能被限流
+    2. 申万指数历史 (index_hist_sw) — T-1 昨日日涨跌幅，稳定可用
+
+    返回 {sector_name: change_pct} 字典，如 {"通信": 5.37, "有色金属": -2.80}。
+    """
+    result: dict[str, float] = {}
+
+    # 方式1: 东财 web API 实时板块涨跌幅 (T-0)
+    try:
+        import akshare as ak
+        import asyncio
+        df = await asyncio.to_thread(ak.stock_board_industry_name_em)
+        for _, row in df.iterrows():
+            name = str(row.get("板块名称", "")).strip()
+            chg = row.get("涨跌幅")
+            if name and chg is not None:
+                result[name] = float(chg)
+        if result:
+            logger.info("[validation-A] 板块实时涨跌幅(东财web T-0): %d 个行业", len(result))
+            return result
+    except Exception as e:
+        logger.warning("[validation-A] 东财web板块涨跌幅获取失败，将降级到申万指数T-1: %s", e)
+
+    # 方式2: 申万指数历史 (T-1 降级 — 稳定可用)
+    SW_SECTORS = {
+        "801010": "农林牧渔", "801030": "基础化工", "801040": "钢铁",
+        "801050": "有色金属", "801080": "电子", "801110": "家用电器",
+        "801120": "食品饮料", "801130": "纺织服饰", "801140": "轻工制造",
+        "801150": "医药生物", "801160": "公用事业", "801170": "交通运输",
+        "801180": "房地产", "801200": "商贸零售", "801210": "社会服务",
+        "801220": "银行", "801230": "非银金融", "801710": "建筑材料",
+        "801720": "建筑装饰", "801730": "电力设备", "801740": "国防军工",
+        "801750": "计算机", "801760": "传媒", "801770": "通信",
+        "801780": "煤炭", "801790": "石油石化", "801880": "汽车",
+        "801890": "机械设备", "801960": "环保", "801970": "美容护理",
+    }
+    try:
+        import akshare as ak
+        import asyncio
+
+        async def _fetch_one(code: str, name: str):
+            try:
+                df = await asyncio.to_thread(ak.index_hist_sw, symbol=code, period="day")
+                if len(df) >= 2:
+                    latest = float(df.iloc[-1]["收盘"])
+                    prev = float(df.iloc[-2]["收盘"])
+                    if prev > 0:
+                        return name, round((latest / prev - 1) * 100, 2)
+            except Exception:
+                pass
+            return name, None
+
+        sem = asyncio.Semaphore(5)
+
+        async def _fetch_with_sem(code, name):
+            async with sem:
+                return await _fetch_one(code, name)
+
+        tasks = [_fetch_with_sem(c, n) for c, n in SW_SECTORS.items()]
+        results = await asyncio.gather(*tasks)
+        for name, chg in results:
+            if chg is not None:
+                result[name] = chg
+        if result:
+            logger.info("[validation-A] 板块涨跌幅(申万指数 T-1降级): %d 个行业", len(result))
+    except Exception as e:
+        logger.warning("[validation-A] 申万指数T-1涨跌幅获取失败: %s", e)
+
+    return result
+
+
 # ============================================================
 # 策略验证分析表 — 任务A: 14:50预演持久化 + 系统建议
 # ============================================================
@@ -2075,6 +2151,17 @@ async def _run_validation_persist() -> None:
         except Exception as e:
             logger.warning("[validation-A] 获取沪深300涨跌幅失败: %s", e)
     # 最终未取到则保持 None（0 会伪装成平盘，必须避免）
+
+    # 1b. 获取板块实时涨跌幅（申万一级行业，盘中实时 — 与大盘同口径）
+    # 修复: 原从 Redis v5:sector:sentiment 读 sector_return，但该缓存由 15:45 板块评分
+    #       任务写入，15:45 时 akshare 当天收盘数据未出 → 用的是前一日收盘 → 双重滞后。
+    #       改为东财 web API 实时获取（akshare stock_board_industry_name_em），
+    #       Redis 缓存作为降级。
+    realtime_sector_changes = await _fetch_realtime_sector_changes()
+    if realtime_sector_changes:
+        logger.info("[validation-A] 板块实时涨跌幅: %d 个行业", len(realtime_sector_changes))
+    else:
+        logger.warning("[validation-A] 板块实时涨跌幅获取失败，将降级到Redis缓存")
 
     # 2. 获取所有持仓
     async with AsyncSession(engine) as session:
@@ -2316,56 +2403,37 @@ async def _run_validation_persist() -> None:
                     intraday_high_gszzl = float(hl_data["high"]) if hl_data.get("high") is not None else None
                     intraday_low_gszzl = float(hl_data["low"]) if hl_data.get("low") is not None else None
 
-                # 5j. 板块涨跌幅
-                # 修复: 原查 SectorHeatmapCache 表 → 该表从不写入，永远返回 None。
-                # 改为从 Redis v5:sector:sentiment(板块情绪缓存，盘中实时)读取；
-                # sector_return 已是百分比数值(如 1.5 表示 +1.5%)，绝不乘100。
-                # 周一缓存过期兜底: 查 SectorSentiment 表最新一行补全 sector_name。
-                # 注意: SectorSentiment 表无 sector_code/sector_return 字段(仅有
-                #       sector_name + calc_date + 情绪评分)，无法按代码关联，也不能恢复
-                #       sector_chg_pct；且 meta 未携带 sector_name，故兜底仅能尽力补全
-                #       sector_name，sector_chg_pct 保持 None(避免伪造 0% 平盘)。
+                # 5j. 板块涨跌幅 — 优先东财实时，降级 Redis 缓存
+                # 修复: 原从 Redis v5:sector:sentiment 读 sector_return，存在双重滞后
+                #       (15:45评分时akshare当天数据未出→用前日收盘→次日14:45读到的是T-2数据)。
+                #       改为东财 web API 实时获取(与大盘同口径)，Redis 作为降级。
                 sector_code = meta.get("sector_code") or ""
-                sector_name = ""
+                sector_name = meta.get("sector_name") or ""
                 sector_chg_pct = None
                 if sector_code:
-                    try:
-                        sector_cache = await cache_get("v5:sector:sentiment")
-                        if sector_cache:
-                            sectors_list = (
-                                sector_cache.get("data", {}).get("sectors", [])
-                                if isinstance(sector_cache, dict)
-                                else []
-                            )
-                            for sec in sectors_list:
-                                if str(sec.get("sector_code", "")) == str(sector_code):
-                                    sector_name = sec.get("sector_name", "") or ""
-                                    ret = sec.get("sector_return")
-                                    if ret is not None:
-                                        # sector_return 已是百分比数值，不乘100
-                                        sector_chg_pct = float(ret)
-                                    break
-                    except Exception:
-                        pass
-                    # 兜底: Redis 为空(如周一缓存过期)时，用 sector_name 查 SectorSentiment 表
-                    if not sector_name:
-                        sname = meta.get("sector_name") or ""
-                        if sname:
-                            try:
-                                async with AsyncSession(engine) as session:
-                                    ss_stmt = (
-                                        select(SectorSentiment)
-                                        .where(SectorSentiment.sector_name == sname)
-                                        .order_by(SectorSentiment.calc_date.desc())
-                                        .limit(1)
-                                    )
-                                    ss_res = await session.execute(ss_stmt)
-                                    ss_row = ss_res.scalar_one_or_none()
-                                    if ss_row:
-                                        sector_name = ss_row.sector_name or ""
-                                        # 表无 sector_return 字段，sector_chg_pct 保持 None
-                            except Exception:
-                                pass
+                    # 优先: 东财实时板块涨跌幅（盘中实时，与大盘同口径）
+                    if sector_name and sector_name in realtime_sector_changes:
+                        sector_chg_pct = realtime_sector_changes[sector_name]
+                    # 降级: Redis v5:sector:sentiment 缓存
+                    if sector_chg_pct is None:
+                        try:
+                            sector_cache = await cache_get("v5:sector:sentiment")
+                            if sector_cache:
+                                sectors_list = (
+                                    sector_cache.get("data", {}).get("sectors", [])
+                                    if isinstance(sector_cache, dict)
+                                    else []
+                                )
+                                for sec in sectors_list:
+                                    if str(sec.get("sector_code", "")) == str(sector_code):
+                                        if not sector_name:
+                                            sector_name = sec.get("sector_name", "") or ""
+                                        ret = sec.get("sector_return")
+                                        if ret is not None:
+                                            sector_chg_pct = float(ret)
+                                        break
+                        except Exception:
+                            pass
 
                 # 5k. 持仓盈亏
                 cost_basis = finfo["cost_nav"] if finfo["cost_nav"] > 0 else None
