@@ -2751,7 +2751,7 @@ async def _run_validation_deepseek_advice() -> None:
         return
 
     # 2. 获取历史准确率（供提示词使用）
-    historical_accuracy: dict = {"signal_accuracy": None, "advice_accuracy": None, "gate_accuracy": None}
+    historical_accuracy: dict = {"signal_accuracy": None, "advice_accuracy": None, "gate_accuracy": None, "deepseek_accuracy": None, "ds_count": 0}
     try:
         async with AsyncSession(engine) as session:
             thirty_days_ago = today - timedelta(days=30)
@@ -2759,6 +2759,8 @@ async def _run_validation_deepseek_advice() -> None:
                 sa_func.avg(StrategyValidationLog.signal_accuracy),
                 sa_func.avg(StrategyValidationLog.advice_accuracy),
                 sa_func.avg(StrategyValidationLog.gate_accuracy),
+                sa_func.avg(StrategyValidationLog.deepseek_advice_correct),
+                sa_func.count(StrategyValidationLog.deepseek_advice_correct),
             ).where(
                 StrategyValidationLog.trade_date >= thirty_days_ago,
                 StrategyValidationLog.trade_date < today,
@@ -2770,6 +2772,8 @@ async def _run_validation_deepseek_advice() -> None:
                     "signal_accuracy": round(float(hist_row[0]), 2) if hist_row[0] is not None else None,
                     "advice_accuracy": round(float(hist_row[1]), 2) if hist_row[1] is not None else None,
                     "gate_accuracy": round(float(hist_row[2]), 2) if hist_row[2] is not None else None,
+                    "deepseek_accuracy": round(float(hist_row[3]), 2) if hist_row[3] is not None else None,
+                    "ds_count": int(hist_row[4]) if hist_row[4] is not None else 0,
                 }
     except Exception:
         pass
@@ -2991,15 +2995,20 @@ async def _run_validation_deepseek_advice() -> None:
 
 
             # 段3: 历史回验
-            if any(v is not None for v in historical_accuracy.values()):
+            _acc_keys = ["signal_accuracy", "advice_accuracy", "gate_accuracy", "deepseek_accuracy"]
+            if any(historical_accuracy.get(k) is not None for k in _acc_keys):
                 hist_parts = []
                 if historical_accuracy["signal_accuracy"] is not None:
                     hist_parts.append(f"信号准确率{historical_accuracy['signal_accuracy']*100:.0f}%")
                 if historical_accuracy["advice_accuracy"] is not None:
-                    hist_parts.append(f"建议准确率{historical_accuracy['advice_accuracy']*100:.0f}%")
+                    hist_parts.append(f"系统建议准确率{historical_accuracy['advice_accuracy']*100:.0f}%")
                 if historical_accuracy["gate_accuracy"] is not None:
                     hist_parts.append(f"Gate准确率{historical_accuracy['gate_accuracy']*100:.0f}%")
-                user_parts.append(f"【历史回验】近30天{'，'.join(hist_parts)}")
+                if historical_accuracy.get("deepseek_accuracy") is not None:
+                    hist_parts.append(f"AI建议准确率{historical_accuracy['deepseek_accuracy']*100:.0f}%")
+                _ds_cnt = historical_accuracy.get("ds_count", 0)
+                _cnt_str = f"(AI建议{_ds_cnt}次)" if _ds_cnt else ""
+                user_parts.append(f"【历史回验】近30天{'，'.join(hist_parts)}{_cnt_str}")
             else:
                 user_parts.append("【历史回验】暂无历史数据")
 
@@ -3414,18 +3423,40 @@ async def _run_validation_backfill() -> None:
                 2,
             )
 
-            # 11. DeepSeek准确度
-            # Phase 1: independent模式下 deepseek_advice_action = AI原始方向（未被override），此处计算正确
-            #          translator模式下 deepseek_advice_action = 系统方向（被override），此处测的是系统准确率（已知局限）
+            # 11. DeepSeek准确度 — 用AI原始方向回验(即使被Gate覆盖,仍评估AI真实判断)
+            #    3级评分: 1.0=命中, 0.5=震荡市部分正确, 0.0=方向错误
             deepseek_advice_correct = None
             if record.deepseek_advice_action:
-                ds_action = record.deepseek_advice_action
-                if ds_action == "increase":
-                    deepseek_advice_correct = 1 if actual_trend == "up" else 0
-                elif ds_action == "decrease":
-                    deepseek_advice_correct = 1 if actual_trend == "down" else 0
+                import json as _json
+                ds_eval_action = record.deepseek_advice_action
+                # 优先用 ext_text1 中的 raw_action(Gate覆盖前的AI原始判断)
+                if record.ext_text1:
+                    try:
+                        _ext = _json.loads(record.ext_text1)
+                        if _ext.get("raw_action"):
+                            ds_eval_action = _ext["raw_action"]
+                    except Exception:
+                        pass
+
+                if ds_eval_action == "increase":
+                    if actual_trend == "up":
+                        deepseek_advice_correct = 1.0
+                    elif actual_trend == "flat":
+                        deepseek_advice_correct = 0.5
+                    else:
+                        deepseek_advice_correct = 0.0
+                elif ds_eval_action == "decrease":
+                    if actual_trend == "down":
+                        deepseek_advice_correct = 1.0
+                    elif actual_trend == "flat":
+                        deepseek_advice_correct = 0.5
+                    else:
+                        deepseek_advice_correct = 0.0
                 else:  # hold
-                    deepseek_advice_correct = 1 if actual_trend in ("down", "flat") else 0
+                    if actual_trend in ("down", "flat"):
+                        deepseek_advice_correct = 1.0
+                    else:
+                        deepseek_advice_correct = 0.5
 
             # 12. UPDATE
             async with AsyncSession(engine) as session:

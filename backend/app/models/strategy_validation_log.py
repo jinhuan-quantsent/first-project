@@ -207,7 +207,7 @@ class StrategyValidationLog(Base, TimestampMixin):
     deepseek_advice_action: Mapped[Optional[str]] = mapped_column(
         String(20), nullable=True, comment="AI建议方向(increase/hold/decrease)",
     )
-    deepseek_advice_correct: Mapped[Optional[int]] = mapped_column(
+    deepseek_advice_correct: Mapped[Optional[float]] = mapped_column(
         Integer, nullable=True, index=True, comment="AI建议准确度(0/1, T+1回填)",
     )
 
