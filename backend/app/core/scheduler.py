@@ -1732,7 +1732,7 @@ async def _run_intraday_elastic_weekly() -> None:
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy import select
     from app.models.user_portfolio import UserPortfolio
-    from app.models.factor_history import FactorHistory
+    from app.models.daily_signal_snapshot import DailySignalSnapshot
     from app.core.redis_client import cache_get, cache_set
 
     if not settings.ENABLE_INTRADAY_PREVIEW:
@@ -1757,10 +1757,10 @@ async def _run_intraday_elastic_weekly() -> None:
         try:
             async with AsyncSession(engine) as session:
                 # 取最近5个交易日的因子历史（含score和signal）
-                stmt = select(FactorHistory).where(
-                    FactorHistory.fund_code == fund_code,
-                    FactorHistory.trade_date >= today - timedelta(days=10)  # 10天窗口确保5个交易日
-                ).order_by(FactorHistory.trade_date.desc()).limit(5)
+                stmt = select(DailySignalSnapshot).where(
+                    DailySignalSnapshot.target_code == fund_code,
+                    DailySignalSnapshot.snapshot_date >= today - timedelta(days=10)  # 10天窗口确保5个交易日
+                ).order_by(DailySignalSnapshot.snapshot_date.desc()).limit(5)
                 result = await session.execute(stmt)
                 factor_rows = result.scalars().all()
 
@@ -1781,7 +1781,7 @@ async def _run_intraday_elastic_weekly() -> None:
                     today_row = factor_rows[i]
                     yesterday_row = factor_rows[i + 1]
 
-                    score_delta = float(today_row.score or 0) - float(yesterday_row.score or 0)
+                    score_delta = float(today_row.composite_score or 0) - float(yesterday_row.composite_score or 0)
 
                     # 使用score波动率作为弹性系数调整因子
                     score_volatility = abs(score_delta)
