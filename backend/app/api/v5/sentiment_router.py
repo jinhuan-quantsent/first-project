@@ -10,6 +10,14 @@ from app.core.redis_client import cache_get, cache_set
 from app.core.database import get_session_factory
 from app.services.sentiment_service import SentimentService
 from app.api.v5.schemas import PositionAdviceRequest, PositionExecuteRequest
+from app.utils.code_format import to_tushare, to_display, is_index_code
+
+
+def _normalize_index_code(index_code: str) -> str | None:
+    """归一化指数代码，返回 Display 格式或 None"""
+    if not is_index_code(index_code):
+        return None
+    return to_display(to_tushare(index_code))
 
 
 router = APIRouter(tags=["v5-sentiment"])
@@ -28,6 +36,12 @@ async def get_v5_sentiment(
     """
     if trade_date is None:
         trade_date = date.today().isoformat()
+
+    # 归一化指数代码（000300→SH000300）
+    normalized = _normalize_index_code(index_code)
+    if normalized is None:
+        return {"code": 404, "data": None, "message": f"无效的指数代码: {index_code}"}
+    index_code = normalized
 
     # 路由层缓存检查（先于 session 分配，避免连接池耗尽时阻塞）
     cache_key = f"v5:sentiment:{index_code}:{trade_date}"
@@ -103,6 +117,12 @@ async def get_v5_signal_lights(
     返回最近N天的信号等级，用于 SignalLights 组件。
     路由层 Redis 缓存 5 分钟。
     """
+    # 归一化指数代码
+    normalized = _normalize_index_code(index_code)
+    if normalized is None:
+        return {"code": 404, "data": None, "message": f"无效的指数代码: {index_code}"}
+    index_code = normalized
+
     cache_key = f"v5:signal_lights:{index_code}:{days}"
     cached = await cache_get(cache_key)
     if cached:
@@ -199,6 +219,12 @@ async def get_factor_radar(
     返回14因子的当前分位数值（百分位数），供 ECharts 雷达图使用。
     路由层 Redis 缓存 30 分钟。
     """
+    # 归一化指数代码
+    normalized = _normalize_index_code(index_code)
+    if normalized is None:
+        return {"code": 404, "data": None, "message": f"无效的指数代码: {index_code}"}
+    index_code = normalized
+
     cache_key = f"v5:factor_radar:{index_code}"
     cached = await cache_get(cache_key)
     if cached:
