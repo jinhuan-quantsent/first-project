@@ -108,7 +108,7 @@ class SentimentService:
         )
 
         # MACD + 价格历史
-        macd_data, sentiment_history, price_history, macd_history = await self._compute_macd_and_history(
+        macd_data, sentiment_history, price_history, macd_history, price_macd_data, price_macd_history = await self._compute_macd_and_history(
             db_session=self.db_session,
             index_code=index_code,
             trade_date=trade_date,
@@ -157,6 +157,8 @@ class SentimentService:
             "defenses_triggered": defenses,
             "macd": macd_data,
             "macd_history": macd_history,
+            "price_macd": price_macd_data,
+            "price_macd_history": price_macd_history,
             "factor_details": [r.to_dict() for r in sigmoid_results],
             "updated_at": datetime.now().isoformat(),
         }
@@ -669,7 +671,7 @@ class SentimentService:
         trade_date: str,
         composite_score: float,
         index_data: dict,
-    ) -> tuple[Optional[dict], list, list, list[dict]]:
+    ) -> tuple[Optional[dict], list, list, list[dict], Optional[dict], list[dict]]:
         """
         计算 MACD + 加载价格/情绪历史 + MACD 历史序列
         """
@@ -677,6 +679,8 @@ class SentimentService:
         sentiment_history = []
         price_history = []
         macd_history = []
+        price_macd_data = None
+        price_macd_history: list[dict] = []
         try:
             # 获取情绪历史（含日期），用于 MACD 计算和历史序列对齐
             sentiment_history_with_dates = await self.history_store.get_series_with_dates(
@@ -710,15 +714,41 @@ class SentimentService:
                 ):
                     macd_history.pop(-2)
 
-            price_history = await self.history_store.get_series(
+            close_history_with_dates = await self.history_store.get_series_with_dates(
                 db_session, index_code, "CLOSE", lookback_days=120,
             )
+            price_history = [v for _, v in close_history_with_dates]
+            close_dates = [d for d, _ in close_history_with_dates]
             today_close = index_data.get("close")
             if today_close:
                 price_history.append(float(today_close))
+                close_dates.append(trade_date)
+
+            # 价格MACD计算（12/26/9经典参数）
+            from app.engine.price_macd import PriceMACD
+            price_macd_engine = PriceMACD()
+            price_macd_data = price_macd_engine.compute(price_history)
+            price_macd_history_raw = price_macd_engine.compute_history(price_history)
+
+            # 对齐日期：使用 CLOSE 自己的日期序列
+            total_len_price = len(price_history)
+            pm_hist_len = len(price_macd_history_raw)
+            if pm_hist_len > 0 and len(close_dates) == total_len_price:
+                offset = total_len_price - pm_hist_len
+                price_macd_history = [
+                    {"date": close_dates[offset + i], **price_macd_history_raw[i]}
+                    for i in range(pm_hist_len)
+                ]
+                if (
+                    len(price_macd_history) >= 2
+                    and price_macd_history[-1]["date"] == price_macd_history[-2]["date"]
+                ):
+                    price_macd_history.pop(-2)
         except Exception:
             macd_data = None
-        return macd_data, sentiment_history, price_history, macd_history
+            price_macd_data = None
+            price_macd_history = []
+        return macd_data, sentiment_history, price_history, macd_history, price_macd_data, price_macd_history
 
     async def _store_history(
         self,

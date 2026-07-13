@@ -163,6 +163,7 @@ async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_se
 
     # 情绪MACD计算（需要历史composite_score序列）
     macd_data = None
+    price_macd_data = None
     sentiment_history = []
     price_history = []
     try:
@@ -184,6 +185,11 @@ async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_se
         today_close = index_data.get("close")
         if today_close:
             price_history.append(float(today_close))
+
+        # 价格MACD计算（12/26/9经典参数）
+        from app.engine.price_macd import PriceMACD
+        price_macd_engine = PriceMACD()
+        price_macd_data = price_macd_engine.compute(price_history)
     except Exception:
         macd_data = None
 
@@ -224,6 +230,7 @@ async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_se
         "confidence_detail": confidence_detail,
         "defenses_triggered": defenses,
         "macd": macd_data,
+        "price_macd": price_macd_data,
         "factor_details": [r.to_dict() for r in sigmoid_results],
         "updated_at": datetime.now().isoformat(),
     }
