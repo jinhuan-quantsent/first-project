@@ -1295,11 +1295,11 @@ async def get_position_v5(
 
     使用 V5 引擎（11因子 + 7级信号 + 5×7仓位矩阵）
     """
-    from app.engine.v5 import _run_v5_pipeline
+    from app.services.sentiment_service import SentimentService
     from app.engine.position_v5 import PositionEngineV5
 
     # 获取市场信号（默认沪深300）
-    result = await _run_v5_pipeline("SH000300", db_session=session)
+    result = await SentimentService(session).run_pipeline("SH000300", persist=False)
     if "error" in result:
         return {"code": 500, "data": None, "message": "无法获取市场信号"}
 

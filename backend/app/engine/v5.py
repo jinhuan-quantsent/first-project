@@ -25,6 +25,7 @@ from app.engine.signal_mapper import SignalMapper
 from app.engine.confidence import ConfidenceEngine
 from app.engine.position_v5 import PositionEngineV5
 from app.engine.sentiment_macd import SentimentMACD
+from app.services.sentiment_service import SentimentService
 
 router = APIRouter(prefix="/api/v5")
 
@@ -48,195 +49,6 @@ class PositionExecuteRequest(BaseModel):
 
 
 # ============================================================
-# 辅助函数
-# ============================================================
-
-async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_session: AsyncSession = None) -> dict:
-    """
-    运行 V5.0 完整流水线
-    返回：{
-        "index_code": ...,
-        "index_name": ...,
-        "composite_score": ...,
-        "signal_level": ...,
-        "confidence_stars": ...,
-        "confidence_detail": ...,
-        "factor_details": [...],
-        "regime": ...,
-        "defenses_triggered": ...,
-    }
-    """
-    if trade_date is None:
-        trade_date = date.today().isoformat()
-
-    # 获取指数数据
-    index_data = await data_source.get_index_data(index_code)
-    if not index_data or index_data.get("index_name") == "未知指数":
-        return {"error": f"指数 {index_code} 不存在"}
-
-    # Layer 1+2+3：11因子流水线
-    quantile = QuantileNorm(session=db_session)
-    sigmoid_mapper = SigmoidMapper()
-    aggregator = AggregatorV5()
-    signal_mapper = SignalMapper()
-    confidence_engine = ConfidenceEngine()
-
-    factor_results = []
-    sigmoid_results = []
-
-    for name in FACTOR_NAMES:
-        factor_cls = FACTOR_CLASSES.get(name)
-        if not factor_cls:
-            continue
-        factor = factor_cls()
-
-        # 获取原始值
-        try:
-            raw_value_obj = await factor.fetch_raw(index_code, trade_date)
-            raw_value = raw_value_obj.raw_value
-        except Exception:
-            raw_value = factor._get_default_raw_value(index_code)
-
-        # Layer 1：分位数归一化（优先读DB，否则现场算）
-        percentile = None
-        try:
-            from sqlalchemy import select as sa_select
-            from app.models.factor_history import FactorHistory as FH
-            _qp_result = await db_session.execute(
-                sa_select(FH.quantile_percentile).where(
-                    FH.trade_date == trade_date,
-                    FH.index_code == index_code,
-                    FH.factor_name == name,
-                )
-            )
-            _qp = _qp_result.scalar()
-            if _qp is not None:
-                percentile = _qp
-        except Exception:
-            pass
-        if percentile is None:
-            percentile = await quantile.calc_percentile(raw_value, index_code, name)
-
-        # ✅ FIX P0：将分位数结果写回 factor_history（之前只算不存）
-        if percentile is not None:
-            try:
-                from sqlalchemy import update as sa_update
-                stmt = (
-                    sa_update(FactorHistory)
-                    .where(
-                        FactorHistory.trade_date == trade_date,
-                        FactorHistory.index_code == index_code,
-                        FactorHistory.factor_name == name,
-                    )
-                    .values(quantile_percentile=percentile)
-                )
-                await db_session.execute(stmt)
-            except Exception:
-                pass  # 静默失败，不影响主流程
-
-        # Layer 2：Sigmoid 映射
-        if percentile is not None:
-            x = percentile
-        else:
-            x = 0.50  # 默认中位数
-
-        sigmoid_score = sigmoid_mapper.apply_sigmoid(x, factor.sigmoid_c, factor.sigmoid_k)
-
-        # 反向因子处理（fear方向因子统一反转）
-        if factor.direction == "fear":
-            sigmoid_score = 100.0 - sigmoid_score
-
-        sigmoid_results.append(FactorSigmoidResult(
-            factor_name=name,
-            percentile=percentile if percentile is not None else 0.50,
-            sigmoid_score=sigmoid_score,
-            c_param=factor.sigmoid_c,
-            k_param=factor.sigmoid_k,
-            slope_at_midpoint=0.0,
-        ))
-
-    # Layer 3：加权聚合
-    composite = aggregator.aggregate(sigmoid_results)
-
-    # 信号映射
-    signal_level, jump_blocked = signal_mapper.map(composite.score)
-
-    # 情绪MACD计算（需要历史composite_score序列）
-    macd_data = None
-    price_macd_data = None
-    sentiment_history = []
-    price_history = []
-    try:
-        from app.engine.factor_history import FactorHistoryStore
-        history_store = FactorHistoryStore()
-        sentiment_history = await history_store.get_series(
-            db_session, index_code, "COMPOSITE", lookback_days=60,
-        )
-        # 加入今天的分数
-        score_series_for_macd = sentiment_history + [composite.score]
-        macd_engine = SentimentMACD()
-        macd_data = macd_engine.compute(score_series_for_macd)
-
-        # 获取价格历史（用于背离检测）
-        price_history = await history_store.get_series(
-            db_session, index_code, "CLOSE", lookback_days=60,
-        )
-        # 加入今天的价格
-        today_close = index_data.get("close")
-        if today_close:
-            price_history.append(float(today_close))
-
-        # 价格MACD计算（12/26/9经典参数）
-        from app.engine.price_macd import PriceMACD
-        price_macd_engine = PriceMACD()
-        price_macd_data = price_macd_engine.compute(price_history)
-    except Exception:
-        macd_data = None
-
-    # 存储今日composite_score到factor_history（供MACD后续使用）
-    try:
-        from app.engine.factor_history import FactorHistoryStore
-        history_store = FactorHistoryStore()
-        await history_store.insert(
-            db_session, index_code, "COMPOSITE", trade_date, composite.score,
-        )
-        # 同时存储今日收盘价（供背离检测使用）
-        today_close = index_data.get("close")
-        if today_close:
-            await history_store.insert(
-                db_session, index_code, "CLOSE", trade_date, float(today_close),
-            )
-    except Exception:
-        pass  # 非关键路径，失败不影响主流程
-
-    # 置信度计算（传入MACD数据+价格/情绪序列）
-    confidence_stars, confidence_detail, defenses = confidence_engine.calculate(
-        sigmoid_results, signal_level, composite.divergence.regime,
-        macd_data=macd_data,
-        price_series=price_history if len(price_history) >= 5 else None,
-        sentiment_series=sentiment_history + [composite.score] if len(sentiment_history) >= 4 else None,
-    )
-
-    return {
-        "index_code": index_code,
-        "index_name": index_data.get("index_name", index_code),
-        "composite_score": round(composite.score, 2),
-        "score_std": round(composite.divergence.factor_std, 4),
-        "divergence_penalty": round(composite.divergence.penalty_factor, 4),
-        "regime": composite.divergence.regime,
-        "signal_level": signal_level,
-        "signal_jump_blocked": jump_blocked,
-        "confidence_stars": confidence_stars,
-        "confidence_detail": confidence_detail,
-        "defenses_triggered": defenses,
-        "macd": macd_data,
-        "price_macd": price_macd_data,
-        "factor_details": [r.to_dict() for r in sigmoid_results],
-        "updated_at": datetime.now().isoformat(),
-    }
-
-
-# ============================================================
 # API 接口
 # ============================================================
 
@@ -251,7 +63,7 @@ async def get_v5_sentiment(
 
     返回完整流水线结果，用于前端信号详情页
     """
-    result = await _run_v5_pipeline(index_code, trade_date, db_session=session)
+    result = await SentimentService(session).run_pipeline(index_code, trade_date)
 
     if "error" in result:
         return {"code": 404, "data": None, "message": result["error"]}
@@ -275,7 +87,7 @@ async def get_v5_multi_index(
     # NOTE(D9): 当前4指数串行for-loop，冷启动3-5秒。预热缓存已缓解。
     #    长期优化方向: asyncio.gather + 每指数独立session
     for code in code_list:
-        result = await _run_v5_pipeline(code, db_session=session)
+        result = await SentimentService(session).run_pipeline(code, persist=False)
         if "error" in result:
             continue
 
@@ -349,7 +161,7 @@ async def get_v5_signal_lights(
         d = today - timedelta(days=i)
         trade_date = d.isoformat()
 
-        result = await _run_v5_pipeline(index_code, trade_date, db_session=session)
+        result = await SentimentService(session).run_pipeline(index_code, trade_date, persist=False)
         if "error" in result:
             signals.append({
                 "date": trade_date,
@@ -389,7 +201,7 @@ async def get_v5_position_advice(
     """
     # 获取市场信号（默认用 SH000300 沪深300）
     index_code = "SH000300"
-    result = await _run_v5_pipeline(index_code, db_session=session)
+    result = await SentimentService(session).run_pipeline(index_code, persist=False)
 
     if "error" in result:
         return {"code": 500, "data": None, "message": "无法获取市场信号"}
@@ -488,7 +300,7 @@ async def get_v5_market_snapshot(
             continue
         data = index_data[code]
         # 简化版：直接从数据源返回，不再走V1 compatibility
-        result = await _run_v5_pipeline(code, db_session=session)
+        result = await SentimentService(session).run_pipeline(code, persist=False)
         items.append({
             "index_code": code,
             "index_name": data.get("index_name", code),
@@ -524,7 +336,7 @@ async def get_v5_factor_heatmap(
 
     返回11因子的原始值、分位数、Sigmoid分数，用于调试和分析
     """
-    result = await _run_v5_pipeline(index_code, db_session=session)
+    result = await SentimentService(session).run_pipeline(index_code, persist=False)
 
     if "error" in result:
         return {"code": 404, "data": None, "message": result["error"]}

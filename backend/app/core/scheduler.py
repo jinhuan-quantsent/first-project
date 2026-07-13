@@ -63,7 +63,7 @@ async def _run_daily_snapshot() -> None:
         return
 
     from app.core.database import get_async_engine
-    from app.engine.v5 import _run_v5_pipeline
+    from app.services.sentiment_service import SentimentService
 
     today_str = date.today().isoformat()
     logger.info("[Scheduler] 开始每日快照 — %s — %d 个指数", today_str, len(DEFAULT_INDEX_CODES))
@@ -76,7 +76,7 @@ async def _run_daily_snapshot() -> None:
         try:
             async with AsyncSession(engine) as session:
                 result = await asyncio.wait_for(
-                    _run_v5_pipeline(code, trade_date=today_str, db_session=session),
+                    SentimentService(session).run_pipeline(code, trade_date=today_str),
                     timeout=60.0,
                 )
                 if result and "error" not in result:

@@ -66,6 +66,7 @@ class SentimentService:
         self,
         index_code: str,
         trade_date: Optional[str] = None,
+        persist: bool = True,
     ) -> dict:
         """
         运行 V5.0 完整流水线（带 Redis 缓存）
@@ -128,19 +129,20 @@ class SentimentService:
         )
 
         # 落库 market_sentiment
-        await self._save_market_sentiment(
-            index_code=index_code,
-            index_name=index_data.get("index_name", ""),
-            trade_date=trade_date,
-            composite_score=composite.score,
-            signal_level=signal_level,
-            confidence_stars=confidence_stars,
-            confidence_detail=confidence_detail,
-            defenses=defenses,
-            factor_std=composite.divergence.factor_std,
-            penalty_factor=composite.divergence.penalty_factor,
-            regime=composite.divergence.regime,
-        )
+        if persist:
+            await self._save_market_sentiment(
+                index_code=index_code,
+                index_name=index_data.get("index_name", ""),
+                trade_date=trade_date,
+                composite_score=composite.score,
+                signal_level=signal_level,
+                confidence_stars=confidence_stars,
+                confidence_detail=confidence_detail,
+                defenses=defenses,
+                factor_std=composite.divergence.factor_std,
+                penalty_factor=composite.divergence.penalty_factor,
+                regime=composite.divergence.regime,
+            )
 
         # 组装结果
         result = {
