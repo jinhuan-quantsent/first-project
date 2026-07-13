@@ -85,8 +85,15 @@ class DivergenceFactor(BaseFactor):
                 direction=self.direction,
             )
         except Exception as e:
-            from app.utils.exceptions import FactorCalcError
-            raise FactorCalcError(f"DIVERGENCE fetch_raw failed: {e}")
+            import logging
+            logging.getLogger(__name__).warning(f"DIVERGENCE fetch_raw failed, using default 50.0: {e}")
+            return FactorRawValue(
+                factor_name=self.name,
+                index_code=index_code,
+                trade_date=trade_date,
+                raw_value=50.0,
+                direction=self.direction,
+            )
 
     def _get_default_raw_value(self, index_code: str = "") -> float:
         """默认中性值50"""
