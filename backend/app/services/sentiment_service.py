@@ -108,7 +108,7 @@ class SentimentService:
         )
 
         # MACD + 价格历史
-        macd_data, sentiment_history, price_history, macd_history, price_macd_data, price_macd_history = await self._compute_macd_and_history(
+        macd_data, sentiment_history, price_history, macd_history, price_macd_data, price_macd_history, divergence_data = await self._compute_macd_and_history(
             db_session=self.db_session,
             index_code=index_code,
             trade_date=trade_date,
@@ -159,6 +159,7 @@ class SentimentService:
             "macd_history": macd_history,
             "price_macd": price_macd_data,
             "price_macd_history": price_macd_history,
+            "divergence": divergence_data,
             "factor_details": [r.to_dict() for r in sigmoid_results],
             "updated_at": datetime.now().isoformat(),
         }
@@ -671,7 +672,7 @@ class SentimentService:
         trade_date: str,
         composite_score: float,
         index_data: dict,
-    ) -> tuple[Optional[dict], list, list, list[dict], Optional[dict], list[dict]]:
+    ) -> tuple[Optional[dict], list, list, list[dict], Optional[dict], list[dict], Optional[dict]]:
         """
         计算 MACD + 加载价格/情绪历史 + MACD 历史序列
         """
@@ -681,6 +682,7 @@ class SentimentService:
         macd_history = []
         price_macd_data = None
         price_macd_history: list[dict] = []
+        divergence_data = None
         try:
             # 获取情绪历史（含日期），用于 MACD 计算和历史序列对齐
             sentiment_history_with_dates = await self.history_store.get_series_with_dates(
@@ -744,11 +746,19 @@ class SentimentService:
                     and price_macd_history[-1]["date"] == price_macd_history[-2]["date"]
                 ):
                     price_macd_history.pop(-2)
+
+            # MACD背离检测（价格MACD vs 情绪MACD）
+            divergence_data = self.divergence_detector.detect_macd_divergence(
+                price_macd_history=price_macd_history,
+                sentiment_macd_history=macd_history,
+                window=20,
+            )
         except Exception:
             macd_data = None
             price_macd_data = None
             price_macd_history = []
-        return macd_data, sentiment_history, price_history, macd_history, price_macd_data, price_macd_history
+            divergence_data = None
+        return macd_data, sentiment_history, price_history, macd_history, price_macd_data, price_macd_history, divergence_data
 
     async def _store_history(
         self,

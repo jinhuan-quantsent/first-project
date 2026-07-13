@@ -176,6 +176,136 @@ class DivergenceDetector:
             else:
                 return f"{base}，背离强度{strength:.0f}%（弱）— 暂不构成反转信号"
 
+    def detect_macd_divergence(
+        self,
+        price_macd_history: list[dict],
+        sentiment_macd_history: list[dict],
+        window: int = 20,
+    ) -> dict:
+        """
+        检测价格MACD与情绪MACD之间的背离。
+
+        顶背离：价格MACD hist上升 + 情绪MACD hist下降 → 卖出信号
+        底背离：价格MACD hist下降 + 情绪MACD hist上升 → 买入信号
+
+        输入元素兼容 {"dif","dea","hist"} 和含 "date" 的格式。
+
+        输出：{
+            "type": str,                    # "top"|"bottom"|"none"|"insufficient_data"
+            "strength": float,              # 0.0-1.0
+            "window": int,                  # 检测窗口
+            "price_macd_trend": str,        # "up"|"down"|"flat"
+            "sentiment_macd_trend": str,    # "up"|"down"|"flat"
+            "signal": str | None,           # "buy"|"sell"|None
+            "confidence": str,              # "high"|"low"
+        }
+        """
+        min_len = min(len(price_macd_history), len(sentiment_macd_history))
+
+        # 1. 数据量检查
+        if min_len < 60:
+            return {
+                "type": "insufficient_data",
+                "strength": 0.0,
+                "window": window,
+                "price_macd_trend": "flat",
+                "sentiment_macd_trend": "flat",
+                "signal": None,
+                "confidence": "low",
+            }
+
+        # 2. 取最近 window 条的 hist 值
+        n = min(min_len, window)
+        price_hist = np.array(
+            [d["hist"] for d in price_macd_history[-n:]], dtype=float
+        )
+        sentiment_hist = np.array(
+            [d["hist"] for d in sentiment_macd_history[-n:]], dtype=float
+        )
+
+        # 3. 趋势判断（线性回归斜率，std-based 阈值）
+        price_trend, price_slope, _ = self._macd_hist_trend(price_hist)
+        sentiment_trend, sentiment_slope, _ = self._macd_hist_trend(sentiment_hist)
+
+        # 4. 背离检测
+        div_type = "none"
+        signal = None
+
+        if price_trend == "up" and sentiment_trend == "down":
+            # 价格动能增强 + 情绪动能减弱 → 顶背离
+            div_type = "top"
+            signal = "sell"
+        elif price_trend == "down" and sentiment_trend == "up":
+            # 价格动能减弱 + 情绪动能增强 → 底背离
+            div_type = "bottom"
+            signal = "buy"
+
+        # 5. strength 计算：斜率差归一化 + sigmoid
+        if div_type != "none":
+            combined_std = max(
+                (float(np.std(price_hist)) + float(np.std(sentiment_hist))) / 2,
+                1e-6,
+            )
+            norm_diff = abs(price_slope - sentiment_slope) / combined_std
+            strength = float(1.0 / (1.0 + np.exp(-norm_diff)))
+        else:
+            strength = 0.0
+
+        # 6. confidence
+        confidence = "high" if min_len >= 120 else "low"
+
+        return {
+            "type": div_type,
+            "strength": round(strength, 4),
+            "window": window,
+            "price_macd_trend": price_trend,
+            "sentiment_macd_trend": sentiment_trend,
+            "signal": signal,
+            "confidence": confidence,
+        }
+
+    def _macd_hist_trend(
+        self, hist_values: np.ndarray
+    ) -> tuple[str, float, float]:
+        """
+        判定 MACD histogram 的趋势方向。
+
+        使用线性回归斜率 + std-based 阈值（MACD hist 均值可能近零，
+        不能用均值归一化）。
+
+        Returns: (trend, raw_slope, r_squared)
+        """
+        n = len(hist_values)
+        if n < 2:
+            return "flat", 0.0, 0.0
+
+        x = np.arange(n, dtype=float)
+        x_mean = np.mean(x)
+        y_mean = np.mean(hist_values)
+
+        ss_xy = np.sum((x - x_mean) * (hist_values - y_mean))
+        ss_xx = np.sum((x - x_mean) ** 2)
+        ss_yy = np.sum((hist_values - y_mean) ** 2)
+
+        if ss_xx == 0 or ss_yy == 0:
+            return "flat", 0.0, 0.0
+
+        slope = ss_xy / ss_xx
+        r_squared = (ss_xy ** 2) / (ss_xx * ss_yy)
+
+        # std-based 阈值，适应 MACD hist 近零均值场景
+        std = float(np.std(hist_values))
+        threshold = max(std * 0.1, 1e-6)
+
+        if r_squared < 0.3:
+            return "flat", float(slope), float(r_squared)
+        if slope > threshold:
+            return "up", float(slope), float(r_squared)
+        elif slope < -threshold:
+            return "down", float(slope), float(r_squared)
+        else:
+            return "flat", float(slope), float(r_squared)
+
     def _insufficient_data(self, available: int) -> dict:
         """数据不足时的降级返回"""
         return {
