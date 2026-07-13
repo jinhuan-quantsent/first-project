@@ -13,6 +13,7 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { fetchSectorRadar } from '../../api/sectorV5';
+import { useAutoRefresh } from '../../hooks/useAutoRefresh';
 import { addWatchlistV5 } from '../../api/watchlistV5';
 import { useWatchlistV5Store } from '../../stores/watchlistV5';
 import { toast } from '../common/Toast';
@@ -409,6 +410,8 @@ export default function SectorRadarPanel() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useAutoRefresh(['sector'], () => loadData());
 
   // 区域展开时，批量加载该区域所有板块的基金数据
   const loadFundsForZone = useCallback(async (zone: 'contrarian' | 'trend') => {

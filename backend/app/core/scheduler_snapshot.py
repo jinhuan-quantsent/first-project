@@ -22,6 +22,7 @@ from app.core.database import get_async_engine
 from app.models.daily_signal_snapshot import DailySignalSnapshot
 from app.models.user_portfolio import UserPortfolio
 from app.models.market_sentiment import MarketSentiment
+from app.core.redis_client import update_data_version, invalidate_module_cache
 
 logger = logging.getLogger(__name__)
 
@@ -289,3 +290,10 @@ async def _run_signal_snapshot() -> None:
 
     elapsed = time.time() - start_time
     logger.info("[Snapshot] DONE - %d written, %.1fs elapsed", total_written, elapsed)
+
+    # 更新数据版本号 + 失效缓存
+    try:
+        await update_data_version("signal_board")
+        await invalidate_module_cache("signal_board")
+    except Exception as e:
+        logger.warning("[Snapshot] 版本号更新失败(signal_board): %s", e)

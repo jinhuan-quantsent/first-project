@@ -12,6 +12,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { fetchSectorSentiment } from '../../api/sectorV5';
+import { useAutoRefresh } from '../../hooks/useAutoRefresh';
 import type { SectorSentimentItem, SectorFactorScore } from '../../types/sector';
 import LoadingSpinner from '../common/LoadingSpinner';
 import ErrorMessage from '../common/ErrorMessage';
@@ -272,6 +273,8 @@ export default function SectorSentimentPanel() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useAutoRefresh(['sector'], () => loadData());
 
   // 筛选 + 排序
   const filteredData = useMemo(() => {

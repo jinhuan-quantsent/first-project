@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.utils.data_source import DEFAULT_INDEX_CODES, data_source
+from app.core.redis_client import update_data_version, invalidate_module_cache
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,13 @@ async def _run_daily_snapshot() -> None:
     # 改动 5a：失败时报 WARNING
     if fail > 0:
         logger.warning("[Scheduler] ⚠️ 本日快照有 %d 个指数失败，请检查数据源或日志", fail)
+
+    # 更新数据版本号 + 失效缓存
+    try:
+        await update_data_version("signal_board")
+        await invalidate_module_cache("signal_board")
+    except Exception as e:
+        logger.warning("[Scheduler] 版本号更新失败(signal_board): %s", e)
 
 
 # ============================================================
@@ -198,6 +206,13 @@ async def _run_sector_snapshot() -> None:
             logger.info("[Scheduler] 板块情绪已写入 Redis 缓存 — %d 个板块", len(sectors))
         except Exception as e:
             logger.error("[Scheduler] 板块情绪写入 Redis 缓存失败: %s", e)
+
+        # 更新数据版本号 + 失效缓存
+        try:
+            await update_data_version("sector")
+            await invalidate_module_cache("sector")
+        except Exception as e:
+            logger.warning("[Scheduler] 版本号更新失败(sector): %s", e)
 
     except Exception as e:
         logger.error("[Scheduler] 板块快照失败: %s", e)
@@ -492,6 +507,14 @@ async def _run_cache_refresh() -> None:
 
         # === 预热其他慢接口缓存 ===
         await _prewarm_market_caches()
+
+        # 更新数据版本号 + 失效缓存（holdings, sector, watchlist, signal_board）
+        for _mod in ("holdings", "sector", "watchlist", "signal_board"):
+            try:
+                await update_data_version(_mod)
+                await invalidate_module_cache(_mod)
+            except Exception as e:
+                logger.warning("[Scheduler] 版本号更新失败(%s): %s", _mod, e)
 
     except Exception as e:
         logger.error("[Scheduler] ❌ 建仓评级缓存刷新失败: %s", e)
@@ -1562,6 +1585,13 @@ async def _run_intraday_preview_calculate() -> None:
                 logger.error("[Scheduler] [preview] %s FAIL: %s", fund_code, e)
 
     logger.info("[Scheduler] 盘中预演计算完成 -- %d 成功", success)
+
+    # 更新数据版本号 + 失效缓存
+    try:
+        await update_data_version("signal_board")
+        await invalidate_module_cache("signal_board")
+    except Exception as e:
+        logger.warning("[Scheduler] 版本号更新失败(signal_board): %s", e)
 
 # ============================================================
 # 辅助函数：为单个基金打包预演元数据（meta_pack 定时任务 & preview_calculate 即时补打共用）
@@ -3544,6 +3574,14 @@ async def _run_validation_backfill() -> None:
             logger.error("[Scheduler] [validation-B] %s FAIL: %s", record.fund_code, e)
 
     logger.info("[Scheduler] [validation-B] T+1回验完成 -- %d 成功, %d 失败, %d 跳过", success, fail, skipped)
+
+    # 更新数据版本号 + 失效缓存
+    for _mod in ("ai_analysis", "holdings"):
+        try:
+            await update_data_version(_mod)
+            await invalidate_module_cache(_mod)
+        except Exception as e:
+            logger.warning("[Scheduler] 版本号更新失败(%s): %s", _mod, e)
 
     # 13. 数据完整性检查 — 分级阈值监控
     try:

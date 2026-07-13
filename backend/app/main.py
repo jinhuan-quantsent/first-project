@@ -82,6 +82,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 from app.api.health import router as health_router
 from app.api.auth import router as auth_router
 from app.api.v5 import router as v5_router
+from app.api.v5.cache_router import router as cache_router
 from app.api.fund import router as fund_router
 from app.api.review_v5 import router as review_v5_router
 from app.api.portfolio import router as portfolio_router
@@ -93,6 +94,7 @@ from app.api.admin import router as admin_router
 app.include_router(health_router, prefix="", tags=["健康检查"])
 app.include_router(auth_router, prefix="", tags=["认证"])
 app.include_router(v5_router, prefix="", tags=["V5.0情绪引擎"])
+app.include_router(cache_router)
 
 # 基金查询（prefix="/api/v5/fund" 必须在 include_router 参数里传，否则FastAPI不生效）
 app.include_router(fund_router, prefix="/api/v5/fund", tags=["基金查询"])

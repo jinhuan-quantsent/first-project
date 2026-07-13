@@ -133,3 +133,55 @@ async def cache_exists(key: str) -> bool:
     if _memory_cache is None:
         _memory_cache = MemoryCache()
     return await _memory_cache.exists(key)
+
+
+# ============================================================
+# 数据版本号管理（缓存自动刷新机制）
+# ============================================================
+
+DATA_VERSION_KEY = "fund_sentiment:data_version"
+
+# 模块→需要失效的v5:* key模式映射
+MODULE_CACHE_PATTERNS = {
+    "signal_board": ["v5:sentiment:*", "v5:multi_index:*", "v5:signal_lights:*",
+                     "v5:market_snapshot", "v5:factor_radar:*", "v5:divergence_alert"],
+    "holdings": ["v5:pos_rating:*", "v5:sector:radar"],
+    "watchlist": ["v5:watchlist:*"],
+    "sector": ["v5:sector:sentiment", "v5:sector:radar", "v5:sectors:*", "v5:sector_detail:*"],
+    "ai_analysis": ["v5:review:*"],
+}
+
+
+async def update_data_version(module: str) -> None:
+    """更新模块的数据版本号（当前时间戳）"""
+    if not _redis_client:
+        return
+    from datetime import datetime
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    await _redis_client.hset(DATA_VERSION_KEY, module, timestamp)
+
+
+async def get_data_version(modules: list[str] | None = None) -> dict:
+    """获取模块的数据版本号。modules=None时返回全部"""
+    if not _redis_client:
+        return {}
+    if modules:
+        pipe = _redis_client.pipeline()
+        for m in modules:
+            pipe.hget(DATA_VERSION_KEY, m)
+        results = await pipe.execute()
+        return {m: v if v else None for m, v in zip(modules, results)}
+    else:
+        raw = await _redis_client.hgetall(DATA_VERSION_KEY)
+        return {k: v for k, v in raw.items()}
+
+
+async def invalidate_module_cache(module: str) -> None:
+    """失效模块对应的v5:*缓存key"""
+    if not _redis_client:
+        return
+    patterns = MODULE_CACHE_PATTERNS.get(module, [])
+    for pattern in patterns:
+        keys = await _redis_client.keys(pattern)
+        if keys:
+            await _redis_client.delete(*keys)

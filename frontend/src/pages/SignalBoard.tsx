@@ -2,6 +2,7 @@
  * 信号看板 — 跨指数信号矩阵 + MACD趋势 + 信号历史
  */
 import { useEffect, useState } from 'react';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 import { useAppStore } from '../store';
 import LoadingSpinner from '../components/common/LoadingSpinner';
 import DivergenceBanner from '../components/dashboard/DivergenceBanner';
@@ -236,6 +237,8 @@ function IndexSignalCard({ data }: { data: IndexCardData }) {
 
 export default function SignalBoard() {
   const { multiIndexData, loadMultiIndex, selectedIndex } = useAppStore();
+
+  useAutoRefresh(['signal_board'], () => loadMultiIndex());
   const [cardData, setCardData] = useState<IndexCardData[]>([]);
   const [loading, setLoading] = useState(true);
 

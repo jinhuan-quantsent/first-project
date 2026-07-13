@@ -14,6 +14,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Bot, Cpu, CheckCircle2, AlertTriangle, XCircle, Loader2, TrendingUp, TrendingDown, Minus, Clock } from 'lucide-react';
 import client from '../../api/client';
+import { useAutoRefresh } from '../../hooks/useAutoRefresh';
 import { clsx } from 'clsx';
 
 interface ValidationRecord {
@@ -148,10 +149,9 @@ export default function AIAnalysisPanel({ fundCode }: Props) {
 
   useEffect(() => {
     fetchData();
-    // 每5分钟自动刷新
-    const interval = setInterval(fetchData, 5 * 60 * 1000);
-    return () => clearInterval(interval);
   }, [fetchData]);
+
+  useAutoRefresh(['ai_analysis'], () => fetchData());
 
   // 无数据时不渲染
   if (!loading && !error && (!data || (!data.has_system_advice && !data.has_deepseek_advice && data.backfill_history.length === 0))) {

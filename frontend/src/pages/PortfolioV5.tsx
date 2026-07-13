@@ -29,6 +29,7 @@ import type { SectorFund } from '../types/positionRating';
 import { toast } from '../components/common/Toast';
 import StarRating from '../components/portfolio/StarRating';
 import client from '../api/client';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 
 /* ============================================================
    Gate角标样式映射 + 轨道标签样式映射
@@ -689,6 +690,7 @@ function PositionCard({
    主页面组件
    ============================================================ */
 export default function PortfolioV5() {
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
   // API 数据状态
@@ -726,6 +728,8 @@ export default function PortfolioV5() {
   // 现金管理
   const [cashAmount, setCashAmount] = useState(0);
   const [savingCash, setSavingCash] = useState(false);
+
+  useAutoRefresh(['holdings'], () => setRefreshTrigger((t) => t + 1));
 
   // TODO: 接入真实API (T4/T6完成后) — 建仓推荐基金
   const [recommendedFunds, setRecommendedFunds] = useState<SectorFund[]>([]);
@@ -1197,7 +1201,7 @@ export default function PortfolioV5() {
     };
     loadData();
     return () => { cancelled = true; };
-  }, []);
+  }, [refreshTrigger]);
 
   // TODO: 接入真实API (T4/T6完成后) — 加载建仓推荐基金
   useEffect(() => {

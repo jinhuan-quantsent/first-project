@@ -11,6 +11,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { IntradayPreviewData, AnomalyNote } from '../types';
 import { fetchIntradayPreview } from '../../../api/portfolioV5';
+import { useAutoRefresh } from '../../../hooks/useAutoRefresh';
 import IntradayConfidenceBadge from './IntradayConfidenceBadge';
 import IntradayPreviewAction from './IntradayPreviewAction';
 import IntradayThresholdBar from './IntradayThresholdBar';
@@ -96,20 +97,20 @@ export default function IntradayPreviewPanel({ fundCode }: Props) {
     }
   }, [fundCode]);
 
-  // 每5分钟轮询 + 展开时立即刷新
+  // 展开时立即刷新 + 每分钟检查时段状态
   useEffect(() => {
     refresh();
-    const timer = setInterval(refresh, 300000); // 5分钟
-    // 同时每分钟检查时段状态
+    // 每分钟检查时段状态
     const checkInterval = setInterval(() => {
       setInWindow(isIntradayWindow());
       setLunchBreak(isLunchBreak());
     }, 60000);
     return () => {
-      clearInterval(timer);
       clearInterval(checkInterval);
     };
   }, [refresh]);
+
+  useAutoRefresh(['signal_board'], () => refresh());
 
   // 盘中窗口外不显示（15:00后隐藏）
   if (!inWindow) {

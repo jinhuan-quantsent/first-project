@@ -16,6 +16,7 @@ import SignalRibbon from '../components/fundsearch/SignalRibbon';
 import { PositionRatingDot } from '../components/sector/PositionRatingBadge';
 import { addPortfolioV5 } from '../api/portfolioV5';
 import { toast } from '../components/common/Toast';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 
 /* ---- 情绪分色阶（低分=恐惧=绿 → 高分=贪婪=红） ---- */
 function greedColor(v: number): string {
@@ -390,6 +391,8 @@ export default function WatchlistV5() {
     loading, error,
     loadAll, setActiveTab, toggleSectorExpand, selectFund, removeFund,
   } = useWatchlistV5Store();
+
+  useAutoRefresh(['watchlist'], () => loadAll());
 
   /* ---- 建仓弹窗状态 ---- */
   const [showAddDialog, setShowAddDialog] = useState(false);
