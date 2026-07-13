@@ -159,6 +159,7 @@ function buildRealDetailData(
     FLOW: '北向资金', ETF: 'ETF流入', POS: '基金仓位', NBF: '非银融资',
     PCR: '看跌看涨比', NHNL: '新高新低', ADR: '涨跌比',
     INDUSTRY_DIVERGENCE: '行业分歧度',
+    DIVERGENCE: 'MACD背离',
   };
 
   // 优先使用后端返回的 reason

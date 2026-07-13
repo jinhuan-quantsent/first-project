@@ -48,6 +48,7 @@ const FACTOR_DEFS = [
   { name: 'MARGIN', label: '融资融券', dir: 'greed' },
   { name: 'RSI', label: 'RSI指标', dir: 'fear' },
   { name: 'INDUSTRY_DIVERGENCE', label: '行业分歧', dir: 'fear' },
+  { name: 'DIVERGENCE', label: 'MACD背离', dir: 'fear' },
 ] as const;
 
 export default function DashboardV5() {
