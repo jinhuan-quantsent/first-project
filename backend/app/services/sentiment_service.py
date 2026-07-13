@@ -201,7 +201,7 @@ class SentimentService:
                 async with session_factory() as _session:
                     _svc = SentimentService(_session)
                     return await asyncio.wait_for(
-                        _svc.run_pipeline(code),
+                        _svc.run_pipeline(code, persist=False),
                         timeout=timeout_per_index,
                     )
             except asyncio.TimeoutError:
@@ -297,7 +297,7 @@ class SentimentService:
             trade_date = d.isoformat()
 
             try:
-                result = await self.run_pipeline(index_code, trade_date)
+                result = await self.run_pipeline(index_code, trade_date, persist=False)
             except Exception:
                 await self.db_session.rollback()
                 result = {"error": "pipeline exception"}
@@ -349,7 +349,7 @@ class SentimentService:
                 async with session_factory() as _session:
                     _svc = SentimentService(_session)
                     return await asyncio.wait_for(
-                        _svc.run_pipeline(code),
+                        _svc.run_pipeline(code, persist=False),
                         timeout=15.0,
                     )
             except asyncio.TimeoutError:
