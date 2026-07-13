@@ -3595,6 +3595,242 @@ async def _run_validation_backfill() -> None:
     except Exception as e:
         logger.warning("[Scheduler] [validation-B] 数据完整性检查失败: %s", e)
 
+    # ================================================================
+    # 分析日报快照写入 (系统进化4方向结果持久化)
+    # ================================================================
+    try:
+        from app.models.analysis_daily_snapshot import AnalysisDailySnapshot
+        from sqlalchemy import text as sa_text, func as sa_func2, delete as sa_delete
+        import numpy as _np
+        import math as _math
+
+        snap_date = yesterday
+        engine = get_async_engine()
+
+        async with AsyncSession(engine) as session:
+            # 先清除当天旧快照 (防重跑重复)
+            await session.execute(
+                sa_delete(AnalysisDailySnapshot).where(
+                    AnalysisDailySnapshot.snapshot_date == snap_date
+                )
+            )
+
+            records_written = 0
+
+            # === 1. 滚动窗口快照 (全局 30/60/90天) ===
+            for window_days in [30, 60, 90]:
+                window_ago = today - timedelta(days=window_days)
+                rw_stmt = select(
+                    sa_func2.avg(StrategyValidationLog.signal_accuracy),
+                    sa_func2.avg(StrategyValidationLog.advice_accuracy),
+                    sa_func2.avg(StrategyValidationLog.gate_accuracy),
+                    sa_func2.avg(StrategyValidationLog.deepseek_advice_correct),
+                    sa_func2.count(StrategyValidationLog.deepseek_advice_correct),
+                ).where(
+                    StrategyValidationLog.trade_date >= window_ago,
+                    StrategyValidationLog.trade_date < today,
+                )
+                rw_result = await session.execute(rw_stmt)
+                rw_row = rw_result.one_or_none()
+                if rw_row and rw_row[4] and int(rw_row[4]) > 0:
+                    metrics = ["signal_accuracy", "advice_accuracy", "gate_accuracy", "deepseek_accuracy"]
+                    for idx, metric in enumerate(metrics):
+                        val = rw_row[idx]
+                        session.add(AnalysisDailySnapshot(
+                            snapshot_date=snap_date,
+                            analysis_type="rolling_window",
+                            fund_code=None,
+                            metric_name=f"{metric}_{window_days}d",
+                            metric_value=round(float(val), 4) if val is not None else None,
+                            sample_size=int(rw_row[4]),
+                        ))
+                        records_written += 1
+
+            # === 2. Per-fund 快照 (每基金 30天) ===
+            pf_30ago = today - timedelta(days=30)
+            pf_stmt = select(
+                StrategyValidationLog.fund_code,
+                sa_func2.avg(StrategyValidationLog.signal_accuracy),
+                sa_func2.avg(StrategyValidationLog.advice_accuracy),
+                sa_func2.avg(StrategyValidationLog.gate_accuracy),
+                sa_func2.avg(StrategyValidationLog.deepseek_advice_correct),
+                sa_func2.count(StrategyValidationLog.deepseek_advice_correct),
+            ).where(
+                StrategyValidationLog.trade_date >= pf_30ago,
+                StrategyValidationLog.trade_date < today,
+            ).group_by(StrategyValidationLog.fund_code)
+
+            pf_result = await session.execute(pf_stmt)
+            for pf_row in pf_result.fetchall():
+                fund_code = pf_row[0]
+                pf_n = int(pf_row[5]) if pf_row[5] else 0
+                metrics = ["signal_accuracy", "advice_accuracy", "gate_accuracy", "deepseek_accuracy"]
+                for idx, metric in enumerate(metrics):
+                    val = pf_row[idx + 1]
+                    session.add(AnalysisDailySnapshot(
+                        snapshot_date=snap_date,
+                        analysis_type="per_fund",
+                        fund_code=fund_code,
+                        metric_name=metric,
+                        metric_value=round(float(val), 4) if val is not None else None,
+                        sample_size=pf_n,
+                    ))
+                    records_written += 1
+
+            # === 3. 因子相关性快照 (Pearson + ANOVA, 默认对 deepseek_advice_correct) ===
+            try:
+                from scipy import stats as sp_stats
+                corr_sql = sa_text("""
+                    SELECT
+                        v.elasticity, v.preview_score, v.yesterday_score,
+                        v.yesterday_confidence, v.market_index_chg_pct,
+                        v.sector_chg_pct, v.gszzl,
+                        v.gate_1_distance_pct, v.gate_2_distance_pct,
+                        v.score_delta,
+                        s.regime, s.macd_state,
+                        v.deepseek_advice_correct AS result_value
+                    FROM strategy_validation_log v
+                    LEFT JOIN daily_signal_snapshot s
+                        ON v.fund_code = s.target_code COLLATE utf8mb4_unicode_ci
+                        AND v.trade_date = s.snapshot_date
+                        AND s.target_type = 'fund'
+                    WHERE v.trade_date >= :start_date
+                    AND v.trade_date < :today
+                    AND v.deepseek_advice_correct IS NOT NULL
+                """)
+                corr_result = await session.execute(corr_sql, {
+                    "start_date": today - timedelta(days=30),
+                    "today": today,
+                })
+                corr_rows = corr_result.fetchall()
+
+                cont_factors = [
+                    "elasticity", "preview_score", "yesterday_score",
+                    "yesterday_confidence", "market_index_chg_pct",
+                    "sector_chg_pct", "gszzl",
+                    "gate_1_distance_pct", "gate_2_distance_pct", "score_delta",
+                ]
+                cat_factors = ["regime", "macd_state"]
+                n_tests = len(cont_factors) + len(cat_factors)
+                bonferroni_alpha = 0.05 / n_tests
+
+                if len(corr_rows) >= 5:
+                    result_values = _np.array([float(r[-1]) for r in corr_rows], dtype=float)
+
+                    for idx, factor_name in enumerate(cont_factors):
+                        pairs = [(float(r[idx]), float(r[-1])) for r in corr_rows if r[idx] is not None]
+                        if len(pairs) < 5:
+                            session.add(AnalysisDailySnapshot(
+                                snapshot_date=snap_date, analysis_type="factor_correlation",
+                                fund_code=None, metric_name=factor_name,
+                                metric_value=None, sample_size=len(pairs),
+                                p_value=None, is_significant=0,
+                                extra={"note": "samples insufficient"},
+                            ))
+                            records_written += 1
+                            continue
+
+                        x = _np.array([p[0] for p in pairs], dtype=float)
+                        y = _np.array([p[1] for p in pairs], dtype=float)
+                        try:
+                            corr, p_val = sp_stats.pearsonr(x, y)
+                        except Exception:
+                            corr, p_val = 0.0, 1.0
+                        if _math.isnan(corr):
+                            corr = 0.0
+                        if _math.isnan(p_val):
+                            p_val = 1.0
+
+                        session.add(AnalysisDailySnapshot(
+                            snapshot_date=snap_date, analysis_type="factor_correlation",
+                            fund_code=None, metric_name=factor_name,
+                            metric_value=round(float(corr), 4),
+                            sample_size=len(pairs),
+                            p_value=round(float(p_val), 6),
+                            is_significant=1 if float(p_val) < bonferroni_alpha else 0,
+                        ))
+                        records_written += 1
+
+                    cat_offset = len(cont_factors)
+                    for idx, factor_name in enumerate(cat_factors):
+                        col_idx = cat_offset + idx
+                        groups = {}
+                        for r in corr_rows:
+                            val = r[col_idx]
+                            if val is not None:
+                                groups.setdefault(val, []).append(float(r[-1]))
+
+                        group_stats = {}
+                        for g, vals in sorted(groups.items(), key=lambda x: -len(x[1])):
+                            if vals:
+                                group_stats[g] = {"mean": round(float(_np.mean(vals)), 4), "n": len(vals)}
+
+                        anova_p = None
+                        valid_groups = [v for v in groups.values() if len(v) >= 2]
+                        if len(valid_groups) >= 2:
+                            try:
+                                _f, anova_p = sp_stats.f_oneway(*[_np.array(v) for v in valid_groups])
+                                if _math.isnan(anova_p):
+                                    anova_p = None
+                            except Exception:
+                                pass
+
+                        session.add(AnalysisDailySnapshot(
+                            snapshot_date=snap_date, analysis_type="factor_correlation",
+                            fund_code=None, metric_name=factor_name,
+                            metric_value=round(float(anova_p), 4) if anova_p is not None else None,
+                            sample_size=sum(len(v) for v in groups.values()),
+                            p_value=round(float(anova_p), 6) if anova_p is not None else None,
+                            is_significant=1 if anova_p is not None and float(anova_p) < bonferroni_alpha else 0,
+                            extra={"groups": group_stats, "type": "anova"},
+                        ))
+                        records_written += 1
+            except ImportError:
+                logger.info("[validation-B] scipy未安装, 因子相关性快照跳过")
+            except Exception as e:
+                logger.warning("[validation-B] 因子相关性快照失败: %s", e)
+
+            # === 4. 数据完整性快照 (各字段NULL率) ===
+            dq_fields = {
+                "elasticity": "core", "preview_score": "core", "yesterday_score": "core",
+                "actual_trend": "core", "deepseek_advice_correct": "core",
+                "market_index_chg_pct": "market", "sector_chg_pct": "market", "gszzl": "market",
+                "unrealized_pnl_pct": "derived", "holding_market_value": "derived",
+            }
+            dq_sql_parts = [
+                f"SUM(CASE WHEN `{f}` IS NULL THEN 1 ELSE 0 END) as `{f}_null`"
+                for f in dq_fields
+            ]
+            dq_sql = sa_text(
+                f"SELECT COUNT(*) as total, {', '.join(dq_sql_parts)} "
+                f"FROM strategy_validation_log WHERE trade_date = :check_date"
+            )
+            dq_result = await session.execute(dq_sql, {"check_date": snap_date})
+            dq_row = dq_result.one()
+            total = int(dq_row[0]) if dq_row[0] else 0
+
+            if total > 0:
+                for idx, (field_name, tier) in enumerate(dq_fields.items()):
+                    null_count = int(dq_row[idx + 1]) if dq_row[idx + 1] else 0
+                    null_rate = round(null_count / total, 4)
+                    session.add(AnalysisDailySnapshot(
+                        snapshot_date=snap_date,
+                        analysis_type="data_quality",
+                        fund_code=None,
+                        metric_name=field_name,
+                        metric_value=null_rate,
+                        sample_size=total,
+                        is_significant=1 if null_rate > 0 else 0,
+                        extra={"tier": tier, "null_count": null_count},
+                    ))
+                    records_written += 1
+
+            await session.commit()
+            logger.info("[validation-B] [分析快照] %s 写入完成: %d 条记录", snap_date, records_written)
+
+    except Exception as e:
+        logger.warning("[Scheduler] [validation-B] 分析快照写入失败: %s", e)
+
 
 # ============================================================
 # Scheduler 初始化

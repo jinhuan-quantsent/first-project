@@ -206,3 +206,135 @@ async def get_factor_correlation(
         "continuous_factors": continuous_results,
         "categorical_factors": categorical_results,
     }
+
+
+@router.get("/snapshots")
+async def get_analysis_snapshots(
+    analysis_type: str = Query(
+        None,
+        description="分析类型: rolling_window / per_fund / factor_correlation / data_quality",
+    ),
+    fund_code: str = Query(None, description="基金代码(per_fund专用)"),
+    metric_name: str = Query(None, description="指标名筛选"),
+    days: int = Query(30, ge=1, le=365, description="回溯天数"),
+):
+    """
+    查询分析日报快照
+
+    返回 analysis_daily_snapshot 表中存储的历史分析结果。
+    每天 validation-B (17:35) 自动写入。
+    """
+    from app.models.analysis_daily_snapshot import AnalysisDailySnapshot
+    from sqlalchemy import select
+
+    today = date.today()
+    start_date = today - timedelta(days=days)
+    engine = get_async_engine()
+
+    async with AsyncSession(engine) as session:
+        stmt = select(AnalysisDailySnapshot).where(
+            AnalysisDailySnapshot.snapshot_date >= start_date,
+            AnalysisDailySnapshot.snapshot_date <= today,
+        )
+
+        if analysis_type:
+            if analysis_type not in ("rolling_window", "per_fund", "factor_correlation", "data_quality"):
+                return {"error": f"Invalid analysis_type, must be one of: rolling_window, per_fund, factor_correlation, data_quality"}
+            stmt = stmt.where(AnalysisDailySnapshot.analysis_type == analysis_type)
+
+        if fund_code:
+            stmt = stmt.where(AnalysisDailySnapshot.fund_code == fund_code)
+
+        if metric_name:
+            stmt = stmt.where(AnalysisDailySnapshot.metric_name == metric_name)
+
+        stmt = stmt.order_by(
+            AnalysisDailySnapshot.snapshot_date.desc(),
+            AnalysisDailySnapshot.metric_name,
+        ).limit(500)
+
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+
+    return {
+        "total": len(rows),
+        "days": days,
+        "filters": {
+            "analysis_type": analysis_type,
+            "fund_code": fund_code,
+            "metric_name": metric_name,
+        },
+        "snapshots": [
+            {
+                "snapshot_date": str(r.snapshot_date),
+                "analysis_type": r.analysis_type,
+                "fund_code": r.fund_code,
+                "metric_name": r.metric_name,
+                "metric_value": float(r.metric_value) if r.metric_value is not None else None,
+                "sample_size": r.sample_size,
+                "p_value": float(r.p_value) if r.p_value is not None else None,
+                "is_significant": r.is_significant,
+                "extra": r.extra,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/snapshots/summary")
+async def get_snapshot_summary(
+    days: int = Query(30, ge=1, le=365, description="回溯天数"),
+):
+    """
+    分析快照汇总 — 一键查看4方向的最新结果
+
+    返回每个分析类型的最新快照日期和关键指标摘要。
+    """
+    from app.models.analysis_daily_snapshot import AnalysisDailySnapshot
+    from sqlalchemy import select, func as sa_func
+
+    today = date.today()
+    start_date = today - timedelta(days=days)
+    engine = get_async_engine()
+
+    async with AsyncSession(engine) as session:
+        # 最新快照日期
+        latest_stmt = select(
+            sa_func.max(AnalysisDailySnapshot.snapshot_date)
+        )
+        latest_result = await session.execute(latest_stmt)
+        latest_date = latest_result.scalar()
+
+        if latest_date is None:
+            return {"message": "暂无快照数据", "latest_date": None}
+
+        # 各类型最新日期的记录
+        summaries = {}
+        for atype in ("rolling_window", "per_fund", "factor_correlation", "data_quality"):
+            stmt = select(AnalysisDailySnapshot).where(
+                AnalysisDailySnapshot.analysis_type == atype,
+                AnalysisDailySnapshot.snapshot_date == latest_date,
+            ).order_by(AnalysisDailySnapshot.metric_name)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+
+            summaries[atype] = {
+                "count": len(rows),
+                "records": [
+                    {
+                        "fund_code": r.fund_code,
+                        "metric_name": r.metric_name,
+                        "metric_value": float(r.metric_value) if r.metric_value is not None else None,
+                        "sample_size": r.sample_size,
+                        "p_value": float(r.p_value) if r.p_value is not None else None,
+                        "is_significant": r.is_significant,
+                        "extra": r.extra,
+                    }
+                    for r in rows
+                ],
+            }
+
+    return {
+        "latest_date": str(latest_date),
+        "summary": summaries,
+    }

@@ -14,6 +14,7 @@ from app.models.sector_heatmap_cache import SectorHeatmapCache
 from app.models.position_rating_fund_map import PositionRatingFundMap
 from app.models.daily_signal_snapshot import DailySignalSnapshot
 from app.models.strategy_validation_log import StrategyValidationLog
+from app.models.analysis_daily_snapshot import AnalysisDailySnapshot
 
 __all__ = [
     "Base",
@@ -31,4 +32,5 @@ __all__ = [
     "PositionRatingFundMap",
     "DailySignalSnapshot",
     "StrategyValidationLog",
+    "AnalysisDailySnapshot",
 ]
