@@ -35,6 +35,17 @@ export interface V5MacdHistoryItem {
   hist: number;
 }
 
+/** 背离检测结果 */
+export interface V5Divergence {
+  type: string;
+  strength: number;
+  window: number;
+  price_macd_trend: string;
+  sentiment_macd_trend: string;
+  signal: string | null;
+  confidence: string;
+}
+
 /** V5 情绪结果 */
 export interface V5SentimentResult {
   index_code: string;
@@ -53,6 +64,7 @@ export interface V5SentimentResult {
   macd_history?: V5MacdHistoryItem[];
   price_macd?: V5MacdSnapshot | null;
   price_macd_history?: V5MacdHistoryItem[];
+  divergence?: V5Divergence | null;
   updated_at: string;
 }
 

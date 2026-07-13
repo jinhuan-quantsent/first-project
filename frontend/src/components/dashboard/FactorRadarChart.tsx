@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { fetchFactorRadar, fetchV5Sentiment, type FactorRadarItem, type V5MacdHistoryItem } from '../../api/marketV5';
 import LoadingSpinner from '../common/LoadingSpinner';
+import DivergenceBadge from '../common/DivergenceBadge';
 
 interface Props {
   indexCode?: string;
@@ -51,6 +52,16 @@ interface MacdSnapshot {
   momentum: number;
 }
 
+interface DivergenceInfo {
+  type: string;
+  strength: number;
+  window: number;
+  price_macd_trend: string;
+  sentiment_macd_trend: string;
+  signal: string | null;
+  confidence: string;
+}
+
 interface SentimentData {
   composite_score: number;
   signal_level: string;
@@ -59,6 +70,7 @@ interface SentimentData {
   macd_history: V5MacdHistoryItem[];
   price_macd: MacdSnapshot | null;
   price_macd_history: V5MacdHistoryItem[];
+  divergence: DivergenceInfo | null;
 }
 
 interface EnhancedFactor extends FactorRadarItem {
@@ -285,6 +297,60 @@ function MacdSignalBar({
   );
 }
 
+// ==================== 背离信号面板 ====================
+
+function DivergencePanel({ divergence }: { divergence: DivergenceInfo | null }) {
+  if (!divergence || divergence.type === 'insufficient_data') {
+    return (
+      <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-gray-50 border border-gray-200">
+        <DivergenceBadge divergence={null} />
+      </div>
+    );
+  }
+
+  const trendArrow = (t: string) => t === 'up' ? '\u2191' : t === 'down' ? '\u2193' : '\u2192';
+  const trendLabel = (t: string) => t === 'up' ? '上升' : t === 'down' ? '下降' : '平稳';
+  const trendColor = (t: string) => t === 'up' ? 'text-green-600' : t === 'down' ? 'text-red-600' : 'text-gray-500';
+  const barColor = divergence.type === 'top' ? '#ef4444' : '#10b981';
+
+  return (
+    <div className="px-2 py-1.5 rounded-lg bg-gray-50 border border-gray-200 space-y-1">
+      {/* Badge */}
+      <DivergenceBadge divergence={divergence} />
+      {divergence.type !== 'none' && (
+        <>
+          {/* Strength progress bar */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-[9px] text-gray-400 shrink-0">强度</span>
+            <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${divergence.strength * 100}%`,
+                  background: barColor,
+                }}
+              />
+            </div>
+            <span className="text-[9px] font-mono text-gray-500 shrink-0">{(divergence.strength * 100).toFixed(0)}%</span>
+          </div>
+          {/* Trend comparison */}
+          <div className="flex items-center gap-1.5 text-[10px] flex-wrap">
+            <span className="text-gray-400">价格MACD</span>
+            <span className={trendColor(divergence.price_macd_trend)}>
+              {trendLabel(divergence.price_macd_trend)} {trendArrow(divergence.price_macd_trend)}
+            </span>
+            <span className="text-gray-300">vs</span>
+            <span className="text-gray-400">情绪MACD</span>
+            <span className={trendColor(divergence.sentiment_macd_trend)}>
+              {trendLabel(divergence.sentiment_macd_trend)} {trendArrow(divergence.sentiment_macd_trend)}
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ==================== 中心叠加子组件 ====================
 
 function CenterOverlay({
@@ -421,6 +487,7 @@ export default function FactorRadarChart({ indexCode = 'SH000300' }: Props) {
             macd_history: (raw.macd_history as V5MacdHistoryItem[]) ?? [],
             price_macd: (raw.price_macd as MacdSnapshot) ?? null,
             price_macd_history: (raw.price_macd_history as V5MacdHistoryItem[]) ?? [],
+            divergence: (raw.divergence as DivergenceInfo) ?? null,
           };
         }
 
@@ -632,6 +699,7 @@ export default function FactorRadarChart({ indexCode = 'SH000300' }: Props) {
   const confidenceStars = sentiment?.confidence_stars ?? 0;
   const macd = sentiment?.macd ?? null;
   const priceMacd = sentiment?.price_macd ?? null;
+  const divergence = sentiment?.divergence ?? null;
 
   return (
     <div className="space-y-2">
@@ -678,6 +746,9 @@ export default function FactorRadarChart({ indexCode = 'SH000300' }: Props) {
 
       {/* MACD 信号条 */}
       <MacdSignalBar macd={macd} macdHistory={sentiment?.macd_history ?? []} priceMacd={priceMacd} priceMacdHistory={sentiment?.price_macd_history ?? []} />
+
+      {/* 背离信号 */}
+      <DivergencePanel divergence={divergence} />
     </div>
   );
 }

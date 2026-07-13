@@ -6,6 +6,7 @@ import { useAutoRefresh } from '../hooks/useAutoRefresh';
 import { useAppStore } from '../store';
 import LoadingSpinner from '../components/common/LoadingSpinner';
 import DivergenceBanner from '../components/dashboard/DivergenceBanner';
+import DivergenceBadge from '../components/common/DivergenceBadge';
 import SignalVerifyBoard from '../components/dashboard/SignalVerifyBoard';
 import {
   fetchV5Sentiment,
@@ -30,12 +31,18 @@ interface IndexCardData {
   macd_history?: V5MacdHistoryItem[];
   price_macd?: V5MacdSnapshot | null;
   price_macd_history?: V5MacdHistoryItem[];
+  divergence?: {
+    type: string;
+    strength: number;
+    signal: string | null;
+    confidence: string;
+  } | null;
   signals?: V5SignalLight[];
 }
 
 // ==================== 迷你 MACD SVG（简化版） ====================
 
-function MiniMacdChart({ data }: { data: V5MacdHistoryItem[] }) {
+function MiniMacdChart({ data, divergenceType }: { data: V5MacdHistoryItem[]; divergenceType?: string }) {
   if (!data || data.length === 0) {
     return <span className="text-[9px] text-gray-400">无历史数据</span>;
   }
@@ -60,6 +67,10 @@ function MiniMacdChart({ data }: { data: V5MacdHistoryItem[] }) {
 
   const difPoints = recent.map((d, i) => `${xScale(i)},${yScale(d.dif)}`).join(' ');
   const deaPoints = recent.map((d, i) => `${xScale(i)},${yScale(d.dea)}`).join(' ');
+
+  const hasDivergence = divergenceType === 'top' || divergenceType === 'bottom';
+  const divColor = divergenceType === 'top' ? '#ef4444' : '#10b981';
+  const divX = count > 1 ? xScale(count - 1) : W / 2;
 
   return (
     <svg width={W} height={H} style={{ display: 'block' }}>
@@ -88,6 +99,10 @@ function MiniMacdChart({ data }: { data: V5MacdHistoryItem[] }) {
       <polyline points={difPoints} fill="none" stroke="#3b82f6" strokeWidth={1} />
       {/* DEA 线 */}
       <polyline points={deaPoints} fill="none" stroke="#f59e0b" strokeWidth={1} />
+      {/* 背离标注 */}
+      {hasDivergence && (
+        <line x1={divX} y1={0} x2={divX} y2={H} stroke={divColor} strokeWidth={0.8} strokeDasharray="2,2" opacity={0.7} />
+      )}
     </svg>
   );
 }
@@ -135,7 +150,7 @@ function SignalTimeline({ signals }: { signals: V5SignalLight[] }) {
 // ==================== 指数信号卡片 ====================
 
 function IndexSignalCard({ data }: { data: IndexCardData }) {
-  const { macd, price_macd } = data;
+  const { macd, price_macd, divergence } = data;
   const macdHistory = data.macd_history || [];
   const priceMacdHistory = data.price_macd_history || [];
 
@@ -201,6 +216,13 @@ function IndexSignalCard({ data }: { data: IndexCardData }) {
         </div>
       </div>
 
+      {/* 背离预警 */}
+      {divergence && (
+        <div className="mb-2">
+          <DivergenceBadge divergence={divergence} />
+        </div>
+      )}
+
       {/* 情绪MACD 趋势行 */}
       {macd ? (
         <div className="mb-1">
@@ -255,11 +277,11 @@ function IndexSignalCard({ data }: { data: IndexCardData }) {
       <div className="mb-3 flex items-center gap-3">
         <div className="flex flex-col items-center gap-0.5">
           <span className="text-[9px] text-gray-400">情绪</span>
-          <MiniMacdChart data={macdHistory} />
+          <MiniMacdChart data={macdHistory} divergenceType={divergence?.type} />
         </div>
         <div className="flex flex-col items-center gap-0.5">
           <span className="text-[9px] text-gray-400">价格</span>
-          <MiniMacdChart data={priceMacdHistory} />
+          <MiniMacdChart data={priceMacdHistory} divergenceType={divergence?.type} />
         </div>
       </div>
 
@@ -324,6 +346,7 @@ export default function SignalBoard() {
               base.macd_history = sentimentRes.value.macd_history || [];
               base.price_macd = sentimentRes.value.price_macd || null;
               base.price_macd_history = sentimentRes.value.price_macd_history || [];
+              base.divergence = sentimentRes.value.divergence || null;
               // 用 sentiment 的最新数据覆盖（更准确）
               base.composite_score = sentimentRes.value.composite_score;
               base.signal_level = sentimentRes.value.signal_level;
