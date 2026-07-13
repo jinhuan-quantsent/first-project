@@ -142,8 +142,8 @@ async def _run_v5_pipeline(index_code: str, trade_date: str | None = None, db_se
 
         sigmoid_score = sigmoid_mapper.apply_sigmoid(x, factor.sigmoid_c, factor.sigmoid_k)
 
-        # 反向因子处理（ERP）
-        if factor.direction == "fear" and name == "ERP":
+        # 反向因子处理（fear方向因子统一反转）
+        if factor.direction == "fear":
             sigmoid_score = 100.0 - sigmoid_score
 
         sigmoid_results.append(FactorSigmoidResult(

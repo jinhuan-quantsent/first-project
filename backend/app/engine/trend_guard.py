@@ -492,7 +492,8 @@ def _calculate_macd(nav_history: list) -> dict:
     prices = [_get_price(d) for d in nav_history]
     ema_fast = _calculate_ema(prices, MACD_FAST)
     ema_slow = _calculate_ema(prices, MACD_SLOW)
-    dif = [f - s for f, s in zip(ema_fast, ema_slow)]
+    min_len = min(len(ema_fast), len(ema_slow))
+    dif = [f - s for f, s in zip(ema_fast[-min_len:], ema_slow[-min_len:])]
     dea = _calculate_ema(dif, MACD_SIGNAL)
 
     # 兜底：EMA 序列太短
