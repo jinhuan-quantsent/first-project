@@ -28,6 +28,8 @@ interface IndexCardData {
   confidence_stars: number;
   macd?: V5MacdSnapshot | null;
   macd_history?: V5MacdHistoryItem[];
+  price_macd?: V5MacdSnapshot | null;
+  price_macd_history?: V5MacdHistoryItem[];
   signals?: V5SignalLight[];
 }
 
@@ -44,7 +46,7 @@ function MiniMacdChart({ data }: { data: V5MacdHistoryItem[] }) {
   const H = 30;
   const barW = 2;
 
-  const allVals = recent.flatMap((d) => [d.dif, d.hist]);
+  const allVals = recent.flatMap((d) => [d.dif, d.dea, d.hist]);
   let minVal = Math.min(...allVals, 0);
   let maxVal = Math.max(...allVals, 0);
   const range = maxVal - minVal || 1;
@@ -57,6 +59,7 @@ function MiniMacdChart({ data }: { data: V5MacdHistoryItem[] }) {
   const zeroY = yScale(0);
 
   const difPoints = recent.map((d, i) => `${xScale(i)},${yScale(d.dif)}`).join(' ');
+  const deaPoints = recent.map((d, i) => `${xScale(i)},${yScale(d.dea)}`).join(' ');
 
   return (
     <svg width={W} height={H} style={{ display: 'block' }}>
@@ -76,13 +79,15 @@ function MiniMacdChart({ data }: { data: V5MacdHistoryItem[] }) {
             y={y}
             width={barW}
             height={Math.max(0.5, h)}
-            fill={d.hist >= 0 ? '#22C55E' : '#EF4444'}
+            fill={d.hist >= 0 ? '#10b981' : '#ef4444'}
             opacity={0.55}
           />
         );
       })}
       {/* DIF 线 */}
-      <polyline points={difPoints} fill="none" stroke="#3B82F6" strokeWidth={1} />
+      <polyline points={difPoints} fill="none" stroke="#3b82f6" strokeWidth={1} />
+      {/* DEA 线 */}
+      <polyline points={deaPoints} fill="none" stroke="#f59e0b" strokeWidth={1} />
     </svg>
   );
 }
@@ -130,11 +135,14 @@ function SignalTimeline({ signals }: { signals: V5SignalLight[] }) {
 // ==================== 指数信号卡片 ====================
 
 function IndexSignalCard({ data }: { data: IndexCardData }) {
-  const { macd } = data;
+  const { macd, price_macd } = data;
   const macdHistory = data.macd_history || [];
+  const priceMacdHistory = data.price_macd_history || [];
 
   const trendLabel = macd?.trend === 'bullish' ? '多头↑' : macd?.trend === 'bearish' ? '空头↓' : '震荡→';
   const trendColor = macd?.trend === 'bullish' ? 'text-green-600' : macd?.trend === 'bearish' ? 'text-red-500' : 'text-gray-500';
+  const priceTrendLabel = price_macd?.trend === 'bullish' ? '多头↑' : price_macd?.trend === 'bearish' ? '空头↓' : '震荡→';
+  const priceTrendColor = price_macd?.trend === 'bullish' ? 'text-green-600' : price_macd?.trend === 'bearish' ? 'text-red-500' : 'text-gray-500';
 
   return (
     <div className="card p-4">
@@ -193,10 +201,11 @@ function IndexSignalCard({ data }: { data: IndexCardData }) {
         </div>
       </div>
 
-      {/* MACD 趋势行 */}
-      {macd && (
-        <div className="mb-2">
-          <div className="flex items-center gap-2 text-xs">
+      {/* 情绪MACD 趋势行 */}
+      {macd ? (
+        <div className="mb-1">
+          <div className="flex items-center gap-1.5 text-xs">
+            <span className="text-gray-400 text-[10px] w-14 shrink-0">情绪MACD</span>
             <span className={clsx('font-bold', trendColor)}>{trendLabel}</span>
             <span className="text-gray-400">DIF</span>
             <span className="font-mono text-blue-500">{macd.macd_line.toFixed(2)}</span>
@@ -213,11 +222,45 @@ function IndexSignalCard({ data }: { data: IndexCardData }) {
             </span>
           </div>
         </div>
+      ) : (
+        <div className="mb-1 text-[10px] text-gray-400">情绪MACD 数据不足</div>
       )}
 
-      {/* 迷你 MACD 折线图 */}
-      <div className="mb-3">
-        <MiniMacdChart data={macdHistory} />
+      {/* 价格MACD 趋势行 */}
+      {price_macd ? (
+        <div className="mb-1">
+          <div className="flex items-center gap-1.5 text-xs">
+            <span className="text-gray-400 text-[10px] w-14 shrink-0">价格MACD</span>
+            <span className={clsx('font-bold', priceTrendColor)}>{priceTrendLabel}</span>
+            <span className="text-gray-400">DIF</span>
+            <span className="font-mono text-blue-500">{price_macd.macd_line.toFixed(2)}</span>
+            <span className="text-gray-400">DEA</span>
+            <span className="font-mono text-amber-500">{price_macd.signal_line.toFixed(2)}</span>
+            <span className="text-gray-400">柱</span>
+            <span
+              className={clsx(
+                'font-mono',
+                price_macd.histogram >= 0 ? 'text-green-500' : 'text-red-500'
+              )}
+            >
+              {price_macd.histogram.toFixed(2)}
+            </span>
+          </div>
+        </div>
+      ) : (
+        <div className="mb-1 text-[10px] text-gray-400">价格MACD 数据不足</div>
+      )}
+
+      {/* 迷你 MACD 折线图（情绪+价格） */}
+      <div className="mb-3 flex items-center gap-3">
+        <div className="flex flex-col items-center gap-0.5">
+          <span className="text-[9px] text-gray-400">情绪</span>
+          <MiniMacdChart data={macdHistory} />
+        </div>
+        <div className="flex flex-col items-center gap-0.5">
+          <span className="text-[9px] text-gray-400">价格</span>
+          <MiniMacdChart data={priceMacdHistory} />
+        </div>
       </div>
 
       {/* 近3日信号色块 */}
@@ -279,6 +322,8 @@ export default function SignalBoard() {
             if (sentimentRes.status === 'fulfilled') {
               base.macd = sentimentRes.value.macd || null;
               base.macd_history = sentimentRes.value.macd_history || [];
+              base.price_macd = sentimentRes.value.price_macd || null;
+              base.price_macd_history = sentimentRes.value.price_macd_history || [];
               // 用 sentiment 的最新数据覆盖（更准确）
               base.composite_score = sentimentRes.value.composite_score;
               base.signal_level = sentimentRes.value.signal_level;

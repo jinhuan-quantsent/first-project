@@ -57,6 +57,8 @@ interface SentimentData {
   confidence_stars: number;
   macd: MacdSnapshot | null;
   macd_history: V5MacdHistoryItem[];
+  price_macd: MacdSnapshot | null;
+  price_macd_history: V5MacdHistoryItem[];
 }
 
 interface EnhancedFactor extends FactorRadarItem {
@@ -173,30 +175,21 @@ function MiniMacdChart({ data }: { data: V5MacdHistoryItem[] }) {
   );
 }
 
-function MacdSignalBar({ macd, macdHistory }: { macd: MacdSnapshot | null; macdHistory: V5MacdHistoryItem[] }) {
-  if (!macd) {
-    return (
-      <div className="flex items-center justify-center h-12 rounded-lg bg-gray-50 border border-gray-200">
-        <span className="text-xs text-gray-400">MACD 数据暂不可用</span>
-      </div>
-    );
-  }
-
+/** 单行 MACD 数据条 */
+function MacdRow({ macd, history }: { macd: MacdSnapshot; history: V5MacdHistoryItem[] }) {
   const isBull = macd.trend === 'bullish';
   const isBear = macd.trend === 'bearish';
 
-  // 交叉状态
   const crossConfig = macd.cross === 'golden'
     ? { label: '金叉', bg: 'bg-green-100', text: 'text-green-700' }
     : macd.cross === 'death'
       ? { label: '死叉', bg: 'bg-red-100', text: 'text-red-700' }
       : { label: '无', bg: 'bg-gray-100', text: 'text-gray-500' };
 
-  // 数值颜色：正绿负红
   const valColor = (v: number) => v >= 0 ? 'text-green-600' : 'text-red-600';
 
   return (
-    <div className="flex items-center gap-2 sm:gap-3 h-12 px-2 sm:px-3 rounded-lg bg-gray-50 border border-gray-200 overflow-x-auto">
+    <div className="flex items-center gap-2 sm:gap-3 h-10 px-2 sm:px-3 rounded-lg bg-gray-50 border border-gray-200 overflow-x-auto">
       {/* 趋势 chip */}
       <div
         className={`flex-shrink-0 flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
@@ -253,7 +246,40 @@ function MacdSignalBar({ macd, macdHistory }: { macd: MacdSnapshot | null; macdH
 
       {/* 迷你 MACD 折线图 */}
       <div className="flex-shrink-0 ml-auto">
-        <MiniMacdChart data={macdHistory} />
+        <MiniMacdChart data={history} />
+      </div>
+    </div>
+  );
+}
+
+function MacdSignalBar({
+  macd,
+  macdHistory,
+  priceMacd,
+  priceMacdHistory,
+}: {
+  macd: MacdSnapshot | null;
+  macdHistory: V5MacdHistoryItem[];
+  priceMacd: MacdSnapshot | null;
+  priceMacdHistory: V5MacdHistoryItem[];
+}) {
+  const unavailable = (
+    <div className="flex items-center justify-center h-10 rounded-lg bg-gray-50 border border-gray-200">
+      <span className="text-xs text-gray-400">数据不足</span>
+    </div>
+  );
+
+  return (
+    <div className="space-y-1.5">
+      {/* 情绪MACD (5/20/9) */}
+      <div>
+        <p className="text-[10px] text-gray-400 mb-0.5">情绪MACD (5/20/9)</p>
+        {macd ? <MacdRow macd={macd} history={macdHistory} /> : unavailable}
+      </div>
+      {/* 价格MACD (12/26/9) */}
+      <div>
+        <p className="text-[10px] text-gray-400 mb-0.5">价格MACD (12/26/9)</p>
+        {priceMacd ? <MacdRow macd={priceMacd} history={priceMacdHistory} /> : unavailable}
       </div>
     </div>
   );
@@ -393,6 +419,8 @@ export default function FactorRadarChart({ indexCode = 'SH000300' }: Props) {
             confidence_stars: raw.confidence_stars as number,
             macd: (raw.macd as MacdSnapshot) ?? null,
             macd_history: (raw.macd_history as V5MacdHistoryItem[]) ?? [],
+            price_macd: (raw.price_macd as MacdSnapshot) ?? null,
+            price_macd_history: (raw.price_macd_history as V5MacdHistoryItem[]) ?? [],
           };
         }
 
@@ -603,6 +631,7 @@ export default function FactorRadarChart({ indexCode = 'SH000300' }: Props) {
   const signalLevel = sentiment?.signal_level ?? 'B';
   const confidenceStars = sentiment?.confidence_stars ?? 0;
   const macd = sentiment?.macd ?? null;
+  const priceMacd = sentiment?.price_macd ?? null;
 
   return (
     <div className="space-y-2">
@@ -648,7 +677,7 @@ export default function FactorRadarChart({ indexCode = 'SH000300' }: Props) {
       </div>
 
       {/* MACD 信号条 */}
-      <MacdSignalBar macd={macd} macdHistory={sentiment?.macd_history ?? []} />
+      <MacdSignalBar macd={macd} macdHistory={sentiment?.macd_history ?? []} priceMacd={priceMacd} priceMacdHistory={sentiment?.price_macd_history ?? []} />
     </div>
   );
 }

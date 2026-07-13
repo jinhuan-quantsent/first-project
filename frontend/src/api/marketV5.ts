@@ -51,6 +51,8 @@ export interface V5SentimentResult {
   factor_details: V5FactorDetail[];
   macd?: V5MacdSnapshot | null;
   macd_history?: V5MacdHistoryItem[];
+  price_macd?: V5MacdSnapshot | null;
+  price_macd_history?: V5MacdHistoryItem[];
   updated_at: string;
 }
 
