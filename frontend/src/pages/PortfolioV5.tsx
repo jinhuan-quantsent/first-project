@@ -167,7 +167,7 @@ function buildRealDetailData(
       .sort((a: any, b: any) => (b.sigmoid_score || b.raw_score || 0) - (a.sigmoid_score || a.raw_score || 0))
       .slice(0, 3);
     const factorTexts = topFactors.map((f: any) =>
-      `${factorNames[f.name] || f.name}${Math.round((f.sigmoid_score || f.raw_score || 0) * 100)}分`
+      `${factorNames[f.factor_name] || f.factor_name}${Math.round(f.sigmoid_score || 0)}分`
     );
     recommendationReason = `基于${signalLabel}信号分析，当前市场情绪处于${signalLabel}区间(${signal?.confidenceStars ?? 3}星置信)。${factorTexts.join('+')}触发${signalLabel}信号，建议${operationTag}。该基金近期表现${item.return_rate >= 0 ? '优于' : '弱于'}基准${Math.abs(item.return_rate).toFixed(1)}%，${operationTag === '加仓' ? '逆向操作逢低布局' : operationTag === '减仓' ? '止盈减仓控制风险' : '维持当前仓位观察'}。`;
   } else if (!recommendationReason) {

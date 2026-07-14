@@ -1762,6 +1762,22 @@ async def get_fund_detail_for_portfolio(
     except Exception:
         pass
 
+    # 获取情绪因子详情（用于前端推荐理由展示）
+    # 因子数据始终取沪深300宽基pipeline结果（板块基金也用宽基因子）
+    sentiment_detail = None
+    try:
+        from app.core.redis_client import cache_get as _cache_get
+        from datetime import date as _date, timedelta as _td
+        _today_str = _date.today().isoformat()
+        _yesterday_str = (_date.today() - _td(days=1)).isoformat()
+        for _d in (_today_str, _yesterday_str):
+            _cached = await _cache_get(f"fsa:sentiment:SH000300:{_d}")
+            if _cached and _cached.get("factor_details"):
+                sentiment_detail = {"factors": _cached["factor_details"]}
+                break
+    except Exception:
+        pass
+
     data = {
         "fund_code": fund_code,
         "fund_name": detail.get("fund_name", ""),
@@ -1781,6 +1797,7 @@ async def get_fund_detail_for_portfolio(
         "cash_amount": round(cash_amount_val, 2),
         "total_assets": round(total_assets_val, 2),
         "signal_switched_today": signal_switched_today,
+        "sentiment_detail": sentiment_detail,
     }
 
     # 写入缓存（TTL=300s，盘中估值5分钟过期）

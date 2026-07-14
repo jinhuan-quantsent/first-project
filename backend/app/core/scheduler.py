@@ -3320,6 +3320,13 @@ async def _run_validation_deepseek_advice() -> None:
 
     logger.info("[Scheduler] [validation-C] AI建议完成 -- %d 成功, %d 失败, %d 跳过", success, fail, skipped)
 
+    # 更新 ai_analysis 模块版本号（AI建议已更新，通知前端刷新）
+    try:
+        await update_data_version("ai_analysis")
+        await invalidate_module_cache("ai_analysis")
+    except Exception as e:
+        logger.warning("[Scheduler] 版本号更新失败(ai_analysis): %s", e)
+
 
 # ============================================================
 # 策略验证分析表 — 任务B: 17:35 T+1回验回填
