@@ -142,6 +142,10 @@ class SentimentService:
                 factor_std=composite.divergence.factor_std,
                 penalty_factor=composite.divergence.penalty_factor,
                 regime=composite.divergence.regime,
+                macd_data=macd_data,
+                price_macd_data=price_macd_data,
+                divergence_data=divergence_data,
+                signal_jump_blocked=jump_blocked,
             )
 
         # 组装结果
@@ -771,10 +775,16 @@ class SentimentService:
     ) -> None:
         """
         存储今日 composite_score 和收盘价到 factor_history
+        
+        COMPOSITE 不在 FACTOR_NAMES 里（它是加权聚合结果，不是原始因子），
+        所以必须在这里显式写入。CLOSE 由因子引擎存储，这里保留降级兜底。
         """
         try:
-            # COMPOSITE 已由 _process_single_factor 存储，这里不再重复
-            # CLOSE 也由因子引擎存储，这里保留降级存储
+            # 显式写入 COMPOSITE（加权聚合情绪分，不是原始因子）
+            await self.history_store.insert(
+                self.db_session, index_code, "COMPOSITE", trade_date, float(composite_score),
+            )
+            # CLOSE 兜底存储（因子引擎也可能已存，此处降级保障）
             today_close = index_data.get("close")
             if today_close:
                 await self.history_store.insert(
@@ -796,9 +806,13 @@ class SentimentService:
         factor_std: float,
         penalty_factor: float,
         regime: str,
+        macd_data: dict | None = None,
+        price_macd_data: dict | None = None,
+        divergence_data: dict | None = None,
+        signal_jump_blocked: bool = False,
     ) -> None:
         """
-        写入/更新 market_sentiment 表
+        写入/更新 market_sentiment 表（含 MACD + 背离字段）
         """
         try:
             ts_code = to_tushare(index_code)
@@ -830,6 +844,20 @@ class SentimentService:
             row.triggered_defenses = json.dumps(defenses, ensure_ascii=False) if defenses else None
             row.divergence_index = round(penalty_factor, 4)
             row.trend_direction = regime
+
+            # MACD + 背离字段（注意：MACD引擎用macd_line/signal_line，不是dif/dea）
+            if macd_data:
+                row.macd_line = macd_data.get("macd_line")
+                row.macd_signal = macd_data.get("signal_line")
+                row.macd_histogram = macd_data.get("histogram")
+            if price_macd_data:
+                row.price_macd_line = price_macd_data.get("macd_line")
+                row.price_macd_signal = price_macd_data.get("signal_line")
+                row.price_macd_histogram = price_macd_data.get("histogram")
+            if divergence_data:
+                row.divergence_type = divergence_data.get("type", "none")
+                row.divergence_confidence = divergence_data.get("confidence", "insufficient_data")
+            row.signal_jump_blocked = 1 if signal_jump_blocked else 0
             row.record_time = datetime.now()
 
             await self.db_session.commit()

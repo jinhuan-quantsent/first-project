@@ -60,5 +60,16 @@ class MarketSentiment(Base, TimestampMixin):
     factor_std: Mapped[float | None] = mapped_column(Float, default=None, comment="V5.0因子得分标准差")
     triggered_defenses: Mapped[str | None] = mapped_column(Text, default=None, comment="V5.0触发的防线(JSON数组)")
 
+    # --- V5.0 MACD + 背离字段 ---
+    macd_line: Mapped[float | None] = mapped_column(Float, default=None, comment="情绪MACD DIF线")
+    macd_signal: Mapped[float | None] = mapped_column(Float, default=None, comment="情绪MACD DEA线")
+    macd_histogram: Mapped[float | None] = mapped_column(Float, default=None, comment="情绪MACD柱状图")
+    price_macd_line: Mapped[float | None] = mapped_column(Float, default=None, comment="价格MACD DIF线")
+    price_macd_signal: Mapped[float | None] = mapped_column(Float, default=None, comment="价格MACD DEA线")
+    price_macd_histogram: Mapped[float | None] = mapped_column(Float, default=None, comment="价格MACD柱状图")
+    divergence_type: Mapped[str | None] = mapped_column(String(20), default=None, comment="背离类型: bullish/bearish/none/insufficient_data")
+    divergence_confidence: Mapped[str | None] = mapped_column(String(20), default=None, comment="背离置信度: high/low/insufficient_data")
+    signal_jump_blocked: Mapped[int | None] = mapped_column(Integer, default=0, comment="信号跳跃是否被阻断: 0=否 1=是")
+
     def __repr__(self) -> str:
         return f"<MarketSentiment(index={self.index_code}, date={self.trade_date}, score={self.composite_score})>"

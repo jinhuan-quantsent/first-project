@@ -52,7 +52,7 @@ async def get_v5_sentiment(
 
     async with get_session_factory()() as session:
         service = SentimentService(db_session=session)
-        result = await service.run_pipeline(index_code, trade_date)
+        result = await service.run_pipeline(index_code, trade_date, persist=False)
 
     if "error" in result:
         return {"code": 404, "data": None, "message": result["error"]}
