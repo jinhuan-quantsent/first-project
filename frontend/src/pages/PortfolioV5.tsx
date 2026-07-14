@@ -706,7 +706,6 @@ export default function PortfolioV5() {
 
   // 增强数据
   const [navHistories, setNavHistories] = useState<Record<string, { date: string; nav: number; daily_return?: number }[]>>({});
-  const [positionAdviceMap, setPositionAdviceMap] = useState<Record<string, { trendText?: string; marketStatus?: string; trendGuard?: any; action?: string; reason?: string; target_position_pct?: number; trend_guard_text?: string }>>({});
   const [positionAdviceFromDetailMap, setPositionAdviceFromDetailMap] = useState<Record<string, any>>({});
   const [trendGuardFromDetailMap, setTrendGuardFromDetailMap] = useState<Record<string, any>>({});
   const [marketStatusFromDetailMap, setMarketStatusFromDetailMap] = useState<Record<string, string>>({});
@@ -733,7 +732,7 @@ export default function PortfolioV5() {
   // V3.0: Recommended funds disabled - was hardcoded mock (801150 medical sector)
   // Re-enable when real recommendation API is available
   const [recommendedFunds] = useState<SectorFund[]>([]);
-  const [showRecommendations] = useState(false);
+  const [showRecommendations, setShowRecommendations] = useState(false);
 
   /* ---- Gate 总览统计 + 风险排序 ---- */
   const gateStats = useMemo(() => {
@@ -969,7 +968,7 @@ export default function PortfolioV5() {
             console.error('[PortfolioV5] batch-advice-trade failed:', err);
             return {} as Record<string, any>;
           }),
-          client.get('/api/v5/market/snapshot').catch(() => null),
+          client.get('/api/v5/market/snapshot').catch(err => { console.warn('[PortfolioV5] market snapshot failed:', err); return null; }),
         ]);
 
         if (cancelled) return;
@@ -1233,13 +1232,7 @@ export default function PortfolioV5() {
                     marketStatus: positionAdviceFromDetailMap[item.fund_code].marketStatus || marketStatusFromDetailMap[item.fund_code],
                     trendGuard: positionAdviceFromDetailMap[item.fund_code].trendGuard || trendGuardFromDetailMap[item.fund_code],
                   }
-                : positionAdviceMap[item.fund_code]
-                  ? {
-                      ...positionAdviceMap[item.fund_code],
-                      marketStatus: positionAdviceMap[item.fund_code].marketStatus || marketStatusFromDetailMap[item.fund_code],
-                      trendGuard: positionAdviceMap[item.fund_code].trendGuard || trendGuardFromDetailMap[item.fund_code],
-                    }
-                  : {
+                : {
                       marketStatus: marketStatusFromDetailMap[item.fund_code],
                       trendText: trendGuardFromDetailMap[item.fund_code]?.trend_narrative,
                       trendGuard: trendGuardFromDetailMap[item.fund_code],
