@@ -83,6 +83,7 @@ def export_strategy_validation(conn, target_date: str) -> str | None:
                preview_score, preview_signal, preview_confidence,
                gszzl, gszzl_source, elasticity, score_delta, effective_stars,
                intraday_high_gszzl, intraday_low_gszzl,
+               preview_summary, anomaly_flags,
                market_index_chg_pct, sector_chg_pct,
                actual_action, actual_target_position, actual_nav, actual_signal,
                cost_basis, unrealized_pnl_pct, holding_shares, holding_market_value,
