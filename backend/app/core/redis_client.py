@@ -5,10 +5,81 @@ Redis 缓存客户端
 Namespace 设计: v5: = 情绪引擎/板块/自选等核心接口; fsa: = 持仓/组合等用户级接口（独立命名便于按业务域批量清理/监控）
 """
 import json
+import logging
 import time
+from datetime import date, datetime, time as dtime
+from decimal import Decimal
 from typing import Any, Optional
+from uuid import UUID
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class SafeJSONEncoder(json.JSONEncoder):
+    """Redis 缓存专用 JSON 编码器，显式处理非 JSON 原生类型。
+
+    替代 default=str 的静默转换，确保类型转换可预测、可追踪：
+    - datetime/date/time → ISO 格式字符串（可被 fromisoformat 反序列化）
+    - Decimal → float（保持数值语义，避免 str(Decimal) 带来的字符串比较陷阱）
+    - numpy 类型 → 原生 Python 类型（来自 pandas df.to_dict('records')）
+    - UUID → 字符串
+    - bytes → base64 字符串
+    - set/frozenset → list
+    - 未知类型 → 记录 WARNING 日志后 fallback 到 str()（不中断生产，但暴露问题）
+    """
+
+    def default(self, obj: Any) -> Any:
+        # --- datetime 家族 ---
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, date):
+            return obj.isoformat()
+        if isinstance(obj, dtime):
+            return obj.isoformat()
+
+        # --- Decimal → float ---
+        if isinstance(obj, Decimal):
+            return float(obj)
+
+        # --- UUID → str ---
+        if isinstance(obj, UUID):
+            return str(obj)
+
+        # --- bytes → base64 ---
+        if isinstance(obj, (bytes, bytearray)):
+            import base64
+            return base64.b64encode(obj).decode("ascii")
+
+        # --- set → list ---
+        if isinstance(obj, (set, frozenset)):
+            return list(obj)
+
+        # --- numpy 类型（延迟导入，避免硬依赖） ---
+        try:
+            import numpy as np
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.bool_):
+                return bool(obj)
+            if isinstance(obj, np.datetime64):
+                item = obj.item()
+                return item.isoformat() if hasattr(item, "isoformat") else str(item)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+        except ImportError:
+            pass
+
+        # --- 未知类型：记录 WARNING 后 fallback 到 str() ---
+        # 不 raise TypeError，避免中断生产；但日志会暴露问题，便于排查
+        logger.warning(
+            "SafeJSONEncoder: 未知类型 %s.%s 将被 str() 转换，可能导致 round-trip 类型丢失",
+            type(obj).__module__, type(obj).__name__,
+        )
+        return str(obj)
 
 
 class MemoryCache:
@@ -107,7 +178,7 @@ async def cache_set(key: str, value: Any, ttl: int = 300) -> None:
     """设置缓存值（带延迟初始化：若缓存未初始化则自动创建 MemoryCache）"""
     global _memory_cache
     if _redis_client:
-        await _redis_client.set(key, json.dumps(value, ensure_ascii=False, default=str), ex=ttl)
+        await _redis_client.set(key, json.dumps(value, ensure_ascii=False, cls=SafeJSONEncoder), ex=ttl)
     else:
         if _memory_cache is None:
             _memory_cache = MemoryCache()
