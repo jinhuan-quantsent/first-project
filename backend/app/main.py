@@ -31,6 +31,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
     await init_redis()
 
+    # 初始化数据源（Tushare/AKShare）
+    from app.utils.data_source import data_source
+    await data_source.initialize()
+
     # 启动定时任务调度器（每日收盘后自动快照）
     from app.core.scheduler import init_scheduler
     scheduler = init_scheduler()

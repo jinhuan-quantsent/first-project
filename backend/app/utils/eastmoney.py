@@ -354,7 +354,7 @@ async def get_fund_holdings(code: str) -> Optional[list[dict]]:
     """
     获取基金持仓股票信息
 
-    接口: http://fund.eastmoney.com/pingzhongdata/{code}.js
+    接口: https://fund.eastmoney.com/pingzhongdata/{code}.js
     解析 stockCodes 变量
 
     Returns:
@@ -365,7 +365,7 @@ async def get_fund_holdings(code: str) -> Optional[list[dict]]:
     if cached is not None:
         return cached
 
-    url = f"http://fund.eastmoney.com/pingzhongdata/{code}.js"
+    url = f"https://fund.eastmoney.com/pingzhongdata/{code}.js"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url)
@@ -373,11 +373,14 @@ async def get_fund_holdings(code: str) -> Optional[list[dict]]:
             text = resp.text
 
         # 解析 stockCodes
-        match = re.search(r'var stockCodes=\[(.+?)\]', text)
+        match = re.search(r'var stockCodes=\[(.*?)\]', text)
         if not match:
             return []
 
-        raw_codes = match.group(1).strip('"').split('","')
+        raw_str = match.group(1).strip().strip(chr(34))
+        if not raw_str:
+            return []
+        raw_codes = raw_str.split(chr(34) + "," + chr(34))
         holdings = []
         for sc in raw_codes:
             sc = sc.strip('"').strip()
@@ -496,7 +499,10 @@ async def get_fund_basic_tushare(ts_code: str) -> Optional[dict]:
     try:
         from app.utils.data_source import data_source
         if not data_source._tushare_pro:
-            return None
+            if not data_source._initialized:
+                await data_source.initialize()
+            if not data_source._tushare_pro:
+                return None
 
         # 尝试当前后缀，如果失败则尝试其他后缀
         suffixes_to_try = [ts_code.split(".")[-1]] if "." in ts_code else ["OF"]
