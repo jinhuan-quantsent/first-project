@@ -1762,8 +1762,9 @@ async def get_fund_detail_for_portfolio(
     except Exception:
         pass
 
-    # 获取情绪因子详情（用于前端推荐理由展示）
-    # 因子数据始终取沪深300宽基pipeline结果（板块基金也用宽基因子）
+    # 获取完整情绪数据（宽基沪深300 pipeline结果）
+    # 透传完整结构：factors + sentiment_score + signal_level + macd_history + divergence 等
+    # 板块基金也用宽基因子（所有持仓基金共享同一组市场情绪信号）
     sentiment_detail = None
     try:
         from app.core.redis_client import cache_get as _cache_get
@@ -1773,7 +1774,25 @@ async def get_fund_detail_for_portfolio(
         for _d in (_today_str, _yesterday_str):
             _cached = await _cache_get(f"fsa:sentiment:SH000300:{_d}")
             if _cached and _cached.get("factor_details"):
-                sentiment_detail = {"factors": _cached["factor_details"]}
+                # 透传完整情绪数据结构
+                sentiment_detail = {
+                    "factors": _cached["factor_details"],
+                    "sentiment_score": _cached.get("composite_score"),
+                    "score_std": _cached.get("score_std"),
+                    "signal_level": _cached.get("signal_level"),
+                    "regime": _cached.get("regime"),
+                    "confidence_stars": _cached.get("confidence_stars"),
+                    "confidence_detail": _cached.get("confidence_detail"),
+                    "divergence_penalty": _cached.get("divergence_penalty"),
+                    "macd": _cached.get("macd"),
+                    "macd_history": _cached.get("macd_history", []),
+                    "price_macd": _cached.get("price_macd"),
+                    "price_macd_history": _cached.get("price_macd_history", []),
+                    "divergence": _cached.get("divergence"),
+                    "defenses_triggered": _cached.get("defenses_triggered", []),
+                    "signal_jump_blocked": _cached.get("signal_jump_blocked", False),
+                    "updated_at": _cached.get("updated_at"),
+                }
                 break
     except Exception:
         pass
