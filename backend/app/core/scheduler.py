@@ -1246,6 +1246,122 @@ def _build_threshold_data(preview_result: dict, meta: dict, gszzl: float | None,
 # ============================================================
 # 任务 16：盘中预演计算（交易时段内每5分钟执行）
 # ============================================================
+
+def _compute_intraday_features(series: list) -> dict:
+    """计算盘中形态特征 (V5.4增强)
+
+    输入: series = [{ts: "HH:MM", gszzl: float, preview_score: float, ...}, ...]
+    输出: {shape, am_range, pm_slope, turn_points, last30_dir, gszzl_first, gszzl_last}
+    """
+    if not series or len(series) < 5:
+        return {
+            "shape": "insufficient_data",
+            "am_range": 0,
+            "pm_slope": 0,
+            "turn_points": 0,
+            "last30_dir": 0,
+            "gszzl_first": None,
+            "gszzl_last": None,
+        }
+
+    gszzl_vals = [p.get("gszzl") for p in series if p.get("gszzl") is not None]
+    if not gszzl_vals:
+        return {
+            "shape": "no_data",
+            "am_range": 0,
+            "pm_slope": 0,
+            "turn_points": 0,
+            "last30_dir": 0,
+            "gszzl_first": None,
+            "gszzl_last": None,
+        }
+
+    gszzl_first = gszzl_vals[0]
+    gszzl_last = gszzl_vals[-1]
+
+    # 1. 振幅范围
+    am_range = round(max(gszzl_vals) - min(gszzl_vals), 2)
+
+    # 2. 形态分类 (7类: 倒V/V/单边涨/单边跌/宽幅震荡/窄幅整理/震荡)
+    mid_idx = len(gszzl_vals) // 2
+    first_half_avg = sum(gszzl_vals[:mid_idx]) / mid_idx if mid_idx > 0 else gszzl_first
+    second_half_avg = sum(gszzl_vals[mid_idx:]) / (len(gszzl_vals) - mid_idx) if len(gszzl_vals) > mid_idx else gszzl_last
+
+    # 方向判断
+    direction = gszzl_last - gszzl_first
+    first_direction = first_half_avg - gszzl_first
+    second_direction = gszzl_last - second_half_avg
+
+    if am_range < 1.0:
+        shape = "窄幅整理"
+    elif abs(first_direction) > 0.5 and abs(second_direction) > 0.5 and first_direction * second_direction < 0:
+        # 先涨后跌 或 先跌后涨
+        if first_direction > 0 and second_direction < 0:
+            shape = "倒V"
+        else:
+            shape = "V"
+    elif am_range > 3.0 and _count_turn_points(gszzl_vals) >= 3:
+        shape = "宽幅震荡"
+    elif direction > 0.5:
+        shape = "单边涨"
+    elif direction < -0.5:
+        shape = "单边跌"
+    else:
+        shape = "震荡"
+
+    # 3. 午后斜率 (13:00-14:40)
+    pm_slope = _slope_series(series, "13:00", "14:40")
+
+    # 4. 转折点数
+    turn_points = _count_turn_points(gszzl_vals)
+
+    # 5. 最近30分钟方向 (14:10-14:40)
+    last30_dir = _slope_series(series, "14:10", "14:40")
+
+    return {
+        "shape": shape,
+        "am_range": am_range,
+        "pm_slope": pm_slope,
+        "turn_points": turn_points,
+        "last30_dir": last30_dir,
+        "gszzl_first": gszzl_first,
+        "gszzl_last": gszzl_last,
+    }
+
+
+def _slope_series(series: list, t_start: str, t_end: str) -> float:
+    """计算序列中两个时间点之间的 gszzl 变化量 (斜率)"""
+    val_start = None
+    val_end = None
+    for p in series:
+        ts = p.get("ts", "")
+        if ts >= t_start and val_start is None:
+            val_start = p.get("gszzl")
+        if ts >= t_end:
+            val_end = p.get("gszzl")
+            break
+
+    if val_start is not None and val_end is not None:
+        return round(val_end - val_start, 2)
+    return 0
+
+
+def _count_turn_points(vals: list) -> int:
+    """计算转折点数 (方向变化次数)"""
+    if len(vals) < 3:
+        return 0
+    count = 0
+    for i in range(1, len(vals) - 1):
+        prev_diff = vals[i] - vals[i - 1]
+        next_diff = vals[i + 1] - vals[i]
+        # 忽略极小波动 (阈值0.1%)
+        if abs(prev_diff) < 0.1 or abs(next_diff) < 0.1:
+            continue
+        if prev_diff * next_diff < 0:
+            count += 1
+    return count
+
+
 async def _run_intraday_preview_calculate() -> None:
     """
     盘中预演计算 -- 交易时段每5分钟执行
@@ -1576,6 +1692,23 @@ async def _run_intraday_preview_calculate() -> None:
                     # 5j. 写入Redis
                     cache_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:{fund_code}:{user_id}"
                     await cache_set(cache_key, preview_output, ttl=settings.INTRADAY_PREVIEW_CACHE_TTL)
+
+                    # 5j+1. 写入Redis序列 (盘中形态追踪 + validation-C 解耦数据源)
+                    series_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:series:{today_str}:{fund_code}:{user_id}"
+                    series_entry = {
+                        "ts": now.strftime("%H:%M"),
+                        "gszzl": gszzl,
+                        "preview_score": round(preview_score, 2),
+                        "preview_signal": preview_signal,
+                        "action": preview_result.get("action", "hold"),
+                    }
+                    # 追加式写入: 读现有序列 → append → 回写
+                    existing_series = await cache_get(series_key)
+                    if existing_series and isinstance(existing_series, list):
+                        existing_series.append(series_entry)
+                        await cache_set(series_key, existing_series, ttl=86400)
+                    else:
+                        await cache_set(series_key, [series_entry], ttl=86400)
 
                     success += 1
                     logger.info("[Scheduler] [preview] %s: score=%.1f->%.1f signal=%s->%s gszzl=%.2f action=%s",
@@ -2747,6 +2880,7 @@ async def _run_validation_persist() -> None:
     logger.info("[Scheduler] [validation-A] 预演持久化完成 -- %d 成功, %d 失败", success, fail)
 
 
+
 # ============================================================
 # 策略验证分析表 — 任务C: 14:52 DeepSeek AI建议
 # ============================================================
@@ -2775,19 +2909,86 @@ async def _run_validation_deepseek_advice() -> None:
         return
 
     today = date.today()
+    today_str = today.strftime("%Y-%m-%d")
     engine = get_async_engine()
 
-    # 1. 查询当日已写入的记录
-    async with AsyncSession(engine) as session:
-        stmt = select(StrategyValidationLog).where(
-            StrategyValidationLog.trade_date == today,
-            StrategyValidationLog.system_advice_text.isnot(None),
-        )
-        result = await session.execute(stmt)
-        records = result.scalars().all()
+    # 获取大盘/板块涨跌数据 (解耦后需自行获取，不再依赖validation-A DB记录)
+    market_index_chg_pct = None
+    sector_chg_pct = None
+    sector_name = None
+    try:
+        # 沪深300涨跌幅
+        import httpx as _httpx
+        mkt_url = "https://push2.eastmoney.com/api/qt/stock/get?secid=1.000300&fields=f43,f170&ut=fa5fd1943c7b386f172d6893dbfba10b"
+        async with _httpx.AsyncClient(timeout=10) as _client:
+            _resp = await _client.get(mkt_url)
+            _data = _resp.json().get("data", {})
+            if _data:
+                market_index_chg_pct = _data.get("f170")  # 涨跌幅(%)
+                if market_index_chg_pct is not None:
+                    market_index_chg_pct = float(market_index_chg_pct) / 100 if abs(float(market_index_chg_pct)) > 10 else float(market_index_chg_pct)
+    except Exception as _e:
+        logger.warning("[Scheduler] [validation-C] 大盘数据获取失败: %s", _e)
 
-    if not records:
-        logger.info("[Scheduler] [validation-C] 无待处理记录，跳过")
+    try:
+        # 板块涨跌幅 (使用同花顺接口)
+        sector_data = await _fetch_realtime_sector_changes()
+        if sector_data and isinstance(sector_data, list) and len(sector_data) > 0:
+            # 取中位数作为大盘板块涨跌代表
+            chgs = [s.get("chg_pct", 0) for s in sector_data if s.get("chg_pct") is not None]
+            sector_chg_pct = round(sum(chgs) / len(chgs), 2) if chgs else None
+            # 取第一个板块名称
+            sector_name = sector_data[0].get("name", "N/A") if sector_data else "N/A"
+    except Exception as _e:
+        logger.warning("[Scheduler] [validation-C] 板块数据获取失败: %s", _e)
+
+    # 1. 获取基金/用户列表 + 从Redis读取预演数据 (解耦: 不依赖validation-A的DB记录)
+    from app.core.cache_utils import cache_get, cache_set
+    today_str = today.strftime("%Y-%m-%d")
+
+    async with AsyncSession(engine) as session:
+        # 获取所有活跃持仓
+        portfolio_stmt = select(UserPortfolio).where(UserPortfolio.is_active == True)
+        portfolio_result = await session.execute(portfolio_stmt)
+        portfolios = portfolio_result.scalars().all()
+
+    # 按基金+用户分组
+    fund_user_pairs = {}  # {(fund_code, user_id): UserPortfolio}
+    for p in portfolios:
+        key = (p.fund_code, p.user_id)
+        fund_user_pairs[key] = p
+
+    # 构建任务列表: 读Redis预演数据 + 查已有DB记录(用于UPDATE或INSERT)
+    tasks = []  # [(fund_code, user_id, preview_data, hl_data, series_data, existing_record)]
+    async with AsyncSession(engine) as session:
+        for (fund_code, user_id), portfolio in fund_user_pairs.items():
+            # 读取Redis预演数据
+            cache_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{today_str}:{fund_code}:{user_id}"
+            preview_data = await cache_get(cache_key)
+            if not preview_data:
+                continue  # 无预演数据，跳过
+
+            # 读取盘中高低点
+            hl_key = f"{settings.VALIDATION_INTRADAY_HL_PREFIX}:{today_str}:{fund_code}"
+            hl_data = await cache_get(hl_key)
+
+            # 读取序列数据(形态特征)
+            series_key = f"{settings.INTRADAY_PREVIEW_CACHE_PREFIX}:series:{today_str}:{fund_code}:{user_id}"
+            series_data = await cache_get(series_key)
+
+            # 查找已有DB记录
+            existing_stmt = select(StrategyValidationLog).where(
+                StrategyValidationLog.trade_date == today,
+                StrategyValidationLog.fund_code == fund_code,
+                StrategyValidationLog.user_id == user_id,
+            )
+            existing_result = await session.execute(existing_stmt)
+            existing_record = existing_result.scalar_one_or_none()
+
+            tasks.append((fund_code, user_id, preview_data, hl_data, series_data, existing_record, portfolio))
+
+    if not tasks:
+        logger.info("[Scheduler] [validation-C] 无预演数据/无持仓，跳过")
         return
 
     # 2. 获取历史准确率（多窗口: 30/60/90天，供提示词使用）
@@ -2835,9 +3036,9 @@ async def _run_validation_deepseek_advice() -> None:
     for record in records:
         try:
             # 2a. 全unavailable→跳过
-            if record.gszzl_source == "unavailable":
+            if gszzl_source == "unavailable":
                 skipped += 1
-                logger.info("[Scheduler] [validation-C] %s 估值不可用，跳过AI调用", record.fund_code)
+                logger.info("[Scheduler] [validation-C] %s 估值不可用，跳过AI调用", fund_code)
                 continue
 
             # 2b. 组装提示词
@@ -2885,7 +3086,7 @@ async def _run_validation_deepseek_advice() -> None:
                     nav_stmt = select(
                         FundNav.nav_date, FundNav.nav, FundNav.daily_return
                     ).where(
-                        FundNav.fund_code == record.fund_code,
+                        FundNav.fund_code == fund_code,
                         FundNav.nav_date < today,
                     ).order_by(FundNav.nav_date.desc()).limit(10)
                     nav_rows = (await s.execute(nav_stmt)).all()
@@ -2901,7 +3102,7 @@ async def _run_validation_deepseek_advice() -> None:
                         DailySignalSnapshot.drawdown_pct,
                         DailySignalSnapshot.macd_state,
                     ).where(
-                        DailySignalSnapshot.target_code == record.fund_code,
+                        DailySignalSnapshot.target_code == fund_code,
                         DailySignalSnapshot.snapshot_date < today,
                     ).order_by(DailySignalSnapshot.snapshot_date.desc()).limit(10)
                     sig_rows = (await s.execute(sig_stmt)).all()
@@ -2922,41 +3123,59 @@ async def _run_validation_deepseek_advice() -> None:
                     market_sentiment_data = list(mkt_rows)
 
                     # P1-2: 板块情绪 (sector_code 近5天)
-                    if record.sector_code:
+                    if preview_data.get("sector_code", ""):
                         sec_stmt = select(
                             DailySignalSnapshot.snapshot_date,
                             DailySignalSnapshot.composite_score,
                             DailySignalSnapshot.signal_level,
                             DailySignalSnapshot.action_advice,
                         ).where(
-                            DailySignalSnapshot.target_code == record.sector_code,
+                            DailySignalSnapshot.target_code == preview_data.get("sector_code", ""),
                             DailySignalSnapshot.target_type == "sector",
                             DailySignalSnapshot.snapshot_date < today,
                         ).order_by(DailySignalSnapshot.snapshot_date.desc()).limit(5)
                         sec_rows = (await s.execute(sec_stmt)).all()
                         sector_sentiment_data = list(sec_rows)
             except Exception as _e:
-                logger.warning("[Scheduler] [validation-C] %s 历史数据查询失败，降级为空: %s", record.fund_code, _e)
+                logger.warning("[Scheduler] [validation-C] %s 历史数据查询失败，降级为空: %s", fund_code, _e)
 
             user_parts = []
 
-            # 段1: 今日预演数据
-            gszzl_str = f"{record.gszzl:+.2f}%" if record.gszzl is not None else "不可用"
-            gate_1_str = "已触发" if record.gate_1_triggered else f"距触发{record.gate_1_distance_pct:+.1f}%" if record.gate_1_distance_pct is not None else "未知"
-            gate_2_str = "已触发" if record.gate_2_triggered else f"距触发{record.gate_2_distance_pct:+.1f}%" if record.gate_2_distance_pct is not None else "未知"
+            # 段1: 今日预演数据 (从Redis预演数据读取，不再依赖DB record)
+            gszzl_val = preview_data.get("gszzl")
+            gszzl_str = f"{gszzl_val:+.2f}%" if gszzl_val is not None else "不可用"
+            preview_score_val = preview_data.get("preview_score", 0)
+            preview_signal_val = preview_data.get("signal_level", "D")
+            preview_confidence_val = preview_data.get("confidence_stars", 0)
+            elasticity_val = preview_data.get("elasticity", 0)
+            score_delta_val = preview_data.get("score_delta", 0)
+            overall_status_val = preview_data.get("overall_status", "normal")
+            # Gate数据
+            gates_data = preview_data.get("gates") or {}
+            gate_1_triggered = gates_data.get("gate_1_triggered", False)
+            gate_1_distance = gates_data.get("gate_1_distance_pct")
+            gate_2_triggered = gates_data.get("gate_2_triggered", False)
+            gate_2_distance = gates_data.get("gate_2_distance_pct")
+            gate_1_str = "已触发" if gate_1_triggered else f"距触发{gate_1_distance:+.1f}%" if gate_1_distance is not None else "未知"
+            gate_2_str = "已触发" if gate_2_triggered else f"距触发{gate_2_distance:+.1f}%" if gate_2_distance is not None else "未知"
+            # 日内高低点 (从hl_key读取)
+            intraday_high = hl_data.get("high") if hl_data and isinstance(hl_data, dict) else preview_data.get("intraday_high_gszzl")
+            intraday_low = hl_data.get("low") if hl_data and isinstance(hl_data, dict) else preview_data.get("intraday_low_gszzl")
+            intraday_range = round(intraday_high - intraday_low, 2) if intraday_high is not None and intraday_low is not None else 0
             user_parts.append(
                 f"【今日预演数据】\n"
-                f"基金代码: {record.fund_code}\n"
-                f"基金名称: {record.fund_name or '未知'}\n"
+                f"基金代码: {fund_code}\n"
+                
                 f"盘中估值: {gszzl_str}\n"
-                f"预演情绪分: {record.preview_score}\n"
-                f"预演信号: {record.preview_signal}\n"
-                f"置信度: {record.preview_confidence}星(尾盘)\n"
-                f"弹性系数: {record.elasticity}\n"
-                f"情绪分变化: {record.score_delta}\n"
+                f"预演情绪分: {preview_score_val}\n"
+                f"预演信号: {preview_signal_val}\n"
+                f"置信度: {preview_confidence_val}星(尾盘)\n"
+                f"弹性系数: {elasticity_val}\n"
+                f"情绪分变化: {score_delta_val}\n"
                 f"Gate-1: {gate_1_str}\n"
                 f"Gate-2: {gate_2_str}\n"
-                f"总状态: {record.overall_status}\n"
+                f"总状态: {overall_status_val}\n"
+                f"日内高低点: {intraday_high}% / {intraday_low}% (振幅{intraday_range}%)\n"
             )
             # 段1.5: P0 净值走势 (近10个交易日)
             if nav_history_data:
@@ -3000,15 +3219,17 @@ async def _run_validation_deepseek_advice() -> None:
 
 
             # 段2: 大盘/板块/持仓
-            mkt_str = f"{record.market_index_chg_pct:+.2f}%" if record.market_index_chg_pct is not None else "不可用"
-            sec_str = f"{record.sector_chg_pct:+.2f}%" if record.sector_chg_pct is not None else "不可用"
-            pnl_str = f"{record.unrealized_pnl_pct:+.1f}%" if record.unrealized_pnl_pct is not None else "不可用"
+            mkt_str = f"{market_index_chg_pct:+.2f}%" if market_index_chg_pct is not None else "不可用"
+            sec_str = f"{sector_chg_pct:+.2f}%" if sector_chg_pct is not None else "不可用"
+            unrealized_pnl_pct_val = preview_data.get("unrealized_pnl_pct")
+            pnl_str = f"{unrealized_pnl_pct_val:+.1f}%" if unrealized_pnl_pct_val is not None else "不可用"
+            cost_basis_val = portfolio.cost_basis if portfolio and hasattr(portfolio, "cost_basis") else None
             user_parts.append(
                 f"【市场上下文】\n"
                 f"大盘涨跌幅: {mkt_str}\n"
                 f"板块涨跌幅: {sec_str}\n"
                 f"浮盈亏: {pnl_str}\n"
-                f"成本净值: {record.cost_basis}\n"
+                f"成本净值: {cost_basis_val}\n"
             )
             # 段2.5: P1 大盘情绪 (近5个交易日)
             if market_sentiment_data:
@@ -3035,7 +3256,7 @@ async def _run_validation_deepseek_advice() -> None:
                     sc_str = f"{sc:.1f}" if sc is not None else "N/A"
                     aa_str = _aa_map.get(aa, aa or "N/A")
                     sec_lines.append(f"  {sd} | 情绪分 {sc_str} | 信号 {sl or 'N/A'} | 操作 {aa_str}")
-                sec_name = record.sector_name or record.sector_code or "N/A"
+                sec_name = sector_name or preview_data.get("sector_code", "") or "N/A"
                 user_parts.append(
                     f"【近5日板块情绪({sec_name})】\n"
                     + "\n".join(sec_lines)
@@ -3071,7 +3292,7 @@ async def _run_validation_deepseek_advice() -> None:
                         sa_func.avg(StrategyValidationLog.deepseek_advice_correct),
                         sa_func.count(StrategyValidationLog.deepseek_advice_correct),
                     ).where(
-                        StrategyValidationLog.fund_code == record.fund_code,
+                        StrategyValidationLog.fund_code == fund_code,
                         StrategyValidationLog.trade_date >= thirty_days_ago,
                         StrategyValidationLog.trade_date < today,
                     )
@@ -3087,12 +3308,13 @@ async def _run_validation_deepseek_advice() -> None:
                 logger.debug("[Scheduler] [validation-C] Per-fund准确率查询失败: %s", e)
 
             # 段3.5: P2 前日信号对比
-            if record.yesterday_signal or record.yesterday_score is not None:
-                y_sig = record.yesterday_signal or "N/A"
-                y_score = f"{record.yesterday_score:.1f}" if record.yesterday_score is not None else "N/A"
-                t_sig = record.preview_signal or "N/A"
-                t_score = f"{record.preview_score:.1f}" if record.preview_score is not None else "N/A"
-                delta_str = f"{record.score_delta:+.1f}" if record.score_delta is not None else "N/A"
+            if preview_data.get("yesterday_signal", "N/A") or preview_data.get("yesterday_score") is not None:
+                y_sig = preview_data.get("yesterday_signal", "N/A") or "N/A"
+                yesterday_score_val = preview_data.get("yesterday_score")
+                y_score = f"{yesterday_score_val:.1f}" if yesterday_score_val is not None else "N/A"
+                t_sig = preview_signal_val
+                t_score = f"{preview_score_val:.1f}" if preview_score_val is not None else "N/A"
+                delta_str = f"{score_delta_val:+.1f}" if score_delta_val is not None else "N/A"
                 _switched = "有变化" if y_sig != t_sig else "维持不变"
                 user_parts.append(
                     f"【前日信号对比】\n"
@@ -3103,7 +3325,17 @@ async def _run_validation_deepseek_advice() -> None:
                 )
 
             # 段4: 系统建议
-            user_parts.append(f"【系统建议参考】\n{record.system_advice_text or '无'}")
+            # 段1.5: 盘中形态特征 (V5.4增强)
+            if series_data and isinstance(series_data, list) and len(series_data) >= 5:
+                features = _compute_intraday_features(series_data)
+                user_parts.append(
+                    f"【盘中形态特征】\n"
+                    f"形态分类: {features['shape']}\n"
+                    f"日内振幅: {features['am_range']}%\n"
+                    f"午后斜率: {features['pm_slope']}%\n"
+                    f"转折点数: {features['turn_points']}\n"
+                    f"近30分钟方向: {features['last30_dir']}\n"
+                )
 
             # 段4.5: 系统已推导金额区块（阶段1 — 金额由系统算，模型只翻译，零黑箱）
             system_action = "持有"
@@ -3116,7 +3348,7 @@ async def _run_validation_deepseek_advice() -> None:
                     # target_position_pct / action_advice 来自当日 daily_signal_snapshot
                     snap_stmt = select(DailySignalSnapshot).where(
                         DailySignalSnapshot.snapshot_date == today,
-                        DailySignalSnapshot.target_code == record.fund_code,
+                        DailySignalSnapshot.target_code == fund_code,
                     ).order_by(DailySignalSnapshot.id.desc()).limit(1)
                     snap_res = await s.execute(snap_stmt)
                     snap_row = snap_res.scalar_one_or_none()
@@ -3124,7 +3356,7 @@ async def _run_validation_deepseek_advice() -> None:
                     if snap_row is None:
                         fb_stmt = select(DailySignalSnapshot).where(
                             DailySignalSnapshot.snapshot_date < today,
-                            DailySignalSnapshot.target_code == record.fund_code,
+                            DailySignalSnapshot.target_code == fund_code,
                         ).order_by(DailySignalSnapshot.snapshot_date.desc()).limit(1)
                         snap_row = (await s.execute(fb_stmt)).scalar_one_or_none()
                     snap_target_pct = float(snap_row.target_position_pct) if (snap_row and snap_row.target_position_pct is not None) else 0.0
@@ -3133,25 +3365,25 @@ async def _run_validation_deepseek_advice() -> None:
 
                     # 实时算总资产 = Σ(user_portfolio.market_value) + user_cash.cash_amount
                     mv_res = await s.execute(
-                        select(sa_func.sum(UserPortfolio.market_value)).where(UserPortfolio.user_id == record.user_id)
+                        select(sa_func.sum(UserPortfolio.market_value)).where(UserPortfolio.user_id == user_id)
                     )
                     total_market_value = float(mv_res.scalar() or 0.0)
-                    cash_row = (await s.execute(select(UserCash).where(UserCash.user_id == record.user_id))).scalar_one_or_none()
+                    cash_row = (await s.execute(select(UserCash).where(UserCash.user_id == user_id))).scalar_one_or_none()
                     cash_amount = float(cash_row.cash_amount) if cash_row else 0.0
                     total_assets = total_market_value + cash_amount
 
                     # 本基金持仓市值
                     fund_mv_res = await s.execute(
                         select(UserPortfolio.market_value).where(
-                            UserPortfolio.user_id == record.user_id,
-                            UserPortfolio.fund_code == record.fund_code,
+                            UserPortfolio.user_id == user_id,
+                            UserPortfolio.fund_code == fund_code,
                         ).limit(1)
                     )
                     fund_market_value = float(fund_mv_res.scalar() or 0.0)
                     current_position_pct = fund_market_value / total_assets if total_assets > 0 else 0.0
 
-                # 统一真相源：优先用 record.system_advice_action（Validation-A 写入）
-                _raw_action = record.system_advice_action or snap_action
+                # 统一真相源：解耦后使用 DailySignalSnapshot 方向（无 system_advice_action）
+                _raw_action = snap_action  # 解耦后无system_advice_action，只用DailySignalSnapshot
                 if _raw_action == "increase":
                     system_action = "加仓"
                 elif _raw_action in ("decrease", "sell"):
@@ -3162,12 +3394,12 @@ async def _run_validation_deepseek_advice() -> None:
                 # 持有时建议金额=0；否则 = |target - current| × total_assets
                 suggested_amount = 0.0 if system_action == "持有" else abs(target_position_pct - current_position_pct) * total_assets
             except Exception as _e:
-                logger.warning("[Scheduler] [validation-C] %s 推导金额失败，降级为空金额区块: %s", record.fund_code, _e)
+                logger.warning("[Scheduler] [validation-C] %s 推导金额失败，降级为空金额区块: %s", fund_code, _e)
 
             # 系统已推导金额区块（模型严禁修改金额，仅翻译）
             user_parts.append(
                 "【系统已推导的仓位与金额（请勿修改任何数字，仅供翻译）】\n"
-                f"基金代码: {record.fund_code}\n"
+                f"基金代码: {fund_code}\n"
                 f"当前持仓市值: ¥{current_position_pct * total_assets:.0f}  (持仓占比 {current_position_pct * 100:.1f}%)\n"
                 f"目标仓位: {target_position_pct * 100:.1f}%\n"
                 f"系统总资产: ¥{total_assets:.0f}\n"
@@ -3221,25 +3453,32 @@ async def _run_validation_deepseek_advice() -> None:
                 except Exception as e:
                     last_err = e
                     if attempt < settings.DEEPSEEK_MAX_RETRIES:
-                        logger.warning("[Scheduler] [validation-C] %s 第%d次调用失败，重试: %s", record.fund_code, attempt + 1, e)
+                        logger.warning("[Scheduler] [validation-C] %s 第%d次调用失败，重试: %s", fund_code, attempt + 1, e)
                     else:
-                        logger.error("[Scheduler] [validation-C] %s DeepSeek调用最终失败(降级): %s", record.fund_code, e)
+                        logger.error("[Scheduler] [validation-C] %s DeepSeek调用最终失败(降级): %s", fund_code, e)
 
             if ai_response is None:
                 fail += 1
                 # 失败可见化：写入可区分标记，便于排查（不抛异常，scheduler 继续其它基金）
                 try:
                     async with AsyncSession(engine) as session:
-                        fail_stmt = select(StrategyValidationLog).where(
-                            StrategyValidationLog.id == record.id
-                        )
-                        fail_result = await session.execute(fail_stmt)
-                        fail_record = fail_result.scalar_one_or_none()
-                        if fail_record:
-                            fail_record.deepseek_advice = f"[DEEPSEEK_CALL_FAILED: {str(last_err)[:200]}]"
+                        if existing_record:
+                            # UPDATE已有记录
+                            existing_record.deepseek_advice = f"[DEEPSEEK_CALL_FAILED: {str(last_err)[:200]}]"
+                            session.add(existing_record)
+                            await session.commit()
+                        else:
+                            # INSERT新记录 (validation-A尚未创建)
+                            new_fail_record = StrategyValidationLog(
+                                trade_date=today,
+                                fund_code=fund_code,
+                                user_id=user_id,
+                                deepseek_advice=f"[DEEPSEEK_CALL_FAILED: {str(last_err)[:200]}]",
+                            )
+                            session.add(new_fail_record)
                             await session.commit()
                 except Exception:
-                    logger.warning("[Scheduler] [validation-C] %s 标记CALL_FAILED写入失败", record.fund_code)
+                    logger.warning("[Scheduler] [validation-C] %s 标记CALL_FAILED写入失败", fund_code)
                 continue
 
             # 2d. 提取建议方向（仅从首行解析，避免分析段中的方向词污染）
@@ -3258,13 +3497,13 @@ async def _run_validation_deepseek_advice() -> None:
             if _is_independent:
                 # 独立顾问模式：不 override，保留 AI 原始方向
                 # 但 Gate 安全边界仍强制系统方向（安全官建议）
-                _gate_triggered = (record.gate_1_triggered == 1) or (record.gate_2_triggered == 1)
+                _gate_triggered = (gate_1_triggered == 1) or (gate_2_triggered == 1)
                 if _gate_triggered and system_action_code != advice_action:
                     final_action = system_action_code
                     action_mismatch = True
                     logger.warning(
                         "[Scheduler] [validation-C] %s Gate已触发，强制系统方向(%s)覆盖AI方向(%s) — 安全边界",
-                        record.fund_code, system_action_code, advice_action,
+                        fund_code, system_action_code, advice_action,
                     )
                     _action_code_to_cn = {"increase": "加仓", "hold": "持有", "decrease": "减仓"}
                     override_note = (
@@ -3275,7 +3514,7 @@ async def _run_validation_deepseek_advice() -> None:
                     action_mismatch = True
                     logger.info(
                         "[Scheduler] [validation-C] %s AI独立方向(%s)与系统(%s)不同 — independent模式保留AI方向",
-                        record.fund_code, advice_action, system_action_code,
+                        fund_code, advice_action, system_action_code,
                     )
             else:
                 # 翻译器模式：强制 override 为系统方向
@@ -3284,7 +3523,7 @@ async def _run_validation_deepseek_advice() -> None:
                     action_mismatch = True
                     logger.warning(
                         "[Scheduler] [validation-C] %s 模型解析action(%s)与系统权威(%s)不一致，强制override为系统action",
-                        record.fund_code, advice_action, system_action_code,
+                        fund_code, advice_action, system_action_code,
                     )
                     # 在advice文本前插入override标注，使存储文本自洽
                     _action_code_to_cn = {"increase": "加仓", "hold": "持有", "decrease": "减仓"}
@@ -3296,27 +3535,38 @@ async def _run_validation_deepseek_advice() -> None:
 
             # 2e. 更新DB
             async with AsyncSession(engine) as session:
-                update_stmt = select(StrategyValidationLog).where(
-                    StrategyValidationLog.id == record.id
-                )
-                update_result = await session.execute(update_stmt)
-                db_record = update_result.scalar_one_or_none()
-                if db_record:
-                    db_record.deepseek_advice = ai_response
-                    db_record.deepseek_advice_action = final_action
+                if existing_record:
+                    # UPDATE已有记录 (validation-A已创建或之前INSERT的)
+                    existing_record.deepseek_advice = ai_response
+                    existing_record.deepseek_advice_action = final_action
                     if action_mismatch:
-                        # ext_text1 为预留 String(200) 列，存原模型解析 + 标记（零DDL）
-                        db_record.ext_text1 = (
+                        existing_record.ext_text1 = (
                             '{"raw_action": "%s", "flag": "model_mismatch"}' % advice_action
                         )
+                    session.add(existing_record)
+                    await session.commit()
+                else:
+                    # INSERT新记录 (validation-A尚未创建)
+                    new_record = StrategyValidationLog(
+                        trade_date=today,
+                        fund_code=fund_code,
+                        user_id=user_id,
+                        deepseek_advice=ai_response,
+                        deepseek_advice_action=final_action,
+                    )
+                    if action_mismatch:
+                        new_record.ext_text1 = (
+                            '{"raw_action": "%s", "flag": "model_mismatch"}' % advice_action
+                        )
+                    session.add(new_record)
                     await session.commit()
 
             success += 1
             logger.info("[Scheduler] [validation-C] %s AI建议=%s (%d字)",
-                       record.fund_code, final_action, len(ai_response))
+                       fund_code, final_action, len(ai_response))
         except Exception as e:
             fail += 1
-            logger.error("[Scheduler] [validation-C] %s FAIL: %s", record.fund_code, e)
+            logger.error("[Scheduler] [validation-C] %s FAIL: %s", fund_code, e)
 
     logger.info("[Scheduler] [validation-C] AI建议完成 -- %d 成功, %d 失败, %d 跳过", success, fail, skipped)
 
@@ -3332,6 +3582,7 @@ async def _run_validation_deepseek_advice() -> None:
 # 策略验证分析表 — 任务B: 17:35 T+1回验回填
 # ============================================================
 async def _run_validation_backfill() -> None:
+
     """
     策略验证-任务B: 17:35 T+1回验回填
 
@@ -4154,18 +4405,19 @@ def init_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # 任务 V2：策略验证-DeepSeek AI建议（14:47）
+    # 任务 V2：策略验证-DeepSeek AI建议（14:40）
     scheduler.add_job(
         _run_validation_deepseek_advice,
         trigger=CronTrigger(
             day_of_week="mon-fri",
             hour=14,
-            minute=47,
+            minute=40,
             timezone="Asia/Shanghai",
         ),
         id="validation_deepseek",
         name="策略验证-AI建议",
         replace_existing=True,
+        misfire_grace_time=300,
     )
 
     # 任务 V3：策略验证-T+1回验回填（17:35）
