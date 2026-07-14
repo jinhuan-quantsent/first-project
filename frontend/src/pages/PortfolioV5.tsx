@@ -114,8 +114,8 @@ function round2(v: number): number {
 }
 
 /* ============================================================
-   Mock 数据生成器
-   为详情面板生成合理的 mock 数据
+   buildRealDetailData - assemble PositionDetailData from multiple sources
+   Sources: portfolio item + signal + fund-detail API + advice/trade records
    ============================================================ */
 function buildRealDetailData(
   item: PortfolioItem,
@@ -249,8 +249,8 @@ function buildRealDetailData(
         `${s.name}核心标的`,
     })) ?? [],
 
-    morningStarRating: 0,  // 暂无真实数据
-    ratingDetails: [],  // 暂无真实数据
+    morningStarRating: 0,  // V3.0: morningstar API not integrated, conditional render skips when 0
+    ratingDetails: [],  // V3.0: morningstar API not integrated, conditional render skips when empty
 
     todayEvaluation,
     shortTerm,
@@ -730,9 +730,10 @@ export default function PortfolioV5() {
 
   useAutoRefresh(['holdings'], () => setRefreshTrigger((t) => t + 1));
 
-  // TODO: 接入真实API (T4/T6完成后) — 建仓推荐基金
-  const [recommendedFunds, setRecommendedFunds] = useState<SectorFund[]>([]);
-  const [showRecommendations, setShowRecommendations] = useState(false);
+  // V3.0: Recommended funds disabled - was hardcoded mock (801150 medical sector)
+  // Re-enable when real recommendation API is available
+  const [recommendedFunds] = useState<SectorFund[]>([]);
+  const [showRecommendations] = useState(false);
 
   /* ---- Gate 总览统计 + 风险排序 ---- */
   const gateStats = useMemo(() => {
@@ -877,8 +878,8 @@ export default function PortfolioV5() {
         setItems(portfolioData.items);
         const cashData = await fetchCashV5();
         setCashAmount(cashData.cash_amount);
-      } catch {
-        // 静默降级
+      } catch (reloadErr) {
+        console.warn('[PortfolioV5] Reload after delete failed:', reloadErr);
       }
     } catch (err: any) {
       toast.error(err?.response?.data?.message || '删除失败');
@@ -898,8 +899,8 @@ export default function PortfolioV5() {
         setItems(portfolioData.items);
         const cashData = await fetchCashV5();
         setCashAmount(cashData.cash_amount);
-      } catch {
-        // 静默降级
+      } catch (reloadErr) {
+        console.warn('[PortfolioV5] Reload after increase failed:', reloadErr);
       }
     } catch (err: any) {
       toast.error(err?.response?.data?.message || '加仓失败');
@@ -919,8 +920,8 @@ export default function PortfolioV5() {
         setItems(portfolioData.items);
         const cashData = await fetchCashV5();
         setCashAmount(cashData.cash_amount);
-      } catch {
-        // 静默降级
+      } catch (reloadErr) {
+        console.warn('[PortfolioV5] Reload after decrease failed:', reloadErr);
       }
     } catch (err: any) {
       toast.error(err?.response?.data?.message || '减仓失败');
@@ -936,8 +937,8 @@ export default function PortfolioV5() {
       setError(null);
       try {
         const [portfolioData, cashData] = await Promise.all([
-          fetchPortfolioV5().catch(() => null),
-          fetchCashV5().catch(() => null as any),
+          fetchPortfolioV5().catch(err => { console.error('[PortfolioV5] Failed to load portfolio:', err); return null; }),
+          fetchCashV5().catch(err => { console.error('[PortfolioV5] Failed to load cash:', err); return null; }),
         ]);
 
         if (cancelled) return;
@@ -1129,13 +1130,11 @@ export default function PortfolioV5() {
     return () => { cancelled = true; };
   }, [refreshTrigger]);
 
-  // TODO: 接入真实API (T4/T6完成后) — 加载建仓推荐基金
-  useEffect(() => {
-    // 阶段1: 使用 Mock 数据（加载医药生物板块的强烈建仓基金作为推荐）
-    fetchSectorFunds('801150').then((funds) => {
-      setRecommendedFunds(funds);
-    }).catch(() => { /* silent */ });
-  }, []);
+  // V3.0: Recommended funds section disabled (was mock data)
+  // Uncomment when real recommendation API is available
+  // useEffect(() => {
+  //   fetchSectorFunds('801150').then(setRecommendedFunds).catch(console.warn);
+  // }, []);
 
   /** 执行仓位调整 — V3.0: 直接用已加载的 positionAdvice 数据，不再发额外请求 */
   const handleExecute = useCallback(async (item: PortfolioItem) => {
