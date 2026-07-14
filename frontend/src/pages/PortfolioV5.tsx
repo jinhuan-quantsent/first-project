@@ -14,16 +14,14 @@ import {
   fetchPortfolioV5,
   executePositionV5,
   updatePortfolioMarketValue,
-  fetchAdviceHistoryV5,
-  fetchTradeRecordsV5,
   fetchCashV5,
   updateCashV5,
   deletePortfolioV5,
   increasePosition,
   decreasePosition,
-  fetchPositionAdviceV5,
+  batchFetchFundDetail,
+  batchFetchAdviceTrade,
 } from '../api/portfolioV5';
-import { fetchV5Sentiment } from '../api/marketV5';
 import { fetchSectorFunds } from '../api/sectorDetailV5';
 import type { SectorFund } from '../types/positionRating';
 import { toast } from '../components/common/Toast';
@@ -958,48 +956,29 @@ export default function PortfolioV5() {
           return;
         }
 
-        // 并行获取：V5信号 + 详情数据 + 市场快照（减少串行批次）
-        const [signalEntries, detailEntries, snapRes] = await Promise.all([
-          Promise.all(
-            safeItems.map(async (item) => {
-              try {
-                const sentiment = await fetchV5Sentiment(item.fund_code);
-                return [item.fund_code, {
-                  signalLevel: sentiment.signal_level as SignalLevel,
-                  confidenceStars: sentiment.confidence_stars,
-                  factorDetails: sentiment.factor_details || [],
-                }] as [string, { signalLevel: SignalLevel; confidenceStars: number; factorDetails?: any[] }];
-              } catch {
-                return null;
-              }
-            }),
-          ),
-          Promise.all(
-            safeItems.map(async (item) => {
-              try {
-                const resp = await client.get(`/api/v5/portfolio/fund-detail?fund_code=${item.fund_code}`);
-                const data = resp.data?.data;
-                if (!data) return null;
-                return [item.fund_code, data] as [string, any];
-              } catch {
-                return null;
-              }
-            }),
-          ),
+        // V3.0: batch fetch - 53 requests -> 4 requests
+        const fundCodes = safeItems.map(item => item.fund_code);
+
+        const [batchDetail, batchAdviceTrade, snapRes] = await Promise.all([
+          batchFetchFundDetail(fundCodes).catch(err => {
+            console.error('[PortfolioV5] batch-fund-detail failed:', err);
+            return {} as Record<string, any>;
+          }),
+          batchFetchAdviceTrade(fundCodes).catch(err => {
+            console.error('[PortfolioV5] batch-advice-trade failed:', err);
+            return {} as Record<string, any>;
+          }),
           client.get('/api/v5/market/snapshot').catch(() => null),
         ]);
 
         if (cancelled) return;
 
+        // Build detailEntries from batch response
+        const detailEntries: [string, any][] = Object.entries(batchDetail);
+
+        // Build signalMap from fund-detail's positionAdvice (replaces fetchV5Sentiment)
         const signalMap: Record<string, { signalLevel: SignalLevel; confidenceStars: number; factorDetails?: any[] }> = {};
-        signalEntries.forEach((entry) => {
-          if (entry) signalMap[entry[0]] = entry[1];
-        });
-        // Fallback: 基金代码调 sentiment API 会 404，从 fund-detail 的 positionAdvice 补全置信度
-        detailEntries.forEach((entry) => {
-          if (!entry) return;
-          const [fc, data] = entry;
-          if (signalMap[fc]) return; // 已有直接情绪数据则跳过
+        detailEntries.forEach(([fc, data]) => {
           const pa = data?.positionAdvice;
           if (pa?.confidence_stars != null || pa?.signal_level) {
             signalMap[fc] = {
@@ -1011,22 +990,18 @@ export default function PortfolioV5() {
         });
         setSignals(signalMap);
 
-        // snapData 已在上面与 sentiment+fund-detail 并行获取
-        try {
-          const snapData = snapRes?.data?.data;
-          if (snapData?.composite_score !== undefined && snapData?.signal_level) {
-            // 根据信号等级和当前仓位估算目标仓位（简化版，复用V5仓位矩阵逻辑）
-            const currentPosPct = safeSummary?.core_ratio ?? 0.5;
-            const signalLevel = snapData.signal_level as string;
-            const posMatrix: Record<string, number> = {
-              'S+': 0.80, 'S': 0.70, 'A': 0.60, 'B': 0.50,
-              'C': 0.40, 'D': 0.30, 'E': 0.20,
-            };
-            const target = posMatrix[signalLevel] ?? 0.50;
-            setOverallTargetPct(target);
-          }
-        } catch {
-          // 静默降级
+        // Market snapshot for overall target position
+        const snapData = snapRes?.data?.data;
+        if (snapData?.composite_score !== undefined && snapData?.signal_level) {
+          const signalLevel = snapData.signal_level as string;
+          const posMatrix: Record<string, number> = {
+            'S+': 0.80, 'S': 0.70, 'A': 0.60, 'B': 0.50,
+            'C': 0.40, 'D': 0.30, 'E': 0.20,
+          };
+          setOverallTargetPct(posMatrix[signalLevel] ?? 0.50);
+        } else if (snapRes?.data?.code !== 0) {
+          console.warn('[PortfolioV5] market snapshot failed, using default target');
+          setOverallTargetPct(0.50);
         }
 
         // 从详情API提取增强数据
@@ -1038,9 +1013,8 @@ export default function PortfolioV5() {
         const realMarketStatusFromDetail: Record<string, string> = {};
         const realPositionAdviceFromDetail: Record<string, any> = {};
 
-        detailEntries.forEach((entry) => {
-          if (!entry) return;
-          const [code, detail] = entry;
+        detailEntries.forEach(([code, detail]) => {
+          if (!detail) return;
 
           const navH = detail.nav_history || [];
           if (navH.length > 1) {
@@ -1122,76 +1096,27 @@ export default function PortfolioV5() {
         // 信号切换检测 — 从 fund-detail 响应的 signal_switched_today 字段提取
         // （替代独立的 /signal-switched 批量API调用，Phase 2 优化）
         const newSwitchMap: Record<string, boolean> = {};
-        detailEntries.forEach((entry) => {
-          if (!entry) return;
-          const [code, detail] = entry;
+        detailEntries.forEach(([code, detail]) => {
+          if (!detail) return;
           if (detail?.signal_switched_today) {
             newSwitchMap[code] = true;
           }
         });
         if (!cancelled) setSignalSwitchedMap(newSwitchMap);
 
-        // 并行获取建议历史 + 交易记录
-        try {
-          const [adviceEntries, tradeEntries, posAdviceEntries] = await Promise.all([
-            Promise.all(
-              safeItems.map(async (item) => {
-                try {
-                  const adviceData = await fetchAdviceHistoryV5(item.fund_code);
-                  return [item.fund_code, adviceData] as [string, any];
-                } catch {
-                  return null;
-                }
-              }),
-            ),
-            Promise.all(
-              safeItems.map(async (item) => {
-                try {
-                  const tradeData = await fetchTradeRecordsV5(item.fund_code);
-                  return [item.fund_code, tradeData.items || []] as [string, any[]];
-                } catch {
-                  return null;
-                }
-              }),
-            ),
-            Promise.all(
-              safeItems.map(async (item) => {
-                try {
-                  const posAdvice: any = await fetchPositionAdviceV5(item.fund_code, item.weight_pct);
-                  return [item.fund_code, {
-                    trendText: posAdvice?.trend_text,
-                    marketStatus: posAdvice?.market_status,
-                    trendGuard: posAdvice?.trend_guard,
-                  }] as [string, any];
-                } catch {
-                  return null;
-                }
-              }),
-            ),
-          ]);
+        // V3.0: Use batch advice-trade data (already fetched above)
+        const realAdviceMap: Record<string, { items: any[]; stats: any }> = {};
+        const realTradeMap: Record<string, any[]> = {};
 
-          if (cancelled) return;
+        Object.entries(batchAdviceTrade).forEach(([fc, at]) => {
+          realAdviceMap[fc] = at.advice;
+          realTradeMap[fc] = at.trades.items;
+        });
 
-          const realAdviceMap: Record<string, { items: any[]; stats: any }> = {};
-          adviceEntries.forEach((entry) => {
-            if (entry) realAdviceMap[entry[0]] = entry[1];
-          });
-          setAdviceMap(realAdviceMap);
-
-          const realTradeMap: Record<string, any[]> = {};
-          tradeEntries.forEach((entry) => {
-            if (entry) realTradeMap[entry[0]] = entry[1];
-          });
-          setTradeMap(realTradeMap);
-
-          const realPosAdviceMap: Record<string, { trendText?: string; marketStatus?: string; trendGuard?: any }> = {};
-          posAdviceEntries.forEach((entry) => {
-            if (entry) realPosAdviceMap[entry[0]] = entry[1];
-          });
-          setPositionAdviceMap(realPosAdviceMap);
-        } catch {
-          // 非关键数据，静默失败
-        }
+        setAdviceMap(realAdviceMap);
+        setTradeMap(realTradeMap);
+        // Note: positionAdviceMap is no longer needed separately -
+        // fund-detail's positionAdvice already contains all the data
       } catch (err: any) {
         if (!cancelled) {
           setError(err?.message || '加载持仓数据失败');
@@ -1212,28 +1137,20 @@ export default function PortfolioV5() {
     }).catch(() => { /* silent */ });
   }, []);
 
-  /** 执行仓位调整（V5引擎精确目标仓位） */
+  /** 执行仓位调整 — V3.0: 直接用已加载的 positionAdvice 数据，不再发额外请求 */
   const handleExecute = useCallback(async (item: PortfolioItem) => {
     const signal = signals[item.fund_code];
-    // 调用V5引擎获取精确目标仓位，而非写死+10%
-    try {
-      const advice = await fetchPositionAdviceV5(item.fund_code, item.weight_pct);
-      await executePositionV5({
-        fund_code: item.fund_code,
-        target_position_pct: advice.target_pct ?? Math.min(0.95, item.weight_pct + 0.10),
-        signal_level: signal?.signalLevel ?? 'B',
-        confidence_stars: signal?.confidenceStars ?? 3,
-      });
-    } catch {
-      // 降级到信号级判断
-      await executePositionV5({
-        fund_code: item.fund_code,
-        target_position_pct: Math.min(0.95, item.weight_pct + 0.10),
-        signal_level: signal?.signalLevel ?? 'B',
-        confidence_stars: signal?.confidenceStars ?? 3,
-      });
-    }
-  }, [signals]);
+    const pa = positionAdviceFromDetailMap[item.fund_code];
+    const targetPct = pa?.target_position_pct
+      ? pa.target_position_pct / 100
+      : Math.min(0.95, item.weight_pct + 0.10);
+    await executePositionV5({
+      fund_code: item.fund_code,
+      target_position_pct: targetPct,
+      signal_level: signal?.signalLevel ?? 'B',
+      confidence_stars: signal?.confidenceStars ?? 3,
+    });
+  }, [signals, positionAdviceFromDetailMap]);
 
   // =============== 渲染 ===============
 

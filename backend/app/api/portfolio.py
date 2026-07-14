@@ -3,6 +3,8 @@
 V4.0：注入 get_current_user，Mock → ORM CRUD
 V5.0：新增仓位建议接口（使用 V5 引擎）
 """
+import asyncio
+import logging
 from datetime import datetime
 from typing import Optional
 
@@ -1866,3 +1868,189 @@ async def check_signal_switched(
             result_map[fund_code] = False
 
     return {"code": 0, "data": result_map}
+
+
+# ============================================================
+# V3.0 Batch endpoints - Portfolio page first-screen optimization (53->4 requests)
+# ============================================================
+
+class BatchFundDetailRequest(BaseModel):
+    """Batch fund detail request"""
+    fund_codes: list[str]
+
+
+@router.post("/batch-fund-detail")
+async def batch_fund_detail(
+    body: BatchFundDetailRequest,
+    user_id: str = Depends(get_current_user),
+) -> dict:
+    """
+    Batch fetch fund details (V3.0 portfolio optimization).
+
+    Parallel processing of N funds, each with independent session.
+    Internally reuses get_fund_detail_for_portfolio logic (with cache).
+
+    Returns: { fund_code: detail_data, ... }
+    """
+    from app.core.database import get_session_factory as _get_sf
+
+    async def _fetch_one(fc: str) -> tuple[str, dict | None]:
+        try:
+            sf = _get_sf()
+            async with sf() as sess:
+                result = await get_fund_detail_for_portfolio(
+                    fund_code=fc,
+                    user_id=user_id,
+                    session=sess,
+                )
+                if result.get("code") == 0 and result.get("data"):
+                    return (fc, result["data"])
+                return (fc, None)
+        except Exception as e:
+            logger.error("batch-fund-detail error for %s: %s", fc, e)
+            return (fc, None)
+
+    tasks = [_fetch_one(fc) for fc in body.fund_codes if fc]
+    results = await asyncio.gather(*tasks, return_exceptions=False)
+
+    data = {fc: detail for fc, detail in results if detail is not None}
+
+    return {
+        "code": 0,
+        "data": data,
+        "message": "ok",
+        "total_requested": len(body.fund_codes),
+        "total_returned": len(data),
+    }
+
+
+@router.post("/batch-advice-trade")
+async def batch_advice_trade(
+    body: BatchFundDetailRequest,
+    user_id: str = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """
+    Batch fetch advice history + trade records (V3.0 portfolio optimization).
+
+    Single DB query for all funds, avoiding N+1 queries.
+
+    Returns: { fund_code: { "advice": {...}, "trades": {...} }, ... }
+    """
+    from app.models.advice_log import AdviceLog
+    from app.models.position_execution import PositionExecution
+
+    fund_codes = [fc for fc in body.fund_codes if fc]
+    if not fund_codes:
+        return {"code": 0, "data": {}, "message": "ok"}
+
+    # Batch query advice history
+    advice_stmt = (
+        select(AdviceLog)
+        .where(
+            AdviceLog.user_id == user_id,
+            AdviceLog.index_code.in_(fund_codes),
+        )
+        .order_by(AdviceLog.trade_date.desc())
+        .limit(len(fund_codes) * 20)
+    )
+    advice_result = await session.execute(advice_stmt)
+    advice_rows = advice_result.scalars().all()
+
+    advice_by_code: dict[str, list] = {fc: [] for fc in fund_codes}
+    advice_stats_by_code: dict[str, dict] = {fc: {"total": 0, "verified": 0, "correct": 0} for fc in fund_codes}
+
+    for row in advice_rows:
+        fc = row.index_code
+        if fc not in advice_by_code:
+            continue
+        advice_by_code[fc].append({
+            "id": row.id,
+            "date": row.trade_date.strftime("%Y-%m-%d %H:%M") if row.trade_date else "",
+            "advice_date": row.advice_date.strftime("%Y-%m-%d") if row.advice_date else "",
+            "signal_level": row.signal_level or row.sentiment_label,
+            "confidence_stars": row.confidence_stars,
+            "advice_type": row.advice_type,
+            "advice_content": row.advice_content,
+            "suggested_position": row.suggested_position,
+            "is_executed": bool(row.is_executed) or row.is_executed_at is not None,
+            "is_verified": bool(row.is_verified),
+            "actual_result": row.actual_result,
+            "accuracy_score": row.accuracy_score,
+            "execution_note": row.execution_note or "",
+        })
+        advice_stats_by_code[fc]["total"] += 1
+        if row.is_verified:
+            advice_stats_by_code[fc]["verified"] += 1
+            if row.accuracy_score is not None and row.accuracy_score > 0.5:
+                advice_stats_by_code[fc]["correct"] += 1
+
+    # Batch query trade records
+    trade_stmt = (
+        select(PositionExecution)
+        .where(
+            PositionExecution.user_id == user_id,
+            PositionExecution.fund_code.in_(fund_codes),
+        )
+        .order_by(PositionExecution.execute_date.desc())
+        .limit(len(fund_codes) * 20)
+    )
+    trade_result = await session.execute(trade_stmt)
+    trade_rows = trade_result.scalars().all()
+
+    trade_by_code: dict[str, list] = {fc: [] for fc in fund_codes}
+
+    for row in trade_rows:
+        fc = row.fund_code
+        if fc not in trade_by_code:
+            continue
+        op_type = getattr(row, "operation_type", None)
+        if op_type == "buy":
+            trade_type = "买入"
+        elif op_type == "sell":
+            trade_type = "卖出"
+        elif row.to_position_pct > row.from_position_pct:
+            trade_type = "买入"
+        elif row.to_position_pct < row.from_position_pct:
+            trade_type = "卖出"
+        else:
+            trade_type = "调仓"
+
+        trade_by_code[fc].append({
+            "id": row.id,
+            "date": row.execute_date.strftime("%Y-%m-%d") if row.execute_date else "",
+            "fund_code": row.fund_code,
+            "type": trade_type,
+            "amount": row.amount or 0,
+            "from_pct": row.from_position_pct,
+            "to_pct": row.to_position_pct,
+            "signal_level": row.signal_level,
+            "confidence_stars": row.confidence_stars,
+            "reason": row.reason or "",
+            "nav": getattr(row, "nav", None) or 0,
+            "fee": 0,
+        })
+
+    # Assemble return data
+    data = {}
+    for fc in fund_codes:
+        stats = advice_stats_by_code[fc]
+        verified = stats["verified"]
+        correct = stats["correct"]
+        win_rate = round(correct / verified * 100, 1) if verified > 0 else 0
+
+        data[fc] = {
+            "advice": {
+                "items": advice_by_code[fc][:10],
+                "stats": {
+                    "total_advice": stats["total"],
+                    "verified_count": verified,
+                    "win_rate": win_rate,
+                },
+            },
+            "trades": {
+                "items": trade_by_code[fc][:10],
+            },
+        }
+
+    return {"code": 0, "data": data, "message": "ok"}

@@ -141,3 +141,27 @@ export async function fetchIntradayPreview(
   // 数据未就绪或功能关闭
   return res.data.data || null;
 }
+
+
+// ============================================================
+// V3.0 Batch API functions - 53 requests -> 4 requests
+// ============================================================
+
+/** Batch fetch fund details (replaces N x fund-detail calls) */
+export async function batchFetchFundDetail(fundCodes: string[]): Promise<Record<string, any>> {
+  const res = await client.post<ApiResponse<any>>('/api/v5/portfolio/batch-fund-detail', {
+    fund_codes: fundCodes,
+  });
+  return res.data.data;
+}
+
+/** Batch fetch advice history + trade records (replaces N x advice-history + trade-records + position-advice calls) */
+export async function batchFetchAdviceTrade(fundCodes: string[]): Promise<Record<string, {
+  advice: { items: any[]; stats: any };
+  trades: { items: any[] };
+}>> {
+  const res = await client.post<ApiResponse<any>>('/api/v5/portfolio/batch-advice-trade', {
+    fund_codes: fundCodes,
+  });
+  return res.data.data;
+}
