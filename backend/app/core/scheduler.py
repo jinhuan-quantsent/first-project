@@ -3350,8 +3350,17 @@ async def _run_validation_backfill() -> None:
         return
 
     today = date.today()
-    yesterday = today - timedelta(days=1)
     engine = get_async_engine()
+
+    # [Bugfix] 查找最近一个有记录的交易日(而非简单today-1)
+    # 周一 today-1=周日, validation-A 周末不运行 -> 查不到数据 -> early return 跳过快照生成
+    async with AsyncSession(engine) as _date_sess:
+        _last_td_stmt = select(StrategyValidationLog.trade_date).where(
+            StrategyValidationLog.trade_date < today
+        ).order_by(StrategyValidationLog.trade_date.desc()).limit(1)
+        _last_td_result = await _date_sess.execute(_last_td_stmt)
+        _last_td_row = _last_td_result.first()
+        yesterday = _last_td_row[0] if _last_td_row else today - timedelta(days=1)
 
     logger.info("[Scheduler] [validation-B] 开始T+1回验 -- 处理%s数据", yesterday.isoformat())
 
@@ -3368,8 +3377,7 @@ async def _run_validation_backfill() -> None:
         records = result.scalars().all()
 
     if not records:
-        logger.info("[Scheduler] [validation-B] 无待回验记录")
-        return
+        logger.info("[Scheduler] [validation-B] 无待回验记录，跳过回验循环(快照继续生成)")
 
     success = 0
     fail = 0
