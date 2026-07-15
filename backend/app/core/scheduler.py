@@ -1742,7 +1742,7 @@ async def _pack_meta_for_fund(fund_code: str) -> bool:
     from app.models.position_execution import PositionExecution
     from app.models.fund_nav import FundNav
     from app.engine.trend_guard import _calculate_ma20_trend, _calculate_macd
-    from app.engine.trend_guard import _get_sector_track, _get_fund_sector_code
+    from app.engine.trend_guard import _get_sector_track, _get_fund_sector_code, check_panic_gate
     from app.core.redis_client import cache_get, cache_set
 
     today = date.today()
@@ -1813,6 +1813,9 @@ async def _pack_meta_for_fund(fund_code: str) -> bool:
                 "signal_boundaries": list(settings.V5_SIGNAL_BOUNDARIES),
                 "nav_history_length": len(nav_history),
                 "is_data_sufficient": len(nav_history) >= 60,
+                # V5.4 扩展: trend_guard 缓存重构所需数据
+                "nav_history": nav_history,        # 60条净值 (Gate体系 + drawdown 计算需要)
+                "gate_p": await asyncio.to_thread(check_panic_gate, fund_code=fund_code),  # 沪深300恐慌闸结果
                 "packed_at": datetime.now().isoformat(),
             }
 

@@ -16,6 +16,9 @@ from typing import Optional
 
 from app.engine.signal_mapper import SignalMapper
 from app.core.config import settings
+from app.core.redis_client import cache_get
+from app.core.config import settings as _settings  # INTRADAY_PREVIEW_CACHE_PREFIX
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -523,19 +526,37 @@ async def calculate_trend_guard(
     """
     计算趋势卫士完整数据（MA20+MACD双指标趋势判定 + 板块双轨制信号 + Gate体系）
 
+    V5.4 缓存优先优化:
+    - 先从 Redis 读 scheduler 预演 meta 缓存 → 命中则用缓存数据重构 (0ms)
+    - 缓存缺失 → asyncio.to_thread(calculate_position_v5) 兜底 (不阻塞 event loop)
+
     Gate体系重构：
     - 持仓风控层（gate_triggered）：Gate1 > Gate2 > Gate-E
     - 建仓准入层（admission_gate）：Gate3
-
-    调用 trend_guard.calculate_position_v5 获取趋势卫士完整结构化数据。
     """
     # 检查配置开关
     if not settings.ENABLE_TREND_GUARD:
         return {}
 
+    # ── 缓存优先: 读 scheduler 预演 meta ──
+    try:
+        from datetime import date as _date, timedelta as _td
+        _today = _date.today()
+        for _d in (_today, _today - _td(days=1)):
+            _meta_key = f"{_settings.INTRADAY_PREVIEW_CACHE_PREFIX}:{_d.isoformat()}:meta:{fund_code}"
+            _meta = await cache_get(_meta_key)
+            if _meta and isinstance(_meta, dict) and _meta.get("is_data_sufficient"):
+                # 缓存命中 → 用缓存数据重构 trend_guard 结果 (纯数学 <1ms)
+                logger.info(f"[trend_guard] 缓存命中: {fund_code}, date={_d.isoformat()}, 0ms重构")
+                return _reconstruct_from_meta(_meta, signal_level, confidence_stars, current_position)
+    except Exception as e:
+        logger.warning(f"[trend_guard] 缓存读取异常: {fund_code}, {e}")
+
+    # ── 缓存缺失 → asyncio.to_thread 兜底 ──
     try:
         from app.engine.trend_guard import calculate_position_v5
-        result = calculate_position_v5(
+        result = await asyncio.to_thread(
+            calculate_position_v5,
             fund_code=fund_code,
             cost_basis=cost_basis,
             current_position=current_position,
@@ -565,5 +586,197 @@ async def calculate_trend_guard(
         return {}
 
 
+def _reconstruct_from_meta(
+    meta: dict,
+    signal_level: str,
+    confidence_stars: int,
+    current_position: float,
+) -> dict:
+    """
+    从 scheduler 预演 meta 缓存重构 trend_guard 结果
+
+    meta 包含: nav_history, ma20_trend, macd, sector_track, sector_code, regime, gate_p
+    利用这些数据 + 纯数学计算(check_holding_gates/check_admission_gate) → 完整输出
+    """
+    from app.engine.trend_guard import (
+        check_holding_gates, check_admission_gate,
+        _generate_operation_suggestion, _generate_trend_narrative,
+        _check_oscillation,
+    )
+
+    nav_history = meta.get("nav_history", [])
+    ma20_trend = meta.get("ma20_trend", "震荡")
+    macd_result = meta.get("macd")
+    sector_track = meta.get("sector_track")
+    gate_p_from_cache = meta.get("gate_p")
+
+    # 1. trend/macd 信号 (直接从缓存取)
+    trend_signal = ma20_trend
+    macd_signal = macd_result.get("signal", "中性") if isinstance(macd_result, dict) else "中性"
+    oscillation_silence = _check_oscillation(nav_history) if nav_history else False
+
+    # 2. Gate体系: 用缓存的 nav_history + gate_p 重新计算 (纯数学 <1ms)
+    # 注意: check_holding_gates 内部会调 check_panic_gate (fetch 沪深300),
+    # 但 meta 缓存已存 gate_p → 需绕过, 直接传入 gate_p_from_cache
+    if nav_history and gate_p_from_cache:
+        # 方案: 手动重构 Gate 体系，用缓存的 gate_p 替代 check_panic_gate
+        from app.engine.trend_guard import (
+            _calculate_drawdown, _get_price,
+            GATE1_DRAWDOWN_THRESHOLD, GATE2_DRAWDOWN_THRESHOLD,
+            DRAWDOWN_WINDOW,
+        )
+
+        # -- drawdown 计算 (纯数学) --
+        drawdown = _calculate_drawdown(nav_history, DRAWDOWN_WINDOW)
+
+        # -- 价格计算 (纯数学) --
+        prices = [_get_price(d) for d in nav_history]
+        current_price = prices[-1] if prices else 0.0
+        window_prices = prices[-DRAWDOWN_WINDOW:] if len(prices) >= DRAWDOWN_WINDOW else prices
+        peak_price = max(window_prices) if window_prices else current_price
+        ma20_prices = prices[-20:] if len(prices) >= 20 else prices
+        ma20_price = sum(ma20_prices) / len(ma20_prices) if ma20_prices else 0.0
+
+        # -- Gate1 (纯数学) --
+        gate1_trigger_price = peak_price * (1 - GATE1_DRAWDOWN_THRESHOLD) if peak_price > 0 else None
+        gate1_distance_pct = None
+        if gate1_trigger_price and current_price > 0:
+            gate1_distance_pct = round((GATE1_DRAWDOWN_THRESHOLD - drawdown) * 100, 2) * -1
+        gate1_triggered = drawdown >= GATE1_DRAWDOWN_THRESHOLD
+
+        # -- Gate2 (纯数学) --
+        gate2_exempted = (sector_track == "contrarian")
+        gate2_exempt_reason = "逆向策略逆趋势布局，MA20下降为正常特征" if gate2_exempted else None
+        gate2_trigger_price = ma20_price if ma20_price > 0 else None
+        gate2_distance_pct = None
+        if gate2_trigger_price and current_price > 0:
+            gate2_distance_pct = round((current_price - gate2_trigger_price) / gate2_trigger_price * 100, 2)
+        gate2_triggered = False
+        if not gate2_exempted:
+            if ma20_trend == "下降" and drawdown >= GATE2_DRAWDOWN_THRESHOLD:
+                gate2_triggered = True
+
+        # -- Gate-E (纯判断) --
+        gate_e_triggered = (signal_level == "E")
+
+        # -- Gate-P (用缓存!) --
+        gate_p_triggered = gate_p_from_cache.get("triggered", False) if isinstance(gate_p_from_cache, dict) else False
+
+        # -- overall_status --
+        if gate_p_triggered:
+            overall_status = "panic"
+        elif gate1_triggered or gate2_triggered:
+            overall_status = "stop_loss"
+        elif gate_e_triggered:
+            overall_status = "warning"
+        elif gate2_distance_pct is not None and gate2_distance_pct <= 3.0:
+            overall_status = "warning"
+        else:
+            overall_status = "normal"
+
+        # -- 构建结构化 Gate 对象 --
+        gate1_obj = {
+            "triggered": gate1_triggered,
+            "action": "clear" if gate1_triggered else "hold",
+            "label": "极端回撤（保命线）",
+            "trigger_price": round(gate1_trigger_price, 4) if gate1_trigger_price else None,
+            "current_distance_pct": gate1_distance_pct,
+            "drawdown": round(drawdown, 4),
+            "description": f"阶段回撤 >= {GATE1_DRAWDOWN_THRESHOLD*100:.0f}%",
+            "reason": (
+                f"极端回撤{drawdown*100:.1f}%>={GATE1_DRAWDOWN_THRESHOLD*100:.0f}%，无条件清仓"
+                if gate1_triggered else ""
+            ),
+        }
+        gate2_obj = {
+            "triggered": gate2_triggered,
+            "action": "clear" if gate2_triggered else "hold",
+            "label": "趋势破位（离场线）",
+            "trigger_price": round(gate2_trigger_price, 4) if gate2_trigger_price else None,
+            "current_distance_pct": gate2_distance_pct,
+            "drawdown": round(drawdown, 4),
+            "description": f"跌破MA20 + 回撤 >= {GATE2_DRAWDOWN_THRESHOLD*100:.0f}%",
+            "exempted": gate2_exempted,
+            "exempt_reason": gate2_exempt_reason,
+            "reason": (
+                f"跌破MA20且回撤{drawdown*100:.1f}%>={GATE2_DRAWDOWN_THRESHOLD*100:.0f}%，趋势破位清仓"
+                if gate2_triggered else (
+                    "逆向轨道豁免趋势破位检测" if gate2_exempted else ""
+                )
+            ),
+        }
+        gate_e_obj = {
+            "triggered": gate_e_triggered,
+            "action": "hold",
+            "label": "情绪过热（过热预警）",
+            "trigger_price": None,
+            "description": "信号等级达到 E（极度贪婪）",
+            "reason": "进入极度贪婪区间，紧盯趋势破位信号" if gate_e_triggered else "",
+        }
+
+        gates = {
+            "gate_p": gate_p_from_cache,
+            "gate_1": gate1_obj,
+            "gate_2": gate2_obj,
+            "gate_e": gate_e_obj,
+            "overall_status": overall_status,
+            "sector_track": sector_track,
+        }
+
+        # DEPRECATED 兼容字段
+        gate_triggered_compat = None
+        if gate1_triggered:
+            gate_triggered_compat = {"gate": "gate-1", "action": "clear", "adjusted_pct": 0.0,
+                                     "reason": gate1_obj["reason"], "drawdown": drawdown}
+        elif gate2_triggered:
+            gate_triggered_compat = {"gate": "gate-2", "action": "clear", "adjusted_pct": 0.0,
+                                     "reason": gate2_obj["reason"], "drawdown": drawdown}
+        elif gate_e_triggered:
+            gate_triggered_compat = {"gate": "gate-e", "action": "hold", "adjusted_pct": current_position,
+                                     "reason": gate_e_obj["reason"]}
+    else:
+        # nav_history 或 gate_p 缺失 → 用空结构
+        from app.engine.trend_guard import _build_gate_structure
+        gates = _build_gate_structure(sector_track=sector_track)
+        gate_triggered_compat = None
+
+    # 3. 准入层 (纯判断, 不需要外部数据)
+    gate2_triggered = gates.get("gate_2", {}).get("triggered", False) if isinstance(gates, dict) else False
+    admission_gate = check_admission_gate(
+        signal_level=signal_level,
+        sector_track=sector_track,
+        confidence=confidence_stars,
+        gate2_triggered=gate2_triggered,
+        fund_code=meta.get("fund_code", ""),
+    )
+
+    # 4. 操作建议 + 趋势叙事 (纯文本生成)
+    operation_suggestion = _generate_operation_suggestion(
+        trend_signal, macd_signal, oscillation_silence, gates,
+        sector_track=sector_track,
+    )
+    trend_narrative = _generate_trend_narrative(
+        trend_signal, macd_signal, oscillation_silence, gates, nav_history,
+        sector_track=sector_track,
+    )
+
+    return {
+        "trend_signal": trend_signal,
+        "macd_signal": macd_signal,
+        "macd_detail": macd_result if isinstance(macd_result, dict) else {"signal": macd_signal, "reason": "from_cache"},
+        "oscillation_silence": oscillation_silence,
+        "gate_triggered": gate_triggered_compat,
+        "gates": gates,
+        "gate_1": gates.get("gate_1") if isinstance(gates, dict) else None,
+        "gate_2": gates.get("gate_2") if isinstance(gates, dict) else None,
+        "gate_e": gates.get("gate_e") if isinstance(gates, dict) else None,
+        "overall_status": gates.get("overall_status") if isinstance(gates, dict) else "normal",
+        "sector_track": sector_track or (gates.get("sector_track") if isinstance(gates, dict) else None),
+        "admission_gate": admission_gate,
+        "operation_suggestion": operation_suggestion,
+        "trend_narrative": trend_narrative,
+    }
+
+
 # 导出函数
-__all__ = ["PositionEngineV5", "calculate_trend_guard"]
+__all__ = ["PositionEngineV5", "calculate_trend_guard", "_reconstruct_from_meta"]
