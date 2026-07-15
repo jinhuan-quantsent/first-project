@@ -55,6 +55,55 @@
       "name": "东方阿尔法科技智选混合发起C",
       "sw_sector_code": "801080",
       "sw_sector_name": "电子"
+    },
+    {
+      "code": "008714",
+      "category": "sector",
+      "name": "国泰中证全指家用电器ETF联接C",
+      "sw_sector_code": "801110",
+      "sw_sector_name": "家用电器"
+    },
+    {
+      "code": "022387",
+      "category": "sector",
+      "name": "华夏中证汽车零部件主题ETF发起式联接C",
+      "sw_sector_code": "801880",
+      "sw_sector_name": "汽车"
+    },
+    {
+      "code": "008888",
+      "category": "sector",
+      "name": "华夏国证半导体芯片ETF联接C",
+      "sw_sector_code": "801080",
+      "sw_sector_name": "电子"
+    },
+    {
+      "code": "008591",
+      "category": "sector",
+      "name": "天弘中证全指证券公司ETF联接C",
+      "sw_sector_code": "801790",
+      "sw_sector_name": "非银金融"
+    },
+    {
+      "code": "004433",
+      "category": "sector",
+      "name": "南方有色金属ETF联接C",
+      "sw_sector_code": "801050",
+      "sw_sector_name": "有色金属"
+    },
+    {
+      "code": "012538",
+      "category": "sector",
+      "name": "华宝中证细分化工产业主题ETF联接C",
+      "sw_sector_code": "801030",
+      "sw_sector_name": "基础化工"
+    },
+    {
+      "code": "020900",
+      "category": "sector",
+      "name": "天弘中证全指通信设备指数C",
+      "sw_sector_code": "801770",
+      "sw_sector_name": "通信"
     }
   ]
 }
