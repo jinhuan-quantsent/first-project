@@ -2969,7 +2969,7 @@ async def _run_validation_deepseek_advice() -> None:
         logger.warning("[Scheduler] [validation-C] 板块数据获取失败: %s", _e)
 
     # 1. 获取基金/用户列表 + 从Redis读取预演数据 (解耦: 不依赖validation-A的DB记录)
-    from app.core.cache_utils import cache_get, cache_set
+    from app.core.redis_client import cache_get, cache_set
     today_str = today.strftime("%Y-%m-%d")
 
     async with AsyncSession(engine) as session:
