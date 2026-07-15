@@ -1532,10 +1532,22 @@ async def _run_intraday_preview_calculate() -> None:
                     # 无昨日快照（可能是新加入的基金）-- 从Redis缓存读
                     sector_code = meta.get("sector_code")
                     if sector_code and sector_code.startswith("801"):
-                        sector_cache = await cache_get(f"v5:sector:sentiment:{sector_code}")
+                        # Fix #6: aggregate key v5:sector:sentiment (含所有板块),
+                        # 不是 per-sector key v5:sector:sentiment:{sector_code}(不存在)
+                        sector_cache = await cache_get("v5:sector:sentiment")
                         if isinstance(sector_cache, dict):
-                            yesterday_score = float(sector_cache.get("score", 50.0))
-                            yesterday_signal = sector_cache.get("signal", "B")
+                            sectors_list = sector_cache.get("data", {}).get("sectors", [])
+                            matched = None
+                            for sec in sectors_list:
+                                if str(sec.get("sector_code", "")) == sector_code:
+                                    matched = sec
+                                    break
+                            if matched:
+                                yesterday_score = float(matched.get("sentiment_score", 50.0))
+                                yesterday_signal = matched.get("signal_level", "B")
+                            else:
+                                yesterday_score = 50.0
+                                yesterday_signal = "B"
                         else:
                             yesterday_score = 50.0
                             yesterday_signal = "B"
@@ -2556,10 +2568,21 @@ async def _run_validation_persist() -> None:
                 else:
                     sector_code = meta.get("sector_code")
                     if sector_code and str(sector_code).startswith("801"):
-                        sector_cache = await cache_get(f"v5:sector:sentiment:{sector_code}")
+                        # Fix #6: 读 aggregate key, 从 sectors 列表提取
+                        sector_cache = await cache_get("v5:sector:sentiment")
                         if isinstance(sector_cache, dict):
-                            yesterday_score = float(sector_cache.get("score", 50.0))
-                            yesterday_signal = sector_cache.get("signal", "B")
+                            sectors_list = sector_cache.get("data", {}).get("sectors", [])
+                            matched = None
+                            for sec in sectors_list:
+                                if str(sec.get("sector_code", "")) == sector_code:
+                                    matched = sec
+                                    break
+                            if matched:
+                                yesterday_score = float(matched.get("sentiment_score", 50.0))
+                                yesterday_signal = matched.get("signal_level", "B")
+                            else:
+                                yesterday_score = 50.0
+                                yesterday_signal = "B"
                         else:
                             yesterday_score = 50.0
                             yesterday_signal = "B"
