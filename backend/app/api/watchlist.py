@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.core.database import get_session
 from app.models.user_watchlist import UserWatchlist
+from app.models.fund_mapping import FundMapping
 from app.core.config import settings
 from app.engine.position_rating import calculate_position_ratings_for_all, RATING_CONFIG
 from app.core.redis_client import cache_get, cache_set, cache_delete
@@ -59,22 +60,17 @@ async def get_watchlist(
     if not items:
         return {"code": 0, "data": [], "message": "ok"}
 
-    # 批量查询 fund_mapping 为每只基金附加板块信息
+    # 批量查询 fund_mapping 为每只基金附加板块信息（ORM参数化查询，无SQL注入风险）
     fund_codes = [it.fund_code for it in items]
     sector_map = {}
     try:
-        from sqlalchemy import text as sql_text
-        codes_str = ",".join(["'" + c + "'" for c in fund_codes])
-        stmt_fm = sql_text(
-            "SELECT fund_code, index_code, category, fund_name "
-            "FROM fund_mapping WHERE fund_code IN (" + codes_str + ")"
-        )
+        stmt_fm = select(FundMapping).where(FundMapping.fund_code.in_(fund_codes))
         result_fm = await session.execute(stmt_fm)
-        for row in result_fm.fetchall():
-            sector_map[row[0]] = {
-                "sector_code": row[1],
-                "category": row[2],
-                "mapped_name": row[3] or "",
+        for fm_row in result_fm.scalars().all():
+            sector_map[fm_row.fund_code] = {
+                "sector_code": fm_row.index_code,
+                "category": fm_row.category,
+                "mapped_name": fm_row.fund_name or "",
             }
     except Exception:
         pass

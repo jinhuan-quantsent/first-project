@@ -11,6 +11,7 @@ from app.models.fund_basic import FundBasic
 from app.models.fund_nav import FundNav
 from app.models.nav_history import NavHistory
 from app.models.sector_heatmap_cache import SectorHeatmapCache
+from app.models.fund_mapping import FundMapping
 from app.models.position_rating_fund_map import PositionRatingFundMap
 from app.models.daily_signal_snapshot import DailySignalSnapshot
 from app.models.strategy_validation_log import StrategyValidationLog
@@ -29,6 +30,7 @@ __all__ = [
     "FundNav",
     "NavHistory",
     "SectorHeatmapCache",
+    "FundMapping",
     "PositionRatingFundMap",
     "DailySignalSnapshot",
     "StrategyValidationLog",
