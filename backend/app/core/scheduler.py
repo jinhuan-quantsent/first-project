@@ -646,7 +646,7 @@ async def _prewarm_market_caches() -> None:
             # 直接用HTTP请求本地API来触发缓存写入（最可靠）
             import aiohttp
             async with aiohttp.ClientSession() as session:
-                async with session.get("http://localhost:8000/api/v5/sector/sentiment", timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                async with session.get("http://localhost:8765/api/v5/sector/sentiment", timeout=aiohttp.ClientTimeout(total=120)) as resp:
                     if resp.status == 200:
                         logger.info("[Scheduler]   ✅ sector/sentiment (%.1fs)", time.time() - start)
                     else:
@@ -659,7 +659,7 @@ async def _prewarm_market_caches() -> None:
         start = time.time()
         import aiohttp
         async with aiohttp.ClientSession() as session:
-            async with session.get("http://localhost:8000/api/v5/sector/radar", timeout=aiohttp.ClientTimeout(total=120)) as resp:
+            async with session.get("http://localhost:8765/api/v5/sector/radar", timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status == 200:
                     logger.info("[Scheduler]   ✅ sector/radar (%.1fs)", time.time() - start)
                 else:
@@ -683,7 +683,7 @@ async def _prewarm_market_caches() -> None:
             for sc in sector_codes:
                 try:
                     async with http_session.get(
-                        f"http://localhost:8000/api/v5/market/sector/{sc}",
+                        f"http://localhost:8765/api/v5/market/sector/{sc}",
                         timeout=aiohttp.ClientTimeout(total=30),
                     ) as resp:
                         if resp.status == 200:

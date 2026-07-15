@@ -132,19 +132,22 @@ class PositionService:
         regime 是宏观上下文，影响所有板块基金的仓位调整幅度。
         """
         try:
-            # 先尝试从缓存读取
-            cache_key = "fsa:sentiment:SH000300"
-            cached = await cache_get(cache_key)
-            if cached and isinstance(cached, dict):
-                regime = cached.get("regime")
-                if regime:
-                    return regime
+            # 先尝试从缓存读取（key 带日期后缀，与 sentiment_service.run_pipeline 写入的 key 一致）
+            from datetime import date as _date, timedelta as _td
+            _today = _date.today()
+            for _d in (_today, _today - _td(days=1)):
+                cache_key = f"fsa:sentiment:SH000300:{_d.isoformat()}"
+                cached = await cache_get(cache_key)
+                if cached and isinstance(cached, dict):
+                    regime = cached.get("regime")
+                    if regime:
+                        return regime
         except Exception:
             pass
 
-        # 缓存失败 → 跑沪深300 pipeline（只取 regime）
+        # 缓存失败 → 跑沪深300 pipeline（只取 regime，persist=False 只读不落库）
         try:
-            result = await self.sentiment_service.run_pipeline("SH000300")
+            result = await self.sentiment_service.run_pipeline("SH000300", persist=False)
             return result.get("regime", "sideways")
         except Exception as e:
             logger.warning(f"_get_broad_regime 沪深300 pipeline 失败: {e}")
@@ -199,7 +202,7 @@ class PositionService:
                     f"[V5.2] 基金 {fund_code} → 板块 {fund_source['sector_code']} "
                     f"缓存数据缺失，fallback 到沪深300 pipeline"
                 )
-                broad_result = await self.sentiment_service.run_pipeline("SH000300")
+                broad_result = await self.sentiment_service.run_pipeline("SH000300", persist=False)
                 if "error" not in broad_result:
                     signal_level = broad_result["signal_level"]
                     confidence_stars = broad_result["confidence_stars"]
@@ -213,7 +216,7 @@ class PositionService:
         else:
             # Step 2b: 宽基基金 → 跑宽基 pipeline
             index_code = fund_source["index_code"] or "SH000300"
-            result = await self.sentiment_service.run_pipeline(index_code)
+            result = await self.sentiment_service.run_pipeline(index_code, persist=False)
 
             if "error" in result:
                 return {"code": 500, "data": None, "message": "无法获取市场信号"}
@@ -426,7 +429,7 @@ class PositionService:
         """
         获取 V5.0 定投调整建议
         """
-        result = await self.sentiment_service.run_pipeline(index_code)
+        result = await self.sentiment_service.run_pipeline(index_code, persist=False)
         if "error" in result:
             return {"code": 404, "data": None, "message": result["error"]}
 

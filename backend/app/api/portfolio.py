@@ -1930,18 +1930,27 @@ async def batch_fund_detail(
     """
     from app.core.database import get_session_factory as _get_sf
 
+    # per-fund timeout: 单基金超过 20s 则跳过，避免拖垮整批
+    FUND_DETAIL_TIMEOUT = 20
+
     async def _fetch_one(fc: str) -> tuple[str, dict | None]:
         try:
             sf = _get_sf()
             async with sf() as sess:
-                result = await get_fund_detail_for_portfolio(
-                    fund_code=fc,
-                    user_id=user_id,
-                    session=sess,
+                result = await asyncio.wait_for(
+                    get_fund_detail_for_portfolio(
+                        fund_code=fc,
+                        user_id=user_id,
+                        session=sess,
+                    ),
+                    timeout=FUND_DETAIL_TIMEOUT,
                 )
                 if result.get("code") == 0 and result.get("data"):
                     return (fc, result["data"])
                 return (fc, None)
+        except asyncio.TimeoutError:
+            logger.warning("batch-fund-detail timeout for %s (>%ds), skipped", fc, FUND_DETAIL_TIMEOUT)
+            return (fc, None)
         except Exception as e:
             logger.error("batch-fund-detail error for %s: %s", fc, e)
             return (fc, None)
