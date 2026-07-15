@@ -2974,7 +2974,7 @@ async def _run_validation_deepseek_advice() -> None:
 
     async with AsyncSession(engine) as session:
         # 获取所有活跃持仓
-        portfolio_stmt = select(UserPortfolio).where(UserPortfolio.is_active == True)
+        portfolio_stmt = select(UserPortfolio)
         portfolio_result = await session.execute(portfolio_stmt)
         portfolios = portfolio_result.scalars().all()
 
