@@ -38,7 +38,7 @@ def _load_fund_category_map() -> dict:
             return data
     except Exception as e:
         logger.error(f"❌ 基金分类映射表加载失败: {e}")
-        return {"categories": {}}
+        return {"fund_mapping": []}
 
 
 def _get_fund_category(fund_code: str) -> str:
@@ -49,20 +49,6 @@ def _get_fund_category(fund_code: str) -> str:
             return item.get("category", "unknown")
     logger.warning(f"基金 {fund_code} 未找到分类，默认使用 sector")
     return "sector"
-
-
-def _get_clearance_thresholds(fund_code: str) -> dict:
-    data = _load_fund_category_map()
-    category = _get_fund_category(fund_code)
-    categories = data.get("categories", {})
-    if category in categories:
-        thresholds = categories[category].get("clear_threshold", {})
-        return {
-            "overheat": thresholds.get("overheat", 20.0) / 100,
-            "drawdown": thresholds.get("drawdown", -10.0) / 100,
-            "panic": thresholds.get("panic", 20.0),
-        }
-    return {"overheat": 0.20, "drawdown": -0.10, "panic": 20.0}
 
 
 # ===========================================================

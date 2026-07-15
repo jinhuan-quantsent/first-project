@@ -1,27 +1,4 @@
 {
-  "categories": {
-    "broad": {
-      "clear_threshold": {
-        "overheat": 25.0,
-        "drawdown": -12.0,
-        "panic": 15.0
-      }
-    },
-    "sector": {
-      "clear_threshold": {
-        "overheat": 20.0,
-        "drawdown": -10.0,
-        "panic": 20.0
-      }
-    },
-    "theme": {
-      "clear_threshold": {
-        "overheat": 30.0,
-        "drawdown": -15.0,
-        "panic": 25.0
-      }
-    }
-  },
   "fund_mapping": [
     {
       "code": "008280",
