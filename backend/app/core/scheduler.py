@@ -2933,12 +2933,12 @@ async def _run_validation_deepseek_advice() -> None:
     try:
         # 板块涨跌幅 (使用同花顺接口)
         sector_data = await _fetch_realtime_sector_changes()
-        if sector_data and isinstance(sector_data, list) and len(sector_data) > 0:
+        if sector_data and isinstance(sector_data, dict) and len(sector_data) > 0:
             # 取中位数作为大盘板块涨跌代表
-            chgs = [s.get("chg_pct", 0) for s in sector_data if s.get("chg_pct") is not None]
+            chgs = list(sector_data.values())
             sector_chg_pct = round(sum(chgs) / len(chgs), 2) if chgs else None
             # 取第一个板块名称
-            sector_name = sector_data[0].get("name", "N/A") if sector_data else "N/A"
+            sector_name = list(sector_data.keys())[0] if sector_data else "N/A"
     except Exception as _e:
         logger.warning("[Scheduler] [validation-C] 板块数据获取失败: %s", _e)
 
@@ -3033,9 +3033,10 @@ async def _run_validation_deepseek_advice() -> None:
     fail = 0
     skipped = 0
 
-    for record in records:
+    for fund_code, user_id, preview_data, hl_data, series_data, existing_record, portfolio in tasks:
         try:
             # 2a. 全unavailable→跳过
+            gszzl_source = preview_data.get("gszzl_source", "unavailable")
             if gszzl_source == "unavailable":
                 skipped += 1
                 logger.info("[Scheduler] [validation-C] %s 估值不可用，跳过AI调用", fund_code)
@@ -3165,7 +3166,7 @@ async def _run_validation_deepseek_advice() -> None:
             user_parts.append(
                 f"【今日预演数据】\n"
                 f"基金代码: {fund_code}\n"
-                
+                f"基金名称: {portfolio.fund_name if portfolio else '未知'}\n"
                 f"盘中估值: {gszzl_str}\n"
                 f"预演情绪分: {preview_score_val}\n"
                 f"预演信号: {preview_signal_val}\n"
@@ -3223,7 +3224,7 @@ async def _run_validation_deepseek_advice() -> None:
             sec_str = f"{sector_chg_pct:+.2f}%" if sector_chg_pct is not None else "不可用"
             unrealized_pnl_pct_val = preview_data.get("unrealized_pnl_pct")
             pnl_str = f"{unrealized_pnl_pct_val:+.1f}%" if unrealized_pnl_pct_val is not None else "不可用"
-            cost_basis_val = portfolio.cost_basis if portfolio and hasattr(portfolio, "cost_basis") else None
+            cost_basis_val = portfolio.cost_nav if portfolio else None
             user_parts.append(
                 f"【市场上下文】\n"
                 f"大盘涨跌幅: {mkt_str}\n"
