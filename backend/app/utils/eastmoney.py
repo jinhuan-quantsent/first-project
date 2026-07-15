@@ -244,7 +244,7 @@ async def get_fund_realtime_nav(code: str) -> Optional[float]:
 
     双路冗余策略（借鉴FundVal-Live的Mobile API fallback思路）：
     1. 主路: HTTPS fundgz.1234567.com.cn (JSONP格式)
-    2. 备路: 东方财富Mobile API FundMNFInfo (HTTPS JSON)
+    2. 备路: 东方财富天天基金 Mobile API v2 FundMNewApi/FundMNFInfo (HTTPS JSON, Version=2)
 
     Returns:
         gszzl: float -- 估算涨跌幅百分比(如 1.23 表示涨1.23%)
@@ -290,48 +290,40 @@ async def get_fund_realtime_nav(code: str) -> Optional[float]:
     except Exception as e:
         logger.warning("fundgz主路失败(%s): %s, 尝试Mobile API备路", code, e)
 
-    # -- 备路: 东方财富Mobile API FundMNFInfo (HTTPS JSON) --
+    # -- 备路: 东方财富天天基金新版Mobile API FundMNewApi/FundMNFInfo (HTTPS JSON) --
+    # 旧版 FundMNFInfo.aspx 于2026-07-15确认404已失效，替换为Version=2接口
     if gszzl is None:
-        mobile_url = "https://fundmobapi.eastmoney.com/FundMNFInfo.aspx"
+        mobile_url = "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNFInfo"
         params = {
-            "FCODE": code,
-            "deviceid": "1",
             "plat": "Android",
             "appType": "ttjj",
             "product": "EFund",
-            "version": "1",
-            "FVersion": "1",
-            "OSVersion": "1",
-            "appVersion": "1",
-            "UDID": "1",
+            "Version": "2",
+            "deviceid": "3faa3e88-4b10-44e2-a8b6-5e3695b9adbb",
+            "Fcodes": code,
+        }
+        headers = {
+            "User-Agent": "Android/EFund/6.3.8 (samsung SM-G9810; Android 12; en_US)",
         }
         try:
             async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-                resp = await client.get(mobile_url, params=params)
+                resp = await client.get(mobile_url, params=params, headers=headers)
                 resp.raise_for_status()
-                text = resp.text
+                mobile_data = resp.json()
 
-            # Mobile API返回JSONP或JSON
-            # 尝试JSONP解析
-            mobile_match = re.search(r'jsonpgz\((.+)\);?', text, re.DOTALL)
-            if mobile_match:
-                mobile_data = json.loads(mobile_match.group(1))
+            # 新版返回格式: {Datas: [{FCODE, GSZZL, GSZ, NAV, ...}], ErrCode, Success}
+            datas = mobile_data.get("Datas", [])
+            if isinstance(datas, list) and datas:
+                item = datas[0]
+                raw_gszzl = item.get("GSZZL", None)
+                if raw_gszzl is not None and raw_gszzl != "":
+                    gszzl = float(raw_gszzl)
+                    logger.debug("[MobileAPI-v2] %s gszzl=%.2f%%", code, gszzl)
             else:
-                # 直接JSON
-                mobile_data = json.loads(text)
-
-            # Mobile API字段: GSZZL(估算涨跌幅), GSZ(估算净值), DWJZ(单位净值)
-            expand = mobile_data.get("Expansion", {})
-            if not expand:
-                expand = mobile_data  # 有些版本直接在顶层
-
-            raw_gszzl = expand.get("GSZZL", None)
-            if raw_gszzl is not None and raw_gszzl != "":
-                gszzl = float(raw_gszzl)
-                logger.debug("[MobileAPI] %s gszzl=%.2f%%", code, gszzl)
+                logger.warning("Mobile API v2备路无数据(%s): ErrCode=%s",
+                               code, mobile_data.get("ErrCode"))
         except Exception as e:
-            logger.warning("Mobile API备路失败(%s): %s", code, e)
-
+            logger.warning("Mobile API v2备路失败(%s): %s", code, e)
     # -- 异常值校验 --
     if gszzl is not None and abs(gszzl) > settings.INTRADAY_PREVIEW_GSZZL_ANOMALY_THRESHOLD:
         logger.warning("盘中估值异常(gszzl=%.2f%%), fund=%s, 丢弃", gszzl, code)
