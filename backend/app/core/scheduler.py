@@ -2334,6 +2334,60 @@ async def _fetch_realtime_sector_changes() -> dict[str, float]:
 
     return result
 
+async def _fetch_realtime_market_chg_pct() -> float | None:
+    """
+    获取沪深300实时涨跌幅（盘中实时优先）。
+
+    数据源优先级:
+    1. 腾讯行情 qt.gtimg.cn — T-0 盘中实时，主力（ECS可访问，东财push2从ECS TLS层被封锁）
+    2. 项目既有 get_index_data("SH000300") — T-1 昨日收盘涨跌幅，兜底（盘中不含当日数据）
+
+    返回涨跌幅(%)，如 2.15 / -0.20 / None。
+    """
+    chg_pct = None
+
+    # 优先: 腾讯行情 API（实时，ECS可访问）
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+            r = await client.get("https://qt.gtimg.cn/q=sh000300")
+            r.raise_for_status()
+            # 腾讯返回 GBK 编码的 ~分隔字符串
+            raw_text = r.content.decode("gb18030", errors="replace")
+            for line_seg in raw_text.strip().split(";"):
+                line_seg = line_seg.strip()
+                if not line_seg or "sh000300" not in line_seg.lower():
+                    continue
+                try:
+                    _, val = line_seg.split("=", 1)
+                    val = val.strip().strip('"')
+                    fields = val.split("~")
+                    current = float(fields[3])  # 当前价
+                    yest_close = float(fields[4])  # 昨收
+                    if yest_close and yest_close > 0:
+                        chg_pct = round((current - yest_close) / yest_close * 100, 2)
+                        break
+                except (ValueError, IndexError):
+                    continue
+        if chg_pct is not None:
+            logger.info("[Scheduler] 大盘涨跌幅(腾讯实时): %.2f%%", chg_pct)
+    except Exception as e:
+        logger.warning("[Scheduler] 腾讯行情API获取大盘涨跌幅失败: %s", e)
+
+    # 兜底: 项目既有指数源（T-1 昨日收盘涨跌幅，盘中不含当日数据）
+    if chg_pct is None:
+        try:
+            index_data = await data_source.get_index_data("SH000300")
+            fallback_chg = (index_data or {}).get("change_pct")
+            if fallback_chg is not None:
+                chg_pct = float(fallback_chg)
+                logger.warning("[Scheduler] 大盘涨跌幅降级为T-1(昨日收盘): %.2f%%", chg_pct)
+        except Exception as e:
+            logger.warning("[Scheduler] 大盘涨跌幅兜底获取失败: %s", e)
+
+    return chg_pct
+
+
 
 # ============================================================
 # 策略验证分析表 — 任务A: 14:50预演持久化 + 系统建议
@@ -2377,34 +2431,10 @@ async def _run_validation_persist() -> None:
     # 1. 获取大盘涨跌幅（沪深300）— 盘中实时
     # 修复: 原代码走 data_source.get_all_index_data() 且用 .get("change_pct", 0) 默认0，
     #       盘中14:45今天日线未生成时 change_pct 缺失 → 被伪装成平盘(0%)。
-    #       改用混合策略: 优先东财 push2 实时(盘中当日涨跌幅, f170字段)；
-    #       被限流/失败则降级到项目既有 get_index_data("SH000300")(与 market/snapshot
-    #       同源, 返回真实涨跌幅, 非0)。任何缺失一律返回 None，绝不填 0。
-    market_index_chg_pct = None
-    # 优先: 东财 push2 实时行情(stock/get, secid=1.000300, f170=涨跌幅%)
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
-            r = await client.get(
-                "https://push2.eastmoney.com/api/qt/stock/get",
-                params={"secid": "1.000300", "fields": "f170", "fltt": "2", "invt": "2"},
-            )
-            r.raise_for_status()
-            chg = (r.json().get("data") or {}).get("f170")
-            if chg is not None:
-                market_index_chg_pct = float(chg)
-    except Exception:
-        pass  # 限流/失败 → 降级到下方项目既有源
-    # 兜底: 项目既有指数源(get_index_data, 与 market/snapshot 同源, 返回真实涨跌幅)
-    if market_index_chg_pct is None:
-        try:
-            index_data = await data_source.get_index_data("SH000300")
-            chg = (index_data or {}).get("change_pct")
-            if chg is not None:
-                market_index_chg_pct = float(chg)
-        except Exception as e:
-            logger.warning("[validation-A] 获取沪深300涨跌幅失败: %s", e)
-    # 最终未取到则保持 None（0 会伪装成平盘，必须避免）
+    #       改用混合策略: 优先腾讯行情实时(T-0盘中, qt.gtimg.cn, ECS可访问)；
+    #       失败则降级到项目既有 get_index_data("SH000300")(T-1昨日收盘, 盘中不含当日数据)。
+    #       任何缺失一律返回 None，绝不填 0。原东财push2从ECS TLS层被封锁，已移除。
+    market_index_chg_pct = await _fetch_realtime_market_chg_pct()
 
     # 1b. 获取板块实时涨跌幅（申万一级行业，盘中实时 — 与大盘同口径）
     # 修复: 原从 Redis v5:sector:sentiment 读 sector_return，但该缓存由 15:45 板块评分
@@ -2939,20 +2969,8 @@ async def _run_validation_deepseek_advice() -> None:
     engine = get_async_engine()
 
     # 获取大盘/板块涨跌数据 (解耦后需自行获取，不再依赖validation-A DB记录)
-    market_index_chg_pct = None
-    try:
-        # 沪深300涨跌幅
-        import httpx as _httpx
-        mkt_url = "https://push2.eastmoney.com/api/qt/stock/get?secid=1.000300&fields=f43,f170&ut=fa5fd1943c7b386f172d6893dbfba10b"
-        async with _httpx.AsyncClient(timeout=10) as _client:
-            _resp = await _client.get(mkt_url)
-            _data = _resp.json().get("data", {})
-            if _data:
-                market_index_chg_pct = _data.get("f170")  # 涨跌幅(%)
-                if market_index_chg_pct is not None:
-                    market_index_chg_pct = float(market_index_chg_pct) / 100 if abs(float(market_index_chg_pct)) > 10 else float(market_index_chg_pct)
-    except Exception as _e:
-        logger.warning("[Scheduler] [validation-C] 大盘数据获取失败: %s", _e)
+    # Fix #8: 东财push2从ECS TLS层被封锁→改用腾讯行情API(T-0实时)+get_index_data(T-1兜底)
+    market_index_chg_pct = await _fetch_realtime_market_chg_pct()
 
     try:
         # 板块涨跌幅 (使用同花顺接口)
