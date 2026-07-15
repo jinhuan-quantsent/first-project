@@ -6,7 +6,7 @@
  *
  * 展示逻辑:
  * 1. 14:45 后系统建议写入 → 左列展示
- * 2. 14:47 后 DeepSeek 建议写入 → 右列展示
+ * 2. 14:40 后 DeepSeek 建议写入 → 右列展示
  * 3. 一致性横条: consistent(绿) / partial(黄) / conflict(红)
  * 4. T+1 回验: 展示最近3天有回验结果的记录
  * 5. 无数据时显示"等待14:45系统建议生成"占位
@@ -258,7 +258,7 @@ export default function AIAnalysisPanel({ fundCode }: Props) {
                         )}
                       </div>
                     ) : (
-                      <span className="text-[10px] text-gray-400">等待14:47生成...</span>
+                      <span className="text-[10px] text-gray-400">等待14:40生成...</span>
                     )}
                   </div>
                 </div>

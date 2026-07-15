@@ -20,7 +20,7 @@ from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
-from app.core.auth import get_authenticated_user
+from app.core.auth import get_authenticated_user, get_current_user
 from app.models.daily_signal_snapshot import DailySignalSnapshot
 from app.models.strategy_validation_log import StrategyValidationLog
 from app.models.user_portfolio import UserPortfolio
@@ -844,14 +844,14 @@ async def _compute_validation_amounts(db: AsyncSession, row, today: date) -> dic
 async def get_validation_today(
     fund_code: str,
     db: AsyncSession = Depends(get_session),
-    user_id: str = Depends(get_authenticated_user),
+    user_id: str = Depends(get_current_user),
 ):
     """
     获取指定基金当天的策略验证分析数据（系统建议 + DeepSeek AI建议 + T+1回验）
 
     时间线：
     - 14:45 系统建议写入 system_advice_text
-    - 14:47 DeepSeek AI建议写入 deepseek_advice
+    - 14:40 DeepSeek AI建议写入 deepseek_advice
     - 次日17:35 T+1回验回填 validation_score 等字段
 
     因此当天返回的 T+1回验字段为 NULL，前端展示"等待T+1回验"。

@@ -1431,7 +1431,7 @@ async def _run_intraday_preview_calculate() -> None:
         user_funds[user_id]["funds"].append(fund_code)
         user_funds[user_id]["total_mv"] += float(market_value or 0)
 
-    # 4b. 查询各用户现金余额，加入总资产（与14:47 DeepSeek统一口径）
+    # 4b. 查询各用户现金余额，加入总资产（与14:40 DeepSeek统一口径）
     async with AsyncSession(engine) as session:
         cash_stmt = select(UserCash.user_id, UserCash.cash_amount)
         cash_result = await session.execute(cash_stmt)
@@ -1595,7 +1595,7 @@ async def _run_intraday_preview_calculate() -> None:
                         signal_level=preview_signal,
                         confidence_stars=effective_stars,
                         regime=meta.get("regime", "sideways"),
-                        cash_amount=data.get("cash_amount", 0.0),  # 盘中含现金（与14:47统一）
+                        cash_amount=data.get("cash_amount", 0.0),  # 盘中含现金（与14:40统一）
                         total_assets=total_assets,
                     )
 
@@ -2431,7 +2431,7 @@ async def _run_validation_persist() -> None:
         })
         user_funds[uid]["total_mv"] += float(mv or 0)
 
-    # 2b. 查询各用户现金余额，加入总资产（与14:47 DeepSeek统一口径）
+    # 2b. 查询各用户现金余额，加入总资产（与14:40 DeepSeek统一口径）
     async with AsyncSession(engine) as session:
         cash_stmt = select(UserCash.user_id, UserCash.cash_amount)
         cash_result = await session.execute(cash_stmt)
@@ -3353,7 +3353,7 @@ async def _run_validation_deepseek_advice() -> None:
                     ).order_by(DailySignalSnapshot.id.desc()).limit(1)
                     snap_res = await s.execute(snap_stmt)
                     snap_row = snap_res.scalar_one_or_none()
-                    # FIX: 今天没有则 fallback 到最近一次 snapshot（14:47验证C时今天的尚未生成）
+                    # FIX: 今天没有则 fallback 到最近一次 snapshot（14:40验证C时今天的尚未生成）
                     if snap_row is None:
                         fb_stmt = select(DailySignalSnapshot).where(
                             DailySignalSnapshot.snapshot_date < today,
@@ -4451,7 +4451,7 @@ def init_scheduler() -> AsyncIOScheduler:
 
     scheduler.start()
     logger.info(
-        "[Scheduler] 已启动 — 08:00 早盘补拉 | 14:30/14:45/15:00 实时估值 | 15:30 市场快照 | 15:45 板块快照 | 16:00 因子更新 | 16:05 基金净值(crontab) | 17:00 净值更新 | 17:05 决策快照 | 17:30 缓存刷新 | 22:00 净值复查 | 数据就绪检查 16:30/17:00/17:30/18:00 | 9:30-15:00 盘中预演(5min) | 15:40 预演元数据 | 周五17:35 弹性系数周更 | 15:50 对账校准 | 每周日 22:00 建议验证 | 14:45 策略验证持久化 | 14:47 AI建议 | 17:35 T+1回验"
+        "[Scheduler] 已启动 — 08:00 早盘补拉 | 14:30/14:45/15:00 实时估值 | 15:30 市场快照 | 15:45 板块快照 | 16:00 因子更新 | 16:05 基金净值(crontab) | 17:00 净值更新 | 17:05 决策快照 | 17:30 缓存刷新 | 22:00 净值复查 | 数据就绪检查 16:30/17:00/17:30/18:00 | 9:30-15:00 盘中预演(5min) | 15:40 预演元数据 | 周五17:35 弹性系数周更 | 15:50 对账校准 | 每周日 22:00 建议验证 | 14:45 策略验证持久化 | 14:40 AI建议 | 17:35 T+1回验"
     )
     return scheduler
 
