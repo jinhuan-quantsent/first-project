@@ -147,7 +147,10 @@ def export_analysis_snapshot(conn, target_date: str) -> str | None:
 def main():
     # 日期参数：默认今天，可传参指定
     target_date = sys.argv[1] if len(sys.argv) > 1 else date.today().isoformat()
-    logger.info(f"=== IMA 知识库每日上传开始 (target_date={target_date}) ===")
+    # 分析快照表由 validation-B 在 17:35 生成，日期为 T-1（最近交易日）
+    # 策略验证表由 validation-A 在 14:45 生成，日期为 T（今天）
+    snapshot_date = (date.fromisoformat(target_date) - timedelta(days=1)).isoformat()
+    logger.info(f"=== IMA 知识库每日上传开始 (target_date={target_date}, snapshot_date={snapshot_date}) ===")
 
     os.makedirs(EXPORT_DIR, exist_ok=True)
 
@@ -171,7 +174,7 @@ def main():
                 failed += 1
 
         # ── 2. 分析快照表(全4类) → 因子数据 ──
-        snap_file = export_analysis_snapshot(conn, target_date)
+        snap_file = export_analysis_snapshot(conn, snapshot_date)
         if snap_file:
             try:
                 upload_to_kb(
