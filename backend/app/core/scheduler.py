@@ -2940,8 +2940,6 @@ async def _run_validation_deepseek_advice() -> None:
 
     # 获取大盘/板块涨跌数据 (解耦后需自行获取，不再依赖validation-A DB记录)
     market_index_chg_pct = None
-    sector_chg_pct = None
-    sector_name = None
     try:
         # 沪深300涨跌幅
         import httpx as _httpx
@@ -2960,13 +2958,13 @@ async def _run_validation_deepseek_advice() -> None:
         # 板块涨跌幅 (使用同花顺接口)
         sector_data = await _fetch_realtime_sector_changes()
         if sector_data and isinstance(sector_data, dict) and len(sector_data) > 0:
-            # 取中位数作为大盘板块涨跌代表
-            chgs = list(sector_data.values())
-            sector_chg_pct = round(sum(chgs) / len(chgs), 2) if chgs else None
-            # 取第一个板块名称
-            sector_name = list(sector_data.keys())[0] if sector_data else "N/A"
+            # Fix #7: 获取全行业数据, per-fund循环中按基金sector提取
+            logger.info("[Scheduler] [validation-C] 板块数据获取成功: %d个行业", len(sector_data))
+        else:
+            sector_data = {}
     except Exception as _e:
         logger.warning("[Scheduler] [validation-C] 板块数据获取失败: %s", _e)
+        sector_data = {}
 
     # 1. 获取基金/用户列表 + 从Redis读取预演数据 (解耦: 不依赖validation-A的DB记录)
     from app.core.redis_client import cache_get, cache_set
@@ -3247,7 +3245,18 @@ async def _run_validation_deepseek_advice() -> None:
 
             # 段2: 大盘/板块/持仓
             mkt_str = f"{market_index_chg_pct:+.2f}%" if market_index_chg_pct is not None else "不可用"
-            sec_str = f"{sector_chg_pct:+.2f}%" if sector_chg_pct is not None else "不可用"
+            # Fix #7: per-fund板块涨跌幅, 不是31行业平均
+            fund_sector_code = preview_data.get("sector_code") or ""
+            fund_sector_name = SW_CODE_TO_NAME.get(fund_sector_code, "") if fund_sector_code else ""
+            fund_sector_chg = sector_data.get(fund_sector_name) if fund_sector_name and sector_data else None
+            if fund_sector_chg is not None:
+                sec_str = f"{fund_sector_chg:+.2f}% ({fund_sector_name})"
+            elif sector_data:
+                chgs = list(sector_data.values())
+                avg_chg = round(sum(chgs) / len(chgs), 2) if chgs else None
+                sec_str = f"{avg_chg:+.2f}% (全行业平均)" if avg_chg is not None else "不可用"
+            else:
+                sec_str = "不可用"
             unrealized_pnl_pct_val = preview_data.get("unrealized_pnl_pct")
             pnl_str = f"{unrealized_pnl_pct_val:+.1f}%" if unrealized_pnl_pct_val is not None else "不可用"
             cost_basis_val = portfolio.cost_nav if portfolio else None
@@ -3283,7 +3292,7 @@ async def _run_validation_deepseek_advice() -> None:
                     sc_str = f"{sc:.1f}" if sc is not None else "N/A"
                     aa_str = _aa_map.get(aa, aa or "N/A")
                     sec_lines.append(f"  {sd} | 情绪分 {sc_str} | 信号 {sl or 'N/A'} | 操作 {aa_str}")
-                sec_name = sector_name or preview_data.get("sector_code", "") or "N/A"
+                sec_name = fund_sector_name or preview_data.get("sector_code", "") or "N/A"
                 user_parts.append(
                     f"【近5日板块情绪({sec_name})】\n"
                     + "\n".join(sec_lines)
