@@ -202,17 +202,18 @@ async def _run_sector_snapshot() -> None:
                 },
                 "message": "ok",
             }
+
+            # 先失效旧缓存，再写入新数据（修复自毁bug: 原顺序先写后删导致v5:sector:sentiment被清空）
+            try:
+                await update_data_version("sector")
+                await invalidate_module_cache("sector")
+            except Exception as e:
+                logger.warning("[Scheduler] 版本号更新失败(sector): %s", e)
+
             await cache_set("v5:sector:sentiment", result, ttl=86400)
             logger.info("[Scheduler] 板块情绪已写入 Redis 缓存 — %d 个板块", len(sectors))
         except Exception as e:
             logger.error("[Scheduler] 板块情绪写入 Redis 缓存失败: %s", e)
-
-        # 更新数据版本号 + 失效缓存
-        try:
-            await update_data_version("sector")
-            await invalidate_module_cache("sector")
-        except Exception as e:
-            logger.warning("[Scheduler] 版本号更新失败(sector): %s", e)
 
     except Exception as e:
         logger.error("[Scheduler] 板块快照失败: %s", e)
@@ -3633,12 +3634,12 @@ async def _run_validation_deepseek_advice() -> None:
 
 
 # ============================================================
-# 策略验证分析表 — 任务B: 17:35 T+1回验回填
+# 策略验证分析表 — 任务B: 17:45 T+1回验回填
 # ============================================================
 async def _run_validation_backfill() -> None:
 
     """
-    策略验证-任务B: 17:35 T+1回验回填
+    策略验证-任务B: 17:45 T+1回验回填
 
     处理昨天的strategy_validation_log记录：
     1. 获取昨日实际净值(fund_nav) → 计算actual_nav_change_pct
@@ -4474,18 +4475,19 @@ def init_scheduler() -> AsyncIOScheduler:
         misfire_grace_time=300,
     )
 
-    # 任务 V3：策略验证-T+1回验回填（17:35）
+    # 任务 V3：策略验证-T+1回验回填（17:45，从17:35调整避开17:30缓存刷新）
     scheduler.add_job(
         _run_validation_backfill,
         trigger=CronTrigger(
             day_of_week="mon-fri",
             hour=17,
-            minute=35,
+            minute=45,
             timezone="Asia/Shanghai",
         ),
         id="validation_backfill",
         name="策略验证-T+1回验",
         replace_existing=True,
+        misfire_grace_time=300,
     )
 
     # 任务 5b：每日 08:00 早盘补拉（17:00+22:00 兜底窗口，基金公司延迟发布最终兜底）
@@ -4504,7 +4506,7 @@ def init_scheduler() -> AsyncIOScheduler:
 
     scheduler.start()
     logger.info(
-        "[Scheduler] 已启动 — 08:00 早盘补拉 | 14:30/14:45/15:00 实时估值 | 15:30 市场快照 | 15:45 板块快照 | 16:00 因子更新 | 16:05 基金净值(crontab) | 17:00 净值更新 | 17:05 决策快照 | 17:30 缓存刷新 | 22:00 净值复查 | 数据就绪检查 16:30/17:00/17:30/18:00 | 9:30-15:00 盘中预演(5min) | 15:40 预演元数据 | 周五17:35 弹性系数周更 | 15:50 对账校准 | 每周日 22:00 建议验证 | 14:45 策略验证持久化 | 14:40 AI建议 | 17:35 T+1回验"
+        "[Scheduler] 已启动 — 08:00 早盘补拉 | 14:30/14:45/15:00 实时估值 | 15:30 市场快照 | 15:45 板块快照 | 16:00 因子更新 | 16:05 基金净值(crontab) | 17:00 净值更新 | 17:05 决策快照 | 17:30 缓存刷新 | 22:00 净值复查 | 数据就绪检查 16:30/17:00/17:30/18:00 | 9:30-15:00 盘中预演(5min) | 15:40 预演元数据 | 周五17:35 弹性系数周更 | 15:50 对账校准 | 每周日 22:00 建议验证 | 14:45 策略验证持久化 | 14:40 AI建议 | 17:45 T+1回验"
     )
     return scheduler
 
